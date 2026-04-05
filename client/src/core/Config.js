@@ -1,0 +1,689 @@
+/**
+ * All game constants derived from GAME_DESIGN.md
+ */
+
+// ── Stat Scaling ────────────────────────────────────────────────────
+// Base values are for stat 10 (theoretical max). Each car's real value
+// is  BASE * (carStat / MAX_STAT).  Change the base to retune ALL cars
+// proportionally.  Stat range is 2–8, MAX_STAT = 10.
+export const STAT_BASE = {
+  maxStat: 10,          // denominator for scaling — never change
+  speed: 28,            // u/s at stat 10 → stat 8 = 22.4, stat 3 = 8.4
+  accel: 30,            // u/s² at stat 10 → per-car, proportional to speed stat
+  mass: 10,             // kg at stat 10
+  handling: 5.5,        // handling factor at stat 10
+};
+
+// Computed lookup tables (same shape as before, so nothing else breaks)
+function _buildStatMap() {
+  const m = STAT_BASE.maxStat;
+  const map = { speed: {}, mass: {}, handling: {}, accel: {} };
+  for (let s = 2; s <= 8; s++) {
+    map.speed[s]    = +(STAT_BASE.speed    * s / m).toFixed(1);
+    map.accel[s]    = +(STAT_BASE.accel    * s / m).toFixed(1);
+    map.mass[s]     = +(STAT_BASE.mass     * s / m).toFixed(1);
+    map.handling[s] = +(STAT_BASE.handling * s / m).toFixed(2);
+  }
+  return map;
+}
+export const STAT_MAP = _buildStatMap();
+
+// ── Cars ─────────────────────────────────────────────────────────────
+export const CARS = {
+  FANG: {
+    name: 'FANG',
+    subtitle: 'Muscle Car',
+    stats: { speed: 6, mass: 5, handling: 4 },
+    ability: {
+      name: 'NITRO',
+      description: 'Burst of speed (1.8× for 1.5s)',
+      multiplier: 1.8,
+      duration: 1.5,
+      cooldown: 6,
+    },
+    color: 0xdc143c, // Cherry Red
+    shape: 'muscle',
+  },
+  HORNET: {
+    name: 'HORNET',
+    subtitle: 'Go-Kart',
+    stats: { speed: 7, mass: 2, handling: 6 },
+    ability: {
+      name: 'DASH',
+      description: 'Instant short-range teleport forward (5 units)',
+      distance: 5,
+      cooldown: 4,
+    },
+    color: 0xffd700, // Electric Yellow
+    shape: 'kart',
+  },
+  RHINO: {
+    name: 'RHINO',
+    subtitle: 'Armored Truck',
+    stats: { speed: 3, mass: 8, handling: 4 },
+    ability: {
+      name: 'RAM',
+      description: '2s of infinite mass + slight speed boost',
+      duration: 2,
+      infiniteMass: 999,
+      cooldown: 8,
+    },
+    color: 0x6e7b8b, // Gunmetal Grey
+    shape: 'truck',
+  },
+  VIPER: {
+    name: 'VIPER',
+    subtitle: 'Formula Racer',
+    stats: { speed: 8, mass: 3, handling: 4 },
+    ability: {
+      name: 'TRAIL',
+      description: '3s speed boost (1.5×) + damaging fire trail',
+      multiplier: 1.5,
+      duration: 3,
+      cooldown: 7,
+    },
+    color: 0x39ff14, // Neon Green
+    shape: 'formula',
+  },
+  TOAD: {
+    name: 'TOAD',
+    subtitle: 'Van',
+    stats: { speed: 4, mass: 6, handling: 5 },
+    ability: {
+      name: 'PULSE',
+      description: 'Radial knockback (8 unit radius, strong force)',
+      radius: 8,
+      cooldown: 6,
+    },
+    color: 0x7b2d8b, // Deep Purple
+    shape: 'van',
+  },
+  LYNX: {
+    name: 'LYNX',
+    subtitle: 'Hatchback',
+    stats: { speed: 5, mass: 4, handling: 6 },
+    ability: {
+      name: 'DRIFT',
+      description: '2s zero-friction turning + speed maintained',
+      duration: 2,
+      cooldown: 5,
+    },
+    color: 0x1e90ff, // Ocean Blue
+    shape: 'cabrio',
+  },
+  MAMMOTH: {
+    name: 'MAMMOTH',
+    subtitle: 'Tractor',
+    stats: { speed: 4, mass: 7, handling: 4 },
+    ability: {
+      name: 'LEAP',
+      description: 'Jump up, radial shockwave on landing',
+      shockwaveRadius: 6,
+      shockwaveForce: 200,
+      cooldown: 7,
+    },
+    color: 0xcc5500, // Burnt Orange
+    shape: 'monster',
+  },
+  GHOST: {
+    name: 'GHOST',
+    subtitle: 'Cyber Car',
+    stats: { speed: 6, mass: 3, handling: 6 },
+    ability: {
+      name: 'PHASE',
+      description: '0.8s intangibility (pass through cars)',
+      duration: 0.8,
+      cooldown: 5,
+    },
+    color: 0xe0e8ff, // Ice White
+    shape: 'cyber',
+  },
+};
+
+// Ordered list for UI carousel
+export const CAR_ORDER = ['FANG', 'HORNET', 'RHINO', 'VIPER', 'TOAD', 'LYNX', 'MAMMOTH', 'GHOST'];
+
+// ── Arena (Volcano Flat — single octagonal platform) ─────────────────
+export const ARENA = {
+  shape: 'volcano_flat',
+  diameter: 120,
+
+  lava: {
+    radius: 10,          // central lava pool
+    killTime: 2.0,       // seconds of contact to die
+  },
+
+  // Static rock obstacles (pillars + boulders)
+  rockObstacles: {
+    // Tall pillars near the lava rim
+    pillars: [
+      { angle: 0.4,   dist: 16, height: 5.5, baseRadius: 1.8 },
+      { angle: 1.6,   dist: 18, height: 7.0, baseRadius: 2.0 },
+      { angle: 2.8,   dist: 15, height: 4.5, baseRadius: 1.6 },
+      { angle: 4.2,   dist: 17, height: 6.0, baseRadius: 1.9 },
+      { angle: 5.5,   dist: 19, height: 5.0, baseRadius: 1.7 },
+    ],
+    // Scattered boulders across the arena
+    boulders: [
+      { angle: 0.9,  dist: 28, radius: 2.0 },
+      { angle: 1.2,  dist: 40, radius: 1.5 },
+      { angle: 2.1,  dist: 35, radius: 2.5 },
+      { angle: 2.6,  dist: 22, radius: 1.8 },
+      { angle: 3.3,  dist: 45, radius: 1.4 },
+      { angle: 3.8,  dist: 30, radius: 2.2 },
+      { angle: 4.5,  dist: 38, radius: 1.6 },
+      { angle: 5.0,  dist: 25, radius: 2.0 },
+      { angle: 5.8,  dist: 42, radius: 1.3 },
+      { angle: 0.1,  dist: 50, radius: 1.7 },
+      { angle: 1.8,  dist: 48, radius: 1.9 },
+      { angle: 3.0,  dist: 52, radius: 1.5 },
+    ],
+  },
+
+  // Lava eruptions (radial shockwave from center)
+  eruption: {
+    interval: 20,        // seconds between eruptions
+    warningTime: 2,      // seconds of warning before blast
+    force: 25,           // outward push force
+    radius: 50,          // max reach
+
+    // ── Visual & audio FX ──
+    fx: {
+      // Warning phase (2s before blast)
+      warning: {
+        lavaGlowTarget: 5.0,    // emissive intensity peak
+        lavaGlowSpeed: 2.0,     // how fast glow ramps up
+        bubbleSpeedMult: 3.0,   // lava bubbles accelerate
+        pulseSpeed: 4,          // pulsing frequency during warning
+        pulseAmount: 0.8,       // pulsing amplitude
+      },
+
+      // Lava surge particles (burst upward from pool at eruption)
+      surge: {
+        count: 30,              // particles in the burst
+        size: 1.2,
+        launchSpeed: 18,        // upward velocity
+        launchSpeedVariance: 8,
+        spreadSpeed: 6,         // horizontal spread
+        gravity: 10,
+        lifetime: 2.5,
+      },
+
+      // Debris chunks (larger arcing pieces)
+      debris: {
+        count: 8,               // instanced mesh pool
+        radius: 0.25,
+        launchSpeed: 8,
+        launchSpeedVariance: 4,
+        launchUpSpeed: 12,
+        launchUpVariance: 6,
+        gravity: 10,
+        lifetime: 2.0,
+      },
+
+      // Screen flash (brief white-orange flash at eruption moment)
+      flash: {
+        duration: 0.25,         // seconds
+        color: 0xff6622,
+        maxOpacity: 0.35,
+      },
+
+      // Enhanced shockwave ring
+      ring: {
+        duration: 1.0,          // seconds (was 0.8)
+        segments: 48,
+        innerRadius: 2,
+        outerRadius: 5,
+      },
+
+      // Camera shake
+      cameraShake: {
+        intensity: 0.012,       // 4x stronger than geyser shake
+        duration: 400,          // ms
+        falloffStart: 30,       // distance where shake starts to fade
+        falloffEnd: 60,         // distance where shake is zero
+      },
+    },
+  },
+
+  // Random geysers
+  geysers: {
+    count: 6,            // active geysers at any time
+    lifetime: 3,         // seconds a geyser stays active
+    cooldown: 5,         // seconds before new geyser spawns in that slot
+    radius: 2.5,         // geyser effect radius
+    launchForce: 15,     // upward push
+    warningTime: 1.5,    // seconds of ground glow before eruption
+
+    // ── Visual FX parameters ──
+    fx: {
+      // Steam particles (warning + active phases)
+      steam: {
+        count: 10,             // particles per geyser (perf: reduced from 18)
+        size: 1.4,             // point size (larger to compensate fewer particles)
+        riseSpeed: 2.5,        // base upward speed (units/s)
+        riseSpeedVariance: 1.5,
+        driftSpeed: 0.8,       // horizontal wander
+        spawnRadius: 1.2,      // spread around geyser center
+        lifetime: 1.8,         // seconds per particle
+        lifetimeVariance: 0.8,
+        spawnStagger: 0.6,     // stagger initial spawns over this duration
+        activeSpeedMultiplier: 2.2, // faster during eruption
+        lingerTime: 1.5,       // seconds steam persists into cooldown
+      },
+
+      // Lava fountain particles (active phase)
+      fountain: {
+        count: 20,             // particles per geyser (perf: reduced from 35)
+        size: 0.9,             // point size (larger to compensate)
+        launchSpeed: 12,       // base upward velocity
+        launchSpeedVariance: 5,
+        spreadSpeed: 2.5,      // horizontal spread velocity
+        gravity: 14,           // downward acceleration
+        lifetime: 2.0,
+        lifetimeVariance: 0.6,
+        spawnStagger: 0.4,
+      },
+
+      // Lava droplets (small arcing spheres — InstancedMesh pool)
+      droplets: {
+        countPerGeyser: 4,     // per geyser (perf: reduced from 6)
+        radius: 0.14,          // sphere radius (slightly larger)
+        launchSpeed: 3.5,      // outward horizontal speed
+        launchSpeedVariance: 2.0,
+        launchUpSpeed: 6,      // initial upward speed
+        launchUpVariance: 3,
+        gravity: 12,
+        lifetime: 1.5,
+        scaleMin: 0.7,
+        scaleMax: 1.5,
+      },
+
+      // Splash ring (eruption moment)
+      splash: {
+        duration: 0.6,         // seconds for ring to expand and fade
+        startScale: 0.3,
+        endScale: 3.5,
+        initialOpacity: 0.85,
+      },
+
+      // Multi-layer eruption column
+      column: {
+        layers: 2,             // concentric cylinders (perf: reduced from 3)
+        baseRadius: 0.9,       // inner column radius
+        height: 7,             // column height
+        opacities: [0.85, 0.35], // per layer (inner → outer)
+        radiusScale: [1.0, 2.0],  // per layer multiplier
+        wobbleSpeed: 3.5,      // oscillation frequency
+        wobbleAmount: 0.15,    // lateral sway
+        riseSpeed: 4.0,        // how fast column appears (scale Y per second)
+        shrinkSpeed: 3.0,      // how fast column disappears
+      },
+
+      // Ground crack pattern (warning phase) — single merged mesh per geyser
+      cracks: {
+        count: 5,              // radial crack lines (merged into one mesh)
+        length: 2.8,           // how far cracks extend
+        width: 0.08,
+        height: 0.04,
+        growSpeed: 2.5,        // scale growth rate during warning
+      },
+
+      // Warning ring (pulsing ground ring)
+      warningRing: {
+        innerRadius: 1.8,
+        outerRadius: 2.3,
+        pulseSpeed: 6,         // oscillation frequency
+        pulseAmount: 0.15,     // scale variation
+      },
+
+      // Shared geyser lights (2 pooled lights, not 6)
+      light: {
+        poolSize: 2,           // max simultaneous lights (perf: was 6)
+        warningColor: 0xff6600,
+        warningIntensity: 1.2,
+        activeColor: 0xff4400,
+        activeIntensity: 3.0,
+        range: 10,
+        height: 2.5,
+        flickerSpeed: 8,
+        flickerAmount: 0.3,
+        fadeOutTime: 1.0,      // seconds to fade during cooldown
+      },
+
+      // Scorch mark (burned ground)
+      scorch: {
+        radius: 3.0,           // scorch mark size
+        fadeDelay: 2.0,        // seconds before fading starts
+        fadeDuration: 3.0,     // seconds to fully fade
+        emissiveIntensity: 1.2,
+        emissiveFadeSpeed: 0.5, // emissive dims faster than texture
+      },
+
+      // Camera shake (only when geyser is near player)
+      cameraShake: {
+        maxDistance: 15,        // beyond this, no shake
+        intensity: 0.003,      // shake magnitude
+        duration: 150,         // milliseconds
+      },
+    },
+  },
+
+  boostPadCount: 8,
+  boostPadImpulse: 10,
+  boostPadCooldownPerCar: 1,
+  powerupPedestalCount: 6,
+  powerupRespawnTime: 8,
+};
+
+// ── Theme (Volcano palette) ─────────────────────────────────────────
+export const THEME = {
+  surface: 0x2a1a0e,
+  surfaceLight: 0x3a2a1e,
+  rockColor: 0x1a1a1a,
+  lavaColor: 0xff4400,
+  lavaEmissive: 0xff2200,
+  edgeGlow: 0xff4400,
+  edgeTube: 0xff6600,
+  ambientColor: 0x331100,
+  sunColor: 0xffaa66,
+  fogColor: 0x1a0e08,
+  skyBackground: 0x1a0e08,
+  boostPad: 0xffcc00,
+  ember: 0xff6600,
+  geyserWarning: 0xff6600,
+  geyserActive: 0xff3300,
+};
+
+// ── Scoring ──────────────────────────────────────────────────────────
+export const SCORING = {
+  hit:          10,   // >5 u/s relative velocity
+  bigHit:       25,   // >15 u/s
+  megaHit:      50,   // >25 u/s
+  knockOff:    100,
+  fallOff:     -50,
+  powerupKill:  30,
+  abilityKO:    75,
+  hitThresholds: {
+    normal: 3,
+    big: 9,
+    mega: 16,
+  },
+};
+
+// ── Round / Timing ───────────────────────────────────────────────────
+export const ROUND = {
+  lobbyMin: 5,        // seconds
+  lobbyMax: 30,
+  countdown: 3,
+  playTime: 90,
+  resultsTime: 8,
+  noRespawnLastSeconds: 10,
+};
+
+// ── Respawn ──────────────────────────────────────────────────────────
+export const RESPAWN = {
+  deathCamDuration: 2,     // seconds
+  invincibilityDuration: 1.5,
+  fallOffY: -5,            // Y threshold for "fell off"
+};
+
+// ── KO Attribution ───────────────────────────────────────────────────
+export const KO_ATTRIBUTION = {
+  windowSeconds: 3, // lastHitBy must be within this window
+};
+
+// ── Physics ──────────────────────────────────────────────────────────
+export const PHYSICS = {
+  maxVelocity: 45,        // u/s global cap (lowered to match new speed range)
+  networkSendRate: 20,    // Hz
+};
+
+// ── Car Feel — visual + handling dynamics ─────────────────────────────
+// Arcade bicycle model: angular velocity = speed * tan(steerAngle) / wheelbase.
+// At zero speed → zero turning. Feels like a real car, not a hovercraft.
+export const CAR_FEEL = {
+  // ── Rear-axle bicycle model ──
+  // The car pivots around the rear axle. Front wheels steer, rear wheels drive.
+  // angularVel = speed * tan(steerAngle) / wheelbase, capped for sanity.
+  wheelbase: 1.4,            // virtual axle distance (u) — shorter = tighter arcade turns
+  rearAxleOffset: 0.1,       // how far back the pivot is from body center (u)
+  driftPivotOffset: -0.7,    // pivot during drift: negative = front pivot (tail swings out)
+  maxSteerAngle: 0.55,       // max front wheel angle (rad, ~31.5°) — tan(0.55)≈0.61
+  maxAngularVel: 5.0,        // hard cap (rad/s) — ~0.8 rev/s max, snappy arcade turning
+  steerSpeed: 10.0,          // how fast the wheel reaches target angle
+  steerReturnSpeed: 12.0,    // how fast the wheel self-centers
+  // High-speed steering reduction: at top speed, max steer angle is scaled by this
+  highSpeedSteerFactor: 0.7,
+  // Minimum speed to produce any turning
+  minTurnSpeed: 0.5,         // u/s — very low, turning kicks in almost immediately
+
+  // Acceleration — per-car value from STAT_MAP.accel (this is now the fallback only)
+  accelRate: 18,             // u/s² fallback (per-car overrides via CarBody.accelRate)
+  accelFalloffStart: 0.65,   // start tapering at 65% of max speed
+  accelFalloffMin: 0.2,      // at max speed, accel is 20% of base
+
+  // Braking
+  brakeDecel: 45,            // u/s² (scaled down with new speed range)
+  reverseAccel: 15,          // u/s²
+  reverseMaxFactor: 0.35,    // max reverse speed = 35% of forward max
+
+  // Coasting
+  coastDecel: 14,            // u/s² (scaled down with new speed range)
+
+  // Lateral grip
+  lateralGrip: 0.82,         // base lateral grip (straight line)
+  turnSlideAmount: 0.45,     // how much grip drops during hard turns (0=none, 1=full slide)
+
+  // Turn speed reduction — cars slow into hard turns (arcade cornering)
+  turnSpeedReduction: 0.12,  // max speed reduction factor when turning hard (12%)
+  turnReductionPower: 2.0,   // quadratic curve: light turns barely slow
+
+  // Drift mode tuning
+  driftBlend: 4.0,           // velocity blend rate during drift (responsive but slidey)
+  driftCoastFactor: 0.15,    // coast decel multiplier during drift (maintains speed)
+
+  // Visual body roll on turning (applied to mesh, not physics)
+  roll: {
+    maxAngle: 0.06,          // ~3.4° max roll
+    speedInfluence: 1.0,
+    massDamping: 0.4,
+    smoothing: 10,
+  },
+
+  // Visual pitch on accel/brake (applied to mesh, not physics)
+  pitch: {
+    accelAngle: -0.015,      // ~0.9° nose-up on accel
+    brakeAngle: 0.03,        // ~1.7° nose-down on brake
+    smoothing: 8,
+  },
+
+  // ── Dynamic camera ──
+  camera: {
+    followDist: 6,
+    height: 3.5,
+    lookAhead: 5,
+    followSmoothing: 0.07,
+
+    baseFOV: 50,
+    maxFOVBoost: 18,
+    fovSmoothing: 4,
+
+    steerOffsetMax: 1.8,
+    steerOffsetSmoothing: 5,
+
+    steerTiltMax: 0.025,
+    steerTiltSmoothing: 6,
+
+    speedPullback: 5,
+  },
+};
+
+// ── Engine Audio ─────────────────────────────────────────────────────
+// Procedural engine sounds — each car type has a unique sonic profile.
+// baseFreq: fundamental oscillator pitch at idle (Hz)
+// maxFreq: pitch at full speed (Hz)
+// oscillators: array of { type, freqRatio, gain } — layered harmonics
+// noiseGain: filtered noise level (mechanical rumble)
+// noiseLPF: low-pass cutoff for noise (Hz)
+// volume: base gain for this car's engine
+export const ENGINE_AUDIO = {
+  masterVolume: 0.07,            // overall engine volume (background level)
+  localBoost: 2.0,               // local player volume multiplier
+  spatialMaxDist: 50,            // beyond this, bot engine is silent
+  spatialRefDist: 8,             // distance where bot volume is 1.0
+  rpmSmoothing: 8,               // how fast pitch tracks speed (higher = faster)
+  toneLPF: 1200,                 // master low-pass filter cutoff to soften harsh harmonics
+
+  profiles: {
+    FANG: {
+      // Muscle car — deep V8 rumble, two-stroke pulse feel
+      baseFreq: 55, maxFreq: 180,
+      oscillators: [
+        { type: 'sawtooth', freqRatio: 1.0, gain: 0.12, detune: -5 },
+        { type: 'square', freqRatio: 0.5, gain: 0.08, detune: 3 },
+        { type: 'sawtooth', freqRatio: 2.0, gain: 0.03, detune: -8 },
+      ],
+      noiseGain: 0.025, noiseLPF: 350,
+      toneLPF: 900, // darker muscle car tone
+    },
+    HORNET: {
+      // Go-kart — small engine, high-pitched buzz
+      baseFreq: 120, maxFreq: 440,
+      oscillators: [
+        { type: 'square', freqRatio: 1.0, gain: 0.09, detune: 4 },
+        { type: 'square', freqRatio: 2.01, gain: 0.06, detune: -6 },
+        { type: 'sawtooth', freqRatio: 3.0, gain: 0.02, detune: 7 },
+      ],
+      noiseGain: 0.012, noiseLPF: 1600,
+      toneLPF: 1800,
+    },
+    RHINO: {
+      // Armored truck — heavy diesel, low throb
+      baseFreq: 38, maxFreq: 110,
+      oscillators: [
+        { type: 'sawtooth', freqRatio: 1.0, gain: 0.13, detune: -3 },
+        { type: 'triangle', freqRatio: 0.5, gain: 0.09, detune: 5 },
+        { type: 'square', freqRatio: 1.5, gain: 0.03, detune: -7 },
+      ],
+      noiseGain: 0.035, noiseLPF: 280,
+      toneLPF: 700,
+    },
+    VIPER: {
+      // Formula racer — high-revving scream
+      baseFreq: 100, maxFreq: 520,
+      oscillators: [
+        { type: 'sawtooth', freqRatio: 1.0, gain: 0.09, detune: 6 },
+        { type: 'sawtooth', freqRatio: 2.0, gain: 0.06, detune: -4 },
+        { type: 'sine', freqRatio: 4.0, gain: 0.02, detune: 0 },
+      ],
+      noiseGain: 0.018, noiseLPF: 2500,
+      toneLPF: 2200, // brighter for racer whine
+    },
+    TOAD: {
+      // Van — mid-range flat engine tone
+      baseFreq: 65, maxFreq: 180,
+      oscillators: [
+        { type: 'triangle', freqRatio: 1.0, gain: 0.10, detune: -4 },
+        { type: 'square', freqRatio: 1.0, gain: 0.05, detune: 6 },
+        { type: 'sawtooth', freqRatio: 2.0, gain: 0.02, detune: -3 },
+      ],
+      noiseGain: 0.025, noiseLPF: 450,
+      toneLPF: 1000,
+    },
+    LYNX: {
+      // Sporty hatchback — 4-cylinder punchy
+      baseFreq: 80, maxFreq: 340,
+      oscillators: [
+        { type: 'sawtooth', freqRatio: 1.0, gain: 0.09, detune: 5 },
+        { type: 'square', freqRatio: 2.0, gain: 0.05, detune: -7 },
+        { type: 'triangle', freqRatio: 0.5, gain: 0.04, detune: 3 },
+      ],
+      noiseGain: 0.018, noiseLPF: 700,
+      toneLPF: 1400,
+    },
+    MAMMOTH: {
+      // Tractor — slow deep diesel chug
+      baseFreq: 30, maxFreq: 85,
+      oscillators: [
+        { type: 'sawtooth', freqRatio: 1.0, gain: 0.14, detune: -6 },
+        { type: 'square', freqRatio: 0.5, gain: 0.09, detune: 4 },
+        { type: 'triangle', freqRatio: 1.5, gain: 0.03, detune: -5 },
+      ],
+      noiseGain: 0.04, noiseLPF: 220,
+      toneLPF: 600, // very dark, rumbly
+    },
+    GHOST: {
+      // Cyber car — electric whine, sine-heavy
+      baseFreq: 150, maxFreq: 800,
+      oscillators: [
+        { type: 'sine', freqRatio: 1.0, gain: 0.10, detune: 2 },
+        { type: 'sine', freqRatio: 2.01, gain: 0.06, detune: -3 },
+        { type: 'triangle', freqRatio: 0.5, gain: 0.02, detune: 5 },
+      ],
+      noiseGain: 0.006, noiseLPF: 4000,
+      toneLPF: 3500, // cleanest/brightest — electric car
+    },
+  },
+};
+
+// ── Collision Filter Groups (bitmask) ────────────────────────────────
+export const COLLISION_GROUPS = {
+  ARENA:  1,
+  CAR:    2,
+  PICKUP: 4,
+  TRAIL:  8,
+};
+
+// ── Power-ups ────────────────────────────────────────────────────────
+export const POWERUPS = {
+  ROCKET_BOOST: {
+    name: 'Rocket Boost',
+    color: 0xff8c00, // Orange
+    speedMultiplier: 2,
+    duration: 2,
+  },
+  SHOCKWAVE: {
+    name: 'Shockwave',
+    color: 0x1e90ff, // Blue
+    radius: 15,
+    duration: 0, // instant
+  },
+  SHIELD: {
+    name: 'Shield',
+    color: 0x32cd32, // Green
+    massMultiplier: 2,
+    duration: 4,
+  },
+  MAGNET: {
+    name: 'Magnet',
+    color: 0x9b30ff, // Purple
+    radius: 8,
+    duration: 3,
+  },
+};
+
+// ── Shield vs RAM ────────────────────────────────────────────────────
+export const SHIELD_VS_RAM = {
+  forceAbsorption: 0.5, // Shield absorbs 50% of RAM force
+};
+
+// ── Players / Bots ───────────────────────────────────────────────────
+export const PLAYERS = {
+  maxPerRoom: 8,
+  nicknameMaxLength: 12,
+  nicknameDefault: 'PLAYER',
+};
+
+export const BOTS = {
+  names: ['TURBO', 'BLAZE', 'NITRO', 'CRASH', 'FURY', 'BOLT', 'HAVOC', 'STORM'],
+  personalities: ['Aggressive', 'Defensive', 'Kamikaze', 'Hunter'],
+};
+
+// ── Game States ──────────────────────────────────────────────────────
+export const GAME_STATES = {
+  LOBBY: 'LOBBY',
+  COUNTDOWN: 'COUNTDOWN',
+  PLAYING: 'PLAYING',
+  RESULTS: 'RESULTS',
+};

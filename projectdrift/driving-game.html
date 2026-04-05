@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="it" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DRIFT ZERO — 3D Driving</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --font-display: 'Orbitron', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --color-bg: #0a0c10;
+  --color-surface: rgba(255,255,255,0.06);
+  --color-border: rgba(255,255,255,0.12);
+  --color-text: #e8eaf0;
+  --color-muted: #7a7f96;
+  --color-primary: #00e5ff;
+  --color-warn: #ffaa22;
+  --radius-md: 8px; --radius-lg: 12px;
+  --transition: 200ms cubic-bezier(0.16,1,0.3,1);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width:100%; height:100%; overflow:hidden; background: var(--color-bg); }
+body { font-family: var(--font-body); color: var(--color-text); }
+canvas { display: block; }
+.screen {
+  position: fixed; inset: 0; z-index: 20;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  background: rgba(5,7,14,0.93);
+  backdrop-filter: blur(8px);
+  gap: 16px;
+  transition: opacity var(--transition);
+}
+.screen.hidden { opacity:0; pointer-events:none; }
+.game-title {
+  font-family: var(--font-display);
+  font-size: clamp(2rem,6vw,4rem); font-weight: 900;
+  color: var(--color-primary);
+  text-shadow: 0 0 40px rgba(0,229,255,0.5);
+  letter-spacing: 0.1em; line-height: 1.1; text-align: center;
+}
+.subtitle { font-size: 13px; color: var(--color-muted); letter-spacing: 0.05em; text-transform: uppercase; }
+.btn {
+  font-family: var(--font-display); font-size: 13px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 12px 32px; border-radius: var(--radius-md);
+  border: 1.5px solid var(--color-primary);
+  background: rgba(0,229,255,0.1); color: var(--color-primary);
+  cursor: pointer; transition: background var(--transition), box-shadow var(--transition);
+}
+.btn:hover { background: rgba(0,229,255,0.2); box-shadow: 0 0 20px rgba(0,229,255,0.3); }
+.btn:active { background: rgba(0,229,255,0.3); }
+.ctrl-grid { display: grid; grid-template-columns: auto auto; gap: 6px 16px; font-size: 13px; color: var(--color-muted); }
+.key {
+  display:inline-block; background: var(--color-surface);
+  border: 1px solid var(--color-border); border-radius: 4px;
+  padding: 1px 7px; font-size: 11px; font-family: monospace; color: var(--color-text);
+}
+.divider { width: 200px; height:1px; background: var(--color-border); }
+#hud { position: fixed; inset: 0; z-index: 10; pointer-events: none; }
+.hud-panel {
+  position: absolute;
+  background: rgba(8,10,16,0.78); backdrop-filter: blur(6px);
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+  padding: 12px 16px;
+}
+#hud-speed { bottom: 24px; right: 24px; text-align: right; }
+#hud-speed .spd { font-family: var(--font-display); font-size: clamp(2rem,5vw,3rem); font-weight: 900; color: var(--color-primary); font-variant-numeric: tabular-nums; line-height: 1; }
+#hud-speed .unit { font-size: 10px; color: var(--color-muted); text-transform: uppercase; letter-spacing: 0.1em; }
+.pbar-wrap { width: 120px; height: 5px; background: var(--color-surface); border-radius: 3px; overflow: hidden; margin-top: 5px; }
+.pbar { height: 100%; border-radius: 3px; background: var(--color-primary); transition: width 0.08s ease; }
+#hud-info { top: 18px; left: 50%; transform: translateX(-50%); display: flex; gap: 24px; }
+.hi { text-align: center; }
+.hl { font-size: 9px; color: var(--color-muted); text-transform: uppercase; letter-spacing: 0.1em; }
+.hv { font-family: var(--font-display); font-size: 20px; font-weight: 700; color: var(--color-text); font-variant-numeric: tabular-nums; }
+#hud-gear { bottom: 24px; left: 24px; text-align: center; }
+#hud-gear .gv { font-family: var(--font-display); font-size: 2rem; font-weight: 900; color: var(--color-warn); }
+#dbg {
+  position:fixed;top:0;left:0;z-index:99999;
+  background:rgba(0,0,0,.82);color:#0f0;
+  font:11px/1.6 monospace;padding:5px 9px;
+  pointer-events:none;white-space:pre;
+}
+
+/* ── PANNELLO PARAMETRI ─────────────────────────── */
+#params-panel {
+  position: fixed; top: 50%; right: 0;
+  transform: translateY(-50%);
+  z-index: 30;
+  display: flex; align-items: stretch;
+}
+#params-toggle {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  background: rgba(0,229,255,0.12);
+  border: 1px solid rgba(0,229,255,0.35);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  color: var(--color-primary);
+  font-family: var(--font-display);
+  font-size: 11px; font-weight: 700;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  padding: 14px 7px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+#params-toggle:hover { background: rgba(0,229,255,0.22); }
+#params-body {
+  width: 260px;
+  background: rgba(8,10,18,0.96);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(0,229,255,0.2);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  overflow-y: auto;
+  max-height: 80vh;
+  padding: 14px 14px 18px;
+  transition: width var(--transition), opacity var(--transition), padding var(--transition);
+}
+#params-body.collapsed {
+  width: 0; opacity: 0; padding: 0; pointer-events: none; overflow: hidden;
+}
+.param-section { margin-bottom: 14px; }
+.param-section-title {
+  font-family: var(--font-display);
+  font-size: 9px; font-weight: 700;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--color-primary);
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(0,229,255,0.15);
+}
+.param-row { margin-bottom: 9px; }
+.param-label {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 3px;
+}
+.param-name {
+  font-family: monospace; font-size: 11px;
+  color: var(--color-text); font-weight: 600;
+}
+.param-val {
+  font-family: var(--font-display);
+  font-size: 11px; color: var(--color-primary);
+  font-variant-numeric: tabular-nums;
+  min-width: 44px; text-align: right;
+}
+.param-slider {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 4px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 2px; outline: none; cursor: pointer;
+}
+.param-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 0 6px rgba(0,229,255,0.5);
+  cursor: pointer;
+}
+.param-slider::-moz-range-thumb {
+  width: 14px; height: 14px; border: none; border-radius: 50%;
+  background: var(--color-primary); cursor: pointer;
+}
+.param-hint { font-size: 9px; color: var(--color-muted); margin-top: 1px; }
+.preset-row {
+  display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;
+}
+.preset-btn {
+  font-family: var(--font-display); font-size: 9px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 5px 9px; border-radius: 4px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface); color: var(--color-muted);
+  cursor: pointer; transition: all var(--transition);
+}
+.preset-btn:hover { border-color: var(--color-primary); color: var(--color-primary); background: rgba(0,229,255,0.08); }
+
+</style>
+</head>
+<body>
+
+<!-- TITLE -->
+<div class="screen" id="scr-title">
+  <div class="game-title">DRIFT<br>ZERO</div>
+  <div class="subtitle">3D Driving — Three.js Demo</div>
+  <div class="divider"></div>
+  <div class="ctrl-grid">
+    <span><span class="key">W</span>/<span class="key">↑</span></span><span>Accelera</span>
+    <span><span class="key">S</span>/<span class="key">↓</span></span><span>Frena / Retro</span>
+    <span><span class="key">A</span><span class="key">D</span></span><span>Sterza</span>
+    <span><span class="key">R</span></span><span>Reset posizione</span>
+    <span><span class="key">ESC</span></span><span>Pausa</span>
+  </div>
+  <div class="divider"></div>
+  <button class="btn" id="btn-start">Inizia Gara</button>
+</div>
+
+<!-- PAUSE / END -->
+<div class="screen hidden" id="scr-pause">
+  <div class="game-title" id="pause-title" style="font-size:2rem">PAUSA</div>
+  <div id="finish-info" style="font-family:var(--font-display);font-size:1.1rem;color:#00e5ff;display:none;text-align:center"></div>
+  <button class="btn" id="btn-resume">Riprendi</button>
+  <button class="btn" id="btn-restart" style="border-color:var(--color-muted);color:var(--color-muted)">Ricomincia</button>
+</div>
+
+<!-- HUD -->
+<div id="hud">
+  <div class="hud-panel" id="hud-speed">
+    <div class="spd" id="spd">0</div>
+    <div class="unit">km/h</div>
+    <div class="pbar-wrap"><div class="pbar" id="pbar" style="width:0%"></div></div>
+  </div>
+  <div class="hud-panel" id="hud-info">
+    <div class="hi"><div class="hl">Giri</div><div class="hv" id="hv-laps">0/3</div></div>
+    <div class="hi"><div class="hl">Tempo</div><div class="hv" id="hv-time">0:00.0</div></div>
+    <div class="hi"><div class="hl">CP</div><div class="hv" id="hv-cp">0</div></div>
+  </div>
+  <div class="hud-panel" id="hud-gear">
+    <div class="hl">Marcia</div>
+    <div class="gv" id="hv-gear">N</div>
+  </div>
+</div>
+<div id="dbg">Caricamento...</div>
+
+<script type="module">
+import * as THREE from 'https://esm.sh/three@0.169.0';
+
+// =====================================================================
+//  VARIABILI — il "dizionario" di un driving game 3D
+// =====================================================================
+
+// 1. AUTO — ogni variabile controlla un aspetto della fisica
+const CAR = {
+  // POSIZIONE E ORIENTAMENTO
+  position: new THREE.Vector3(0, 0.42, 0),
+  heading:  0,          // radianti: angolo di rotazione sull'asse Y (0=nord, PI=sud)
+
+  // CINEMATICA
+  speed:    0,          // velocità scalare m/s (+ avanti, negativo = retro)
+  velocity: new THREE.Vector3(), // vettore velocità reale (usato per il drift)
+
+  // PARAMETRI FISICI — cambia questi numeri per il "feel" dell'auto
+  maxSpeed:        28,   // m/s forward  (~100 km/h)
+  maxSpeedReverse: 8,    // m/s backward (~29 km/h)
+  accelForce:      18,   // m/s² accelerazione
+  brakeForce:      30,   // m/s² frenata
+  drag:            0.970,// attrito aerodinamico per frame (1=no drag)
+  groundFriction:  0.910,// attrito al suolo quando rilasci il gas
+
+  // STERZO
+  steerAngle:   0,      // angolo sterzo attuale (rad)
+  maxSteer:     0.042,  // massimo angolo per frame
+  steerReturn:  0.09,   // velocità ritorno sterzo a 0
+  steerAtSpeed: 0.60,   // riduzione sterzo ad alta velocità (understeer)
+
+  // DRIFT — lateralFriction < 1 fa scivolare l'auto di lato
+  lateralFriction: 0.87,
+
+  // STATO INTERNO
+  gear:     'N',
+  mesh:     null,
+  wheels:   [],
+  wheelRot: 0,
+};
+
+// 2. CAMERA — segue l'auto da dietro
+const CAM = {
+  followDist:   8.5, // distanza orizzontale dall'auto
+  followHeight: 3.2, // altezza sopra l'auto
+  smooth:       0.08,// lerp factor (0=istantaneo, 0.5=molto morbido)
+  lookAhead:    4.0, // guarda N metri avanti rispetto all'auto
+};
+
+// 3. PERCORSO — array di posizioni che formano il circuito
+const CHECKPOINTS = [
+  new THREE.Vector3(   0, 0,   0),
+  new THREE.Vector3(  55, 0,   0),
+  new THREE.Vector3(  80, 0, -38),
+  new THREE.Vector3(  80, 0,-102),
+  new THREE.Vector3(  42, 0,-132),
+  new THREE.Vector3( -16, 0,-132),
+  new THREE.Vector3( -72, 0,-102),
+  new THREE.Vector3( -82, 0, -48),
+  new THREE.Vector3( -60, 0,   6),
+  new THREE.Vector3( -18, 0,  30),
+];
+const CP_RADIUS = 18; // raggio di raccolta checkpoint (m)
+
+// 4. STATO PARTITA
+const GAME = {
+  phase:      'title',  // 'title' | 'playing' | 'paused' | 'finished'
+  laps:       0,
+  maxLaps:    3,
+  checkpoint: 0,        // indice del prossimo CP da raccogliere
+  startTime:  0,
+  elapsed:    0,
+};
+
+// 5. INPUT — mappa tasti → booleani
+const KEYS = { up:false, down:false, left:false, right:false, reset:false };
+
+// =====================================================================
+//  THREE.JS RENDERER + SCENA
+// =====================================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+scene.fog    = new THREE.FogExp2(0x050810, 0.011);
+const camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.1, 500);
+
+// Luci
+const sun = new THREE.DirectionalLight(0xfff0dd, 2.2);
+sun.position.set(80, 120, 40);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, {left:-180,right:180,top:180,bottom:-180,near:1,far:500});
+scene.add(sun);
+scene.add(new THREE.AmbientLight(0x1a2035, 1.6));
+const fill = new THREE.DirectionalLight(0x204060, 0.9);
+fill.position.set(-40, 20, -60);
+scene.add(fill);
+
+// Piano con texture a scacchiera
+const chkTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 512;
+  const ctx = c.getContext('2d');
+  for(let y=0;y<8;y++) for(let x=0;x<8;x++) {
+    ctx.fillStyle = (x+y)%2===0 ? '#191d28' : '#131620';
+    ctx.fillRect(x*64, y*64, 64, 64);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(22, 22);
+  return t;
+})();
+const gnd = new THREE.Mesh(
+  new THREE.PlaneGeometry(600, 600),
+  new THREE.MeshStandardMaterial({ map: chkTex, roughness: 0.95 })
+);
+gnd.rotation.x = -Math.PI/2; gnd.receiveShadow = true;
+scene.add(gnd);
+
+// Pista
+(()=>{
+  const pts = [...CHECKPOINTS, CHECKPOINTS[0]];
+  const curve = new THREE.CatmullRomCurve3(
+    pts.map(p => new THREE.Vector3(p.x, 0.02, p.z)), true
+  );
+  const W = 14;
+  const asph = new THREE.Mesh(
+    new THREE.TubeGeometry(curve, 320, W/2, 4, true),
+    new THREE.MeshStandardMaterial({color:0x1c2030, roughness:0.9})
+  );
+  asph.receiveShadow = true; scene.add(asph);
+  scene.add(new THREE.Mesh(
+    new THREE.TubeGeometry(curve, 320, W/2+0.2, 3, true),
+    new THREE.MeshStandardMaterial({color:0xdddddd, roughness:1})
+  ));
+  const dpts = curve.getPoints(400).filter((_,i)=>i%6===0);
+  scene.add(new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(dpts),
+    new THREE.LineBasicMaterial({color:0xffff80})
+  ));
+})();
+
+// Checkpoint rings (portali)
+CHECKPOINTS.forEach((cp, i) => {
+  const col = i===0 ? 0x00e676 : 0x00e5ff;
+  const m = new THREE.Mesh(
+    new THREE.TorusGeometry(3.2, 0.2, 8, 48),
+    new THREE.MeshStandardMaterial({color:col, emissive:col, emissiveIntensity:0.6, metalness:0.8, roughness:0.3})
+  );
+  m.position.set(cp.x, 3.2, cp.z);
+  m.rotation.y = Math.PI/2;
+  m.userData.cpIndex = i;
+  scene.add(m);
+});
+
+// Auto (low-poly stylized)
+(()=>{
+  const g = new THREE.Group();
+  const bm = new THREE.MeshStandardMaterial({color:0xe02020, roughness:0.3, metalness:0.7});
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.55, 3.8), bm);
+  body.position.y = 0.35; body.castShadow = true; g.add(body);
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.45, 2.0), bm);
+  cab.position.set(0, 0.85, -0.1); cab.castShadow = true; g.add(cab);
+  const gm = new THREE.MeshStandardMaterial({color:0x88ccff,transparent:true,opacity:0.35,side:THREE.DoubleSide});
+  const gl = new THREE.Mesh(new THREE.PlaneGeometry(1.4,0.44), gm);
+  gl.position.set(0,0.88,0.9); gl.rotation.x=-0.3; g.add(gl);
+  [-0.65,0.65].forEach(x=>{
+    const hl = new THREE.Mesh(new THREE.BoxGeometry(0.4,0.18,0.05),
+      new THREE.MeshStandardMaterial({color:0xfff5c0,emissive:0xffe080,emissiveIntensity:0.8}));
+    hl.position.set(x,0.38,1.9); g.add(hl);
+    const tl = new THREE.Mesh(new THREE.BoxGeometry(0.35,0.16,0.05),
+      new THREE.MeshStandardMaterial({color:0xff2000,emissive:0xff0000,emissiveIntensity:0.6}));
+    tl.position.set(x,0.38,-1.9); g.add(tl);
+  });
+  const wm = new THREE.MeshStandardMaterial({color:0x111111,roughness:0.9});
+  const rm = new THREE.MeshStandardMaterial({color:0xcccccc,roughness:0.3,metalness:0.9});
+  [[-0.95,0,1.2],[0.95,0,1.2],[-0.95,0,-1.2],[0.95,0,-1.2]].forEach(([x,y,z])=>{
+    const wg = new THREE.Group();
+    const t = new THREE.Mesh(new THREE.CylinderGeometry(0.36,0.36,0.3,16), wm);
+    t.rotation.z = Math.PI/2; t.castShadow=true; wg.add(t);
+    const r = new THREE.Mesh(new THREE.CylinderGeometry(0.2,0.2,0.31,8), rm);
+    r.rotation.z = Math.PI/2; wg.add(r);
+    for(let i=0;i<5;i++){const sp=new THREE.Mesh(new THREE.BoxGeometry(0.04,0.32,0.04),rm);sp.rotation.z=i/5*Math.PI*2;r.add(sp);}
+    wg.position.set(x,y,z); g.add(wg); CAR.wheels.push(wg);
+  });
+  g.position.copy(CAR.position); scene.add(g); CAR.mesh = g;
+})();
+
+// Scenografia
+(()=>{
+  const tm = new THREE.MeshStandardMaterial({color:0x1a4a20,roughness:1});
+  const tr = new THREE.MeshStandardMaterial({color:0x3a2010,roughness:1});
+  [[-25,0,65],[25,0,65],[-55,0,22],[55,0,22],[102,0,-22],[102,0,-88],
+   [-102,0,-22],[-102,0,-88],[22,0,-155],[-22,0,-155],[-92,0,32],[92,0,32],
+   [-32,0,52],[32,0,52],[110,0,-55],[110,0,-122],[-110,0,-55],[-110,0,-122]].forEach(([x,,z])=>{
+    const h=3+Math.random()*4;
+    const tk=new THREE.Mesh(new THREE.CylinderGeometry(0.2,0.3,h*0.4,6),tr);
+    tk.position.set(x,h*0.2,z); tk.castShadow=true; scene.add(tk);
+    const cr=new THREE.Mesh(new THREE.ConeGeometry(1.4+Math.random()*0.8,h*0.7,7),tm);
+    cr.position.set(x,h*0.55,z); cr.castShadow=true; scene.add(cr);
+  });
+  const bldm=new THREE.MeshStandardMaterial({color:0x1c2030,roughness:0.8,metalness:0.2});
+  const winm=new THREE.MeshStandardMaterial({color:0xffd080,emissive:0xffc040,emissiveIntensity:0.3});
+  [[-145,0,65],[145,0,65],[-145,0,-148],[145,0,-148],[0,0,-205],[0,0,90]].forEach(([x,,z])=>{
+    const w=14+Math.random()*14,h=22+Math.random()*32,d=14+Math.random()*14;
+    const b=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),bldm);
+    b.position.set(x,h/2,z); b.castShadow=true; scene.add(b);
+    for(let fy=0;fy<4;fy++) for(let fx=0;fx<3;fx++){
+      if(Math.random()>0.4){
+        const wi=new THREE.Mesh(new THREE.PlaneGeometry(2,2),winm);
+        wi.position.set(x-w/2+2+fx*(w/3),h*0.15+fy*5,z+d/2+0.02); scene.add(wi);
+      }
+    }
+  });
+  const sg=new THREE.BufferGeometry();
+  const sp=new Float32Array(3000);
+  for(let i=0;i<1000;i++){sp[i*3]=(Math.random()-0.5)*1200;sp[i*3+1]=Math.random()*400+60;sp[i*3+2]=(Math.random()-0.5)*1200;}
+  sg.setAttribute('position',new THREE.BufferAttribute(sp,3));
+  scene.add(new THREE.Points(sg,new THREE.PointsMaterial({color:0xffffff,size:0.5})));
+})();
+
+// Particelle scarico
+const exParts=[];
+function emitExhaust(){
+  if(Math.abs(CAR.speed)>2 && Math.random()>0.55){
+    const mat=new THREE.MeshBasicMaterial({color:0x8899aa,transparent:true,opacity:0.4});
+    const p=new THREE.Mesh(new THREE.SphereGeometry(0.1,4,4),mat);
+    const back=new THREE.Vector3(-Math.sin(CAR.heading),0,-Math.cos(CAR.heading));
+    p.position.copy(CAR.position).addScaledVector(back,1.8).add(new THREE.Vector3(0,0.3,0));
+    p.userData.life=1.0;
+    p.userData.vel=back.clone().multiplyScalar(0.35+Math.random()*0.25)
+      .add(new THREE.Vector3((Math.random()-.5)*0.15,0.04,(Math.random()-.5)*0.15));
+    scene.add(p); exParts.push(p);
+  }
+  for(let i=exParts.length-1;i>=0;i--){
+    const p=exParts[i];
+    p.userData.life-=0.038; p.material.opacity=p.userData.life*0.35;
+    p.position.addScaledVector(p.userData.vel,1);
+    p.scale.setScalar(1+(1-p.userData.life)*2);
+    if(p.userData.life<=0){p.geometry.dispose();p.material.dispose();scene.remove(p);exParts.splice(i,1);}
+  }
+}
+
+// =====================================================================
+//  FISICA AUTO — aggiornamento ogni frame
+// =====================================================================
+function updateCar(dt) {
+  if(GAME.phase !== 'playing') return;
+
+  // Calcola fattore sterzo (si riduce ad alta velocità → understeer realistico)
+  const spf = 1 - (Math.abs(CAR.speed)/CAR.maxSpeed) * CAR.steerAtSpeed;
+  let tgt = 0;
+  if(KEYS.left)  tgt = -CAR.maxSteer * spf;
+  if(KEYS.right) tgt =  CAR.maxSteer * spf;
+
+  // Interpolazione morbida dello sterzo
+  const _sf = Math.min(1.0, (tgt !== 0 ? 0.14 : CAR.steerReturn) * dt * 60);
+  CAR.steerAngle += (tgt - CAR.steerAngle) * _sf;
+
+  // Accelerazione
+  let acc = 0;
+  if(KEYS.up)   acc =  CAR.accelForce;
+  if(KEYS.down) acc = -CAR.brakeForce;
+  CAR.speed += acc * dt;
+  CAR.speed  = Math.max(-CAR.maxSpeedReverse, Math.min(CAR.maxSpeed, CAR.speed));
+
+  // Attrito: drag aerodinamico se si accelera, attrito suolo se si lascia
+  const _fr = (KEYS.up || KEYS.down) ? CAR.drag : CAR.groundFriction;
+  CAR.speed *= Math.pow(_fr, dt * 60);
+  if(Math.abs(CAR.speed) < 0.05) CAR.speed = 0;
+
+  // Rotazione heading (la macchina gira in proporzione alla velocità)
+  if(Math.abs(CAR.speed) > 0.2) {
+    CAR.heading += CAR.steerAngle * (CAR.speed / CAR.maxSpeed) * (CAR.speed > 0 ? 1 : -1) * dt * 60;
+  }
+
+  // Direzione forward in base all'heading
+  const fwdX = Math.sin(CAR.heading);
+  const fwdZ = Math.cos(CAR.heading);
+  const desiredVX = fwdX * CAR.speed;
+  const desiredVZ = fwdZ * CAR.speed;
+
+  // Drift: interpolazione velocità reale → velocità desiderata
+  // Se lateralFriction < 1, il retro "scivola" lateralmente
+  const lf = Math.pow(CAR.lateralFriction, dt * 60);
+  CAR.velocity.x = CAR.velocity.x * lf + desiredVX * (1 - lf);
+  CAR.velocity.z = CAR.velocity.z * lf + desiredVZ * (1 - lf);
+
+  // Aggiorna posizione
+  CAR.position.x += CAR.velocity.x * dt;
+  CAR.position.z += CAR.velocity.z * dt;
+  CAR.position.y  = 0.42;
+
+  // Confini mappa
+  CAR.position.x = Math.max(-240, Math.min(240, CAR.position.x));
+  CAR.position.z = Math.max(-240, Math.min(240, CAR.position.z));
+
+  // Aggiorna mesh Three.js
+  if(CAR.mesh) {
+    CAR.mesh.position.copy(CAR.position);
+    CAR.mesh.rotation.y = CAR.heading;
+    CAR.wheelRot += CAR.speed * 0.18 * dt * 60;
+    CAR.wheels.forEach((w, i) => {
+      if(i < 2) w.rotation.y = CAR.steerAngle * 8; // sterzo ruote ant
+      if(w.children[0]) w.children[0].rotation.x = CAR.wheelRot;
+    });
+  }
+
+  // Marcia (solo per HUD)
+  const r = Math.abs(CAR.speed) / CAR.maxSpeed;
+  if(CAR.speed === 0)  CAR.gear = 'N';
+  else if(CAR.speed<0) CAR.gear = 'R';
+  else if(r < 0.25)    CAR.gear = '1';
+  else if(r < 0.45)    CAR.gear = '2';
+  else if(r < 0.65)    CAR.gear = '3';
+  else if(r < 0.85)    CAR.gear = '4';
+  else                 CAR.gear = '5';
+
+  // Reset manuale
+  if(KEYS.reset) {
+    CAR.position.set(0, 0.42, 0);
+    CAR.heading = 0; CAR.speed = 0; CAR.velocity.set(0,0,0);
+  }
+}
+
+// =====================================================================
+//  CAMERA — lerp verso posizione ideale
+// =====================================================================
+function updateCamera() {
+  const sh = Math.sin(CAR.heading), ch = Math.cos(CAR.heading);
+  const ideal = new THREE.Vector3(
+    CAR.position.x - sh * CAM.followDist,
+    CAR.position.y + CAM.followHeight,
+    CAR.position.z - ch * CAM.followDist
+  );
+  const look = new THREE.Vector3(
+    CAR.position.x + sh * CAM.lookAhead,
+    CAR.position.y + 1.0,
+    CAR.position.z + ch * CAM.lookAhead
+  );
+  camera.position.lerp(ideal, CAM.smooth);
+  camera.lookAt(look);
+}
+
+// =====================================================================
+//  CHECKPOINT SYSTEM
+// =====================================================================
+function checkCheckpoints() {
+  if(GAME.phase !== 'playing') return;
+  const cp = CHECKPOINTS[GAME.checkpoint];
+  const dx = CAR.position.x - cp.x;
+  const dz = CAR.position.z - cp.z;
+  if(Math.sqrt(dx*dx + dz*dz) < CP_RADIUS) {
+    GAME.checkpoint = (GAME.checkpoint + 1) % CHECKPOINTS.length;
+    if(GAME.checkpoint === 0) {
+      GAME.laps++;
+      if(GAME.laps >= GAME.maxLaps) endRace();
+    }
+  }
+}
+
+// =====================================================================
+//  HUD + DEBUG
+// =====================================================================
+function updateHUD() {
+  const kmh = Math.abs(Math.round(CAR.speed * 3.6));
+  document.getElementById('spd').textContent    = kmh;
+  document.getElementById('hv-gear').textContent = CAR.gear;
+  document.getElementById('hv-laps').textContent = `${GAME.laps}/${GAME.maxLaps}`;
+  document.getElementById('hv-cp').textContent   = GAME.checkpoint;
+  const pct = Math.abs(CAR.speed)/CAR.maxSpeed*100;
+  const bar = document.getElementById('pbar');
+  bar.style.width      = pct + '%';
+  bar.style.background = pct>80 ? '#ff4060' : pct>50 ? '#ffaa22' : '#00e5ff';
+  if(GAME.phase === 'playing') {
+    GAME.elapsed = (performance.now() - GAME.startTime) / 1000;
+    const m = Math.floor(GAME.elapsed/60);
+    const s = Math.floor(GAME.elapsed%60);
+    const t = Math.floor((GAME.elapsed%1)*10);
+    document.getElementById('hv-time').textContent = `${m}:${String(s).padStart(2,'0')}.${t}`;
+  }
+}
+
+let _fr=0,_ld=performance.now(),_fps=0,_ft=0,_pv=0;
+function updateDebug(){
+  _fr++; const n=performance.now(); _ft=n-(_pv||n); _pv=n;
+  if(n-_ld>=1000){_fps=(_fr*1000)/(n-_ld);_fr=0;_ld=n;}
+  const i=renderer.info;
+  document.getElementById('dbg').textContent=
+    `FPS:${_fps.toFixed(0)} ${_ft.toFixed(1)}ms | Draw:${i.render.calls} Tri:${i.render.triangles}\n`+
+    `Vel:${(CAR.speed*3.6).toFixed(1)}km/h  Heading:${(CAR.heading*180/Math.PI).toFixed(0)}°  Gear:${CAR.gear}  CP:${GAME.checkpoint}`;
+}
+
+// =====================================================================
+//  GAME LOOP
+// =====================================================================
+const clock = new THREE.Clock();
+function gameLoop() {
+  requestAnimationFrame(gameLoop);
+  renderer.info.reset();
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if(GAME.phase === 'playing') {
+    updateCar(dt);
+    checkCheckpoints();
+    emitExhaust();
+  }
+  updateCamera();
+  updateHUD();
+  // Pulsa il checkpoint attivo
+  scene.children.forEach(o => {
+    if(o.isMesh && o.userData.cpIndex !== undefined) {
+      o.material.emissiveIntensity = o.userData.cpIndex === GAME.checkpoint
+        ? 0.7 + Math.sin(Date.now()*0.005)*0.4 : 0.15;
+    }
+  });
+  renderer.render(scene, camera);
+  updateDebug();
+}
+gameLoop();
+
+// =====================================================================
+//  INPUT
+// =====================================================================
+const K = {
+  ArrowUp:'up',w:'up',W:'up',
+  ArrowDown:'down',s:'down',S:'down',
+  ArrowLeft:'left',a:'left',A:'left',
+  ArrowRight:'right',d:'right',D:'right',
+  r:'reset',R:'reset'
+};
+document.addEventListener('keydown', e => {
+  if(K[e.key]) KEYS[K[e.key]] = true;
+  if((e.key==='Escape'||e.key==='p'||e.key==='P') && GAME.phase==='playing') togglePause();
+});
+document.addEventListener('keyup', e => { if(K[e.key]) KEYS[K[e.key]] = false; });
+let _tx=0;
+document.addEventListener('touchstart', e=>{_tx=e.touches[0].clientX;KEYS.up=true;},{passive:true});
+document.addEventListener('touchmove',  e=>{const dx=e.touches[0].clientX-_tx;KEYS.left=dx<-20;KEYS.right=dx>20;},{passive:true});
+document.addEventListener('touchend',   ()=>{KEYS.up=KEYS.down=KEYS.left=KEYS.right=false;});
+
+// =====================================================================
+//  GAME MANAGEMENT
+// =====================================================================
+function startGame() {
+  Object.assign(GAME,{phase:'playing',laps:0,checkpoint:0,elapsed:0,startTime:performance.now()});
+  CAR.position.set(0,0.42,0); CAR.heading=0; CAR.speed=0; CAR.velocity.set(0,0,0);
+  document.getElementById('scr-title').classList.add('hidden');
+  document.getElementById('scr-pause').classList.add('hidden');
+  document.getElementById('finish-info').style.display='none';
+  document.getElementById('pause-title').textContent='PAUSA';
+  document.getElementById('btn-resume').textContent='Riprendi';
+}
+function togglePause() {
+  if(GAME.phase==='playing') {
+    GAME.phase='paused';
+    document.getElementById('scr-pause').classList.remove('hidden');
+  } else if(GAME.phase==='paused') {
+    GAME.phase='playing';
+    document.getElementById('scr-pause').classList.add('hidden');
+  }
+}
+function endRace() {
+  GAME.phase='finished';
+  document.getElementById('pause-title').textContent='FINISH! 🏁';
+  const fi=document.getElementById('finish-info');
+  fi.style.display='block';
+  fi.innerHTML=`Tempo totale: ${document.getElementById('hv-time').textContent}<br>Giri completati: ${GAME.maxLaps}`;
+  document.getElementById('btn-resume').textContent='Rigioca';
+  document.getElementById('scr-pause').classList.remove('hidden');
+}
+document.getElementById('btn-start').addEventListener('click', startGame);
+document.getElementById('btn-resume').addEventListener('click', ()=>{
+  if(GAME.phase==='finished'||GAME.laps>=GAME.maxLaps) startGame(); else togglePause();
+});
+document.getElementById('btn-restart').addEventListener('click', startGame);
+window.addEventListener('resize', ()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+// Testing hooks
+window.render_game_to_text = () => JSON.stringify({
+  phase: GAME.phase,
+  car: {
+    x:         +CAR.position.x.toFixed(2),
+    z:         +CAR.position.z.toFixed(2),
+    speed_kmh: +(CAR.speed*3.6).toFixed(1),
+    heading:   +(CAR.heading*180/Math.PI).toFixed(1),
+    gear:      CAR.gear,
+  },
+  game: {laps:GAME.laps, maxLaps:GAME.maxLaps, checkpoint:GAME.checkpoint, elapsed:+GAME.elapsed.toFixed(2)}
+});
+
+// ── SLIDER PARAMETRI ──────────────────────────────────────────────
+(function() {
+  // Toggle pannello
+  const toggle = document.getElementById('params-toggle');
+  const body   = document.getElementById('params-body');
+  toggle.addEventListener('click', () => body.classList.toggle('collapsed'));
+
+  // Definizione slider: [id, chiave CAR, formato etichetta]
+  const SLIDERS = [
+    ['maxSpeed',        'maxSpeed',        v => `${v} m/s`],
+    ['maxSpeedReverse', 'maxSpeedReverse', v => `${v} m/s`],
+    ['accelForce',      'accelForce',      v => `${v} m/s²`],
+    ['brakeForce',      'brakeForce',      v => `${v} m/s²`],
+    ['drag',            'drag',            v => (+v).toFixed(3)],
+    ['groundFriction',  'groundFriction',  v => (+v).toFixed(3)],
+    ['lateralFriction', 'lateralFriction', v => (+v).toFixed(3)],
+    ['maxSteer',        'maxSteer',        v => (+v).toFixed(3)],
+    ['steerReturn',     'steerReturn',     v => (+v).toFixed(2)],
+    ['steerAtSpeed',    'steerAtSpeed',    v => (+v).toFixed(2)],
+  ];
+
+  SLIDERS.forEach(([id, key, fmt]) => {
+    const sl  = document.getElementById('sl-' + id);
+    const lbl = document.getElementById('lbl-' + id);
+    if (!sl || !lbl) return;
+    sl.addEventListener('input', () => {
+      const v = parseFloat(sl.value);
+      CAR[key] = v;
+      lbl.textContent = fmt(v);
+    });
+  });
+
+  // Presets
+  const PRESETS = {
+    default:  { maxSpeed:28, maxSpeedReverse:8,  accelForce:18, brakeForce:30, drag:0.970, groundFriction:0.910, lateralFriction:0.870, maxSteer:0.042, steerReturn:0.09, steerAtSpeed:0.60 },
+    sport:    { maxSpeed:42, maxSpeedReverse:10, accelForce:32, brakeForce:40, drag:0.985, groundFriction:0.920, lateralFriction:0.920, maxSteer:0.048, steerReturn:0.12, steerAtSpeed:0.55 },
+    drift:    { maxSpeed:30, maxSpeedReverse:8,  accelForce:22, brakeForce:20, drag:0.975, groundFriction:0.880, lateralFriction:0.720, maxSteer:0.062, steerReturn:0.06, steerAtSpeed:0.35 },
+    rally:    { maxSpeed:36, maxSpeedReverse:10, accelForce:26, brakeForce:35, drag:0.980, groundFriction:0.900, lateralFriction:0.800, maxSteer:0.055, steerReturn:0.10, steerAtSpeed:0.40 },
+    pesante:  { maxSpeed:16, maxSpeedReverse:5,  accelForce:7,  brakeForce:18, drag:0.960, groundFriction:0.840, lateralFriction:0.950, maxSteer:0.030, steerReturn:0.05, steerAtSpeed:0.70 },
+  };
+
+  function applyPreset(name) {
+    const p = PRESETS[name];
+    if (!p) return;
+    SLIDERS.forEach(([id, key]) => {
+      const sl  = document.getElementById('sl-' + id);
+      const lbl = document.getElementById('lbl-' + id);
+      const fmt = SLIDERS.find(s => s[0] === id)?.[2];
+      if (sl && p[key] !== undefined) {
+        CAR[key] = p[key];
+        sl.value = p[key];
+        if (lbl && fmt) lbl.textContent = fmt(p[key]);
+      }
+    });
+  }
+
+  document.querySelectorAll('.preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
+  });
+})();
+
+window.advanceTime = (ms) => {
+  const steps = Math.max(1, Math.round(ms/(1000/60)));
+  for(let i=0;i<steps;i++) updateCar(1/60);
+};
+</script>
+
+<!-- PANNELLO PARAMETRI -->
+<div id="params-panel">
+  <div id="params-body" class="collapsed">
+    <div class="param-section">
+      <div class="param-section-title">Preset veicolo</div>
+      <div class="preset-row">
+        <button class="preset-btn" data-preset="sport">Sport</button>
+        <button class="preset-btn" data-preset="drift">Drift</button>
+        <button class="preset-btn" data-preset="rally">Rally</button>
+        <button class="preset-btn" data-preset="pesante">Pesante</button>
+        <button class="preset-btn" data-preset="default">Default</button>
+      </div>
+    </div>
+
+    <div class="param-section">
+      <div class="param-section-title">Velocità & Accelerazione</div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">maxSpeed</span>
+          <span class="param-val" id="lbl-maxSpeed">28 m/s</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-maxSpeed" min="8" max="60" step="1" value="28">
+        <div class="param-hint">Velocità massima in avanti</div>
+      </div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">maxSpeedReverse</span>
+          <span class="param-val" id="lbl-maxSpeedReverse">8 m/s</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-maxSpeedReverse" min="2" max="20" step="1" value="8">
+      </div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">accelForce</span>
+          <span class="param-val" id="lbl-accelForce">18 m/s²</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-accelForce" min="2" max="60" step="1" value="18">
+        <div class="param-hint">Scatto motore — alto = più brusc</div>
+      </div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">brakeForce</span>
+          <span class="param-val" id="lbl-brakeForce">30 m/s²</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-brakeForce" min="5" max="80" step="1" value="30">
+        <div class="param-hint">Forza frenata</div>
+      </div>
+    </div>
+
+    <div class="param-section">
+      <div class="param-section-title">Attrito & Inerzia</div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">drag</span>
+          <span class="param-val" id="lbl-drag">0.970</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-drag" min="0.90" max="1.00" step="0.001" value="0.970">
+        <div class="param-hint">Attrito aria (1 = no drag)</div>
+      </div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">groundFriction</span>
+          <span class="param-val" id="lbl-groundFriction">0.910</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-groundFriction" min="0.70" max="1.00" step="0.005" value="0.910">
+        <div class="param-hint">Attrito suolo (rilasci il gas)</div>
+      </div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">lateralFriction</span>
+          <span class="param-val" id="lbl-lateralFriction">0.870</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-lateralFriction" min="0.50" max="1.00" step="0.005" value="0.870">
+        <div class="param-hint">Grip laterale — basso = drift</div>
+      </div>
+    </div>
+
+    <div class="param-section">
+      <div class="param-section-title">Sterzo</div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">maxSteer</span>
+          <span class="param-val" id="lbl-maxSteer">0.042</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-maxSteer" min="0.010" max="0.120" step="0.002" value="0.042">
+        <div class="param-hint">Angolo sterzo massimo</div>
+      </div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">steerReturn</span>
+          <span class="param-val" id="lbl-steerReturn">0.09</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-steerReturn" min="0.01" max="0.40" step="0.01" value="0.09">
+        <div class="param-hint">Velocità ritorno sterzo al centro</div>
+      </div>
+      <div class="param-row">
+        <div class="param-label">
+          <span class="param-name">steerAtSpeed</span>
+          <span class="param-val" id="lbl-steerAtSpeed">0.60</span>
+        </div>
+        <input class="param-slider" type="range" id="sl-steerAtSpeed" min="0.00" max="1.00" step="0.05" value="0.60">
+        <div class="param-hint">Understeer ad alta velocità</div>
+      </div>
+    </div>
+  </div>
+  <button id="params-toggle" aria-label="Apri parametri">⚙ FISICA</button>
+</div>
+
+</body>
+</html>
