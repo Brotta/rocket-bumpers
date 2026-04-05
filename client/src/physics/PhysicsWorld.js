@@ -16,7 +16,7 @@ export class PhysicsWorld {
     this.world.addContactMaterial(new CANNON.ContactMaterial(
       this._carMaterial,
       this._arenaMaterial,
-      { friction: 0.05, restitution: 0.0 },
+      { friction: 0.0, restitution: 0.0 },
     ));
 
     this.floorBody = null;

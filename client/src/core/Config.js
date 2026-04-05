@@ -9,7 +9,7 @@
 export const STAT_BASE = {
   maxStat: 10,          // denominator for scaling — never change
   speed: 28,            // u/s at stat 10 → stat 8 = 22.4, stat 3 = 8.4
-  accel: 30,            // u/s² at stat 10 → per-car, proportional to speed stat
+  accel: 36,            // u/s² at stat 10 → per-car, proportional to speed stat
   mass: 10,             // kg at stat 10
   handling: 5.5,        // handling factor at stat 10
 };
@@ -440,48 +440,48 @@ export const PHYSICS = {
 };
 
 // ── Car Feel — visual + handling dynamics ─────────────────────────────
-// Arcade bicycle model: angular velocity = speed * tan(steerAngle) / wheelbase.
-// At zero speed → zero turning. Feels like a real car, not a hovercraft.
+// Drift-style kinematic model: heading rotates proportionally to speed,
+// velocity blends toward facing direction via lateral friction.
+// At zero speed → zero turning. Smooth, natural drift feel.
 export const CAR_FEEL = {
-  // ── Rear-axle bicycle model ──
-  // The car pivots around the rear axle. Front wheels steer, rear wheels drive.
-  // angularVel = speed * tan(steerAngle) / wheelbase, capped for sanity.
-  wheelbase: 1.4,            // virtual axle distance (u) — shorter = tighter arcade turns
-  rearAxleOffset: 0.1,       // how far back the pivot is from body center (u)
-  driftPivotOffset: -0.7,    // pivot during drift: negative = front pivot (tail swings out)
-  maxSteerAngle: 0.55,       // max front wheel angle (rad, ~31.5°) — tan(0.55)≈0.61
-  maxAngularVel: 5.0,        // hard cap (rad/s) — ~0.8 rev/s max, snappy arcade turning
-  steerSpeed: 10.0,          // how fast the wheel reaches target angle
-  steerReturnSpeed: 12.0,    // how fast the wheel self-centers
-  // High-speed steering reduction: at top speed, max steer angle is scaled by this
-  highSpeedSteerFactor: 0.7,
-  // Minimum speed to produce any turning
-  minTurnSpeed: 0.5,         // u/s — very low, turning kicks in almost immediately
+  // ── Steering ──
+  // maxSteerAngle: per-frame steering increment (rad) — like Drift Zero's maxSteer
+  maxSteerAngle: 0.042,      // max steer per frame (rad) — tuned for arcade feel
+  steerSpeed: 0.14,          // interpolation factor toward target steer (per frame at 60fps)
+  steerReturnSpeed: 0.09,    // how fast steer self-centers when no input
+  // High-speed steering reduction (understeer) — at max speed, steer is scaled by this
+  steerAtSpeed: 0.60,        // 0=no reduction, 1=zero steer at max speed
 
-  // Acceleration — per-car value from STAT_MAP.accel (this is now the fallback only)
-  accelRate: 18,             // u/s² fallback (per-car overrides via CarBody.accelRate)
+  // ── Heading rotation ──
+  // heading += steerAngle * (speed/maxSpeed) * direction * dt*60
+  // No bicycle model — simpler, more predictable, better drift feel.
+  minTurnSpeed: 0.2,         // u/s — minimum speed to produce any turning
+
+  // ── Acceleration ──
+  accelRate: 22,             // u/s² fallback (per-car overrides via CarBody.accelRate)
   accelFalloffStart: 0.65,   // start tapering at 65% of max speed
-  accelFalloffMin: 0.2,      // at max speed, accel is 20% of base
+  accelFalloffMin: 0.25,     // at max speed, accel is 25% of base
 
-  // Braking
-  brakeDecel: 45,            // u/s² (scaled down with new speed range)
-  reverseAccel: 15,          // u/s²
+  // ── Braking ──
+  brakeDecel: 30,            // u/s² braking force
+  reverseAccel: 10,          // u/s² reverse acceleration
   reverseMaxFactor: 0.35,    // max reverse speed = 35% of forward max
 
-  // Coasting
-  coastDecel: 14,            // u/s² (scaled down with new speed range)
+  // ── Friction (multiplicative per-frame, like Drift Zero) ──
+  // Applied as speed *= pow(factor, dt*60). Values < 1 = friction.
+  drag: 0.993,               // aero drag when accelerating/braking (very light)
+  groundFriction: 0.955,     // rolling friction when coasting (moderate decel)
 
-  // Lateral grip
-  lateralGrip: 0.82,         // base lateral grip (straight line)
-  turnSlideAmount: 0.45,     // how much grip drops during hard turns (0=none, 1=full slide)
+  // ── Lateral friction (drift model) ──
+  // velocity blends toward desired (heading-aligned) velocity each frame.
+  // lateralFriction < 1 = the car slides laterally (drifts).
+  // lf = pow(lateralFriction, dt*60); vel = vel*lf + desired*(1-lf)
+  lateralFriction: 0.87,     // base lateral grip (lower = more drift)
 
-  // Turn speed reduction — cars slow into hard turns (arcade cornering)
-  turnSpeedReduction: 0.12,  // max speed reduction factor when turning hard (12%)
-  turnReductionPower: 2.0,   // quadratic curve: light turns barely slow
-
-  // Drift mode tuning
-  driftBlend: 4.0,           // velocity blend rate during drift (responsive but slidey)
-  driftCoastFactor: 0.15,    // coast decel multiplier during drift (maintains speed)
+  // ── Drift mode tuning (LYNX ability + general drift feel) ──
+  driftLateralFriction: 0.70, // much lower grip during drift ability
+  driftSteerMultiplier: 1.5,  // wider steer angle during drift
+  driftDragOverride: 0.985,   // less speed loss during drift
 
   // Visual body roll on turning (applied to mesh, not physics)
   roll: {
@@ -505,11 +505,11 @@ export const CAR_FEEL = {
     lookAhead: 5,
     followSmoothing: 0.07,
 
-    baseFOV: 50,
-    maxFOVBoost: 18,
+    baseFOV: 40,
+    maxFOVBoost: 8,
     fovSmoothing: 4,
 
-    steerOffsetMax: 1.8,
+    steerOffsetMax: 2.5,
     steerOffsetSmoothing: 5,
 
     steerTiltMax: 0.025,

@@ -121,7 +121,7 @@ export class TireSmokeFX {
       // Compute steer intensity
       const handlingFactor = cb.handling / 3.5;
       let maxAngle = CAR_FEEL.maxSteerAngle * handlingFactor;
-      if (cb.driftMode) maxAngle *= 1.5;
+      if (cb.driftMode) maxAngle *= CAR_FEEL.driftSteerMultiplier;
       const steerRatio = maxAngle > 0 ? Math.abs(cb._steerAngle) / maxAngle : 0;
 
       // Skip if below thresholds

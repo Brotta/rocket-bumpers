@@ -131,9 +131,9 @@ export class CarBody {
     this._currentPitch = 0;
   }
 
-  // ── Controls (Rear-Axle Bicycle Model) ──────────────────────────────
-  // The car pivots around its rear axle. Front wheels steer, rear drives.
-  // This makes the front "sweep" around turns — like a real car.
+  // ── Controls (Drift-style kinematic model) ──────────────────────────
+  // Heading rotates proportionally to speed. Velocity blends toward facing
+  // direction via lateral friction — creates natural, smooth drifting.
   applyControls(input, dt) {
     // Wake sleeping body so velocity changes take effect (allowSleep optimization)
     if (this.body.sleepState !== 0) this.body.wakeUp();
@@ -142,63 +142,36 @@ export class CarBody {
     const absSpeed = Math.abs(this._currentSpeed);
     const speedRatio = Math.min(absSpeed / Math.max(effectiveMax, 1), 1);
 
-    // ── 1. Front-wheel steering angle ──
+    // Handling factor: normalised so that mid-handling (3.5) → 1.0
+    const hf = this.handling / 3.5;
+
+    // ── 1. Steering ──
     const steerInput = (input.left ? 1 : 0) - (input.right ? 1 : 0);
     this._steerInput = steerInput;
 
-    // Handling factor: normalised so that mid-handling (3.5) → 1.0
-    // Low handling → smaller steer angle, slower steer, less grip, more slide
-    // High handling → wider steer angle, faster steer, more grip, less slide
-    const hf = this.handling / 3.5;
-
-    let maxAngle = CAR_FEEL.maxSteerAngle * hf;
-
+    // Steer angle scales with handling; reduces at high speed (understeer)
+    let maxSteer = CAR_FEEL.maxSteerAngle * hf;
     if (this.driftMode) {
-      maxAngle *= 1.5;
+      maxSteer *= CAR_FEEL.driftSteerMultiplier;
     } else {
-      // Reduce steer angle at high speed — worse handling = more reduction
-      const highSpeedFactor = CAR_FEEL.highSpeedSteerFactor + (1 - CAR_FEEL.highSpeedSteerFactor) * (hf - 0.5);
-      const highSpeedLerp = 1 - (1 - highSpeedFactor) * speedRatio;
-      maxAngle *= highSpeedLerp;
+      // Understeer: reduce steer at high speed — worse handling = more reduction
+      const steerAtSpeed = CAR_FEEL.steerAtSpeed * (0.7 + 0.3 * hf);
+      const spf = 1 - speedRatio * steerAtSpeed;
+      maxSteer *= spf;
     }
 
-    const targetSteer = steerInput * maxAngle;
+    // Smooth steer interpolation (frame-rate independent via dt*60)
+    const targetSteer = steerInput * maxSteer;
+    const steerBlend = Math.min(1.0,
+      (steerInput !== 0 ? CAR_FEEL.steerSpeed : CAR_FEEL.steerReturnSpeed) * dt * 60
+    );
+    this._steerAngle += (targetSteer - this._steerAngle) * steerBlend;
 
-    // Smoothly blend steering — high handling = snappier response
-    const effectiveSteerSpeed = CAR_FEEL.steerSpeed * (0.6 + 0.4 * hf);
-    if (steerInput !== 0) {
-      this._steerAngle += (targetSteer - this._steerAngle) * Math.min(1, effectiveSteerSpeed * dt);
-    } else {
-      const effectiveReturnSpeed = CAR_FEEL.steerReturnSpeed * (0.6 + 0.4 * hf);
-      this._steerAngle += (0 - this._steerAngle) * Math.min(1, effectiveReturnSpeed * dt);
-    }
-
-    // ── 2. Rear-axle bicycle model ──
-    // Compute rear axle position, advance it, compute new heading from axle positions
+    // ── 2. Heading rotation (proportional to speed) ──
+    // Negate in reverse so left=left regardless of direction.
     if (absSpeed > CAR_FEEL.minTurnSpeed) {
-      // Angular velocity from bicycle model, hard-capped for sanity
-      let angularVel = this._currentSpeed * Math.tan(this._steerAngle) / CAR_FEEL.wheelbase;
-      const maxAV = CAR_FEEL.maxAngularVel;
-      if (angularVel > maxAV) angularVel = maxAV;
-      if (angularVel < -maxAV) angularVel = -maxAV;
-
-      // Pivot offset: positive = rear pivot (nose sweeps), negative = front pivot (tail swings)
-      const fwdX = -Math.sin(this._yaw);
-      const fwdZ = -Math.cos(this._yaw);
-      const pivotOff = this.driftMode ? CAR_FEEL.driftPivotOffset : CAR_FEEL.rearAxleOffset;
-      const pivotX = this.body.position.x - fwdX * pivotOff;
-      const pivotZ = this.body.position.z - fwdZ * pivotOff;
-
-      // Update heading
-      this._yaw += angularVel * dt;
-
-      // Compute new forward after rotation
-      const newFwdX = -Math.sin(this._yaw);
-      const newFwdZ = -Math.cos(this._yaw);
-
-      // Move body so that the pivot point stays planted
-      this.body.position.x = pivotX + newFwdX * pivotOff;
-      this.body.position.z = pivotZ + newFwdZ * pivotOff;
+      const reverseSign = this._currentSpeed >= 0 ? 1 : -1;
+      this._yaw += this._steerAngle * (absSpeed / effectiveMax) * reverseSign * dt * 60;
     }
 
     // ── 3. Acceleration / Braking ──
@@ -219,65 +192,66 @@ export class CarBody {
       this._accelInput = 1;
     } else if (input.backward) {
       if (this._currentSpeed > CAR_FEEL.minTurnSpeed) {
-        // Moving forward + backward = brake
         this._currentSpeed -= CAR_FEEL.brakeDecel * dt;
         if (this._currentSpeed < 0) this._currentSpeed = 0;
       } else {
-        // Stopped or nearly stopped: engage reverse
         this._currentSpeed -= CAR_FEEL.reverseAccel * dt;
         const reverseMax = -effectiveMax * CAR_FEEL.reverseMaxFactor;
         if (this._currentSpeed < reverseMax) this._currentSpeed = reverseMax;
       }
       this._accelInput = -1;
     } else {
-      // Coasting deceleration (reduced during drift to maintain speed)
-      let coastRate = CAR_FEEL.coastDecel;
-      if (this.driftMode) coastRate *= CAR_FEEL.driftCoastFactor;
-      if (this._currentSpeed > 0) {
-        this._currentSpeed -= coastRate * dt;
-        if (this._currentSpeed < 0) this._currentSpeed = 0;
-      } else if (this._currentSpeed < 0) {
-        this._currentSpeed += coastRate * dt;
-        if (this._currentSpeed > 0) this._currentSpeed = 0;
-      }
       this._accelInput = 0;
     }
 
-    // ── 3b. Turn speed reduction — low handling loses more speed in turns ──
-    if (!this.driftMode && maxAngle > 0) {
-      const steerRatio = Math.abs(this._steerAngle) / maxAngle;
-      const handlingReductionScale = 1.3 - 0.3 * hf; // low handling = more speed loss
-      const reduction = CAR_FEEL.turnSpeedReduction * handlingReductionScale
-        * Math.pow(steerRatio, CAR_FEEL.turnReductionPower)
-        * speedRatio;
-      this._currentSpeed *= (1 - reduction * dt * 3);
+    // ── 4. Multiplicative friction (replaces linear coast decel) ──
+    // Drag when accelerating/braking, ground friction when coasting — like Drift Zero
+    let frictionFactor;
+    if (input.forward || input.backward) {
+      frictionFactor = this.driftMode ? CAR_FEEL.driftDragOverride : CAR_FEEL.drag;
+    } else {
+      frictionFactor = this.driftMode ? CAR_FEEL.driftDragOverride : CAR_FEEL.groundFriction;
     }
+    this._currentSpeed *= Math.pow(frictionFactor, dt * 60);
+    if (Math.abs(this._currentSpeed) < 0.05) this._currentSpeed = 0;
 
-    // ── 4. Apply velocity ──
+    // ── 5. Apply velocity via lateral friction blending ──
+    // Forward component follows _currentSpeed directly.
+    // Lateral component blends via lateralFriction — this creates drift.
     const fwdX = -Math.sin(this._yaw);
     const fwdZ = -Math.cos(this._yaw);
-    const targetVx = fwdX * this._currentSpeed;
-    const targetVz = fwdZ * this._currentSpeed;
 
-    if (this.driftMode) {
-      // Drift: moderate blend toward facing (tail slides out but car responds to steering)
-      const blend = Math.min(1, CAR_FEEL.driftBlend * dt);
-      this.body.velocity.x += (targetVx - this.body.velocity.x) * blend;
-      this.body.velocity.z += (targetVz - this.body.velocity.z) * blend;
+    // Decompose current body velocity into forward and lateral components
+    const vx = this.body.velocity.x;
+    const vz = this.body.velocity.z;
+    const fwdDot = vx * fwdX + vz * fwdZ;          // forward speed from physics
+    const latX = vx - fwdDot * fwdX;                // lateral velocity
+    const latZ = vz - fwdDot * fwdZ;
+
+    // Lateral friction: determines how much lateral velocity persists.
+    // Lower value = more slide (drift). Higher = more grip.
+    const isSteering = Math.abs(this._steerAngle) > 0.001;
+    let lf;
+
+    if (!isSteering) {
+      // Not steering: zero out lateral velocity completely.
+      // CANNON.js contact resolution injects small lateral forces every step;
+      // any non-zero retention creates a persistent diagonal drift.
+      lf = 0;
+    } else if (this.driftMode) {
+      lf = Math.pow(CAR_FEEL.driftLateralFriction, dt * 60);
     } else {
-      // Normal: lateral grip scaled by handling + steer intensity
-      // High handling = more grip, less slide. Low handling = boat-like.
-      const steerFrac = maxAngle > 0 ? Math.abs(this._steerAngle) / maxAngle : 0;
-      const baseGrip = CAR_FEEL.lateralGrip * (0.7 + 0.3 * hf);     // handling scales base grip
-      const slideAmount = CAR_FEEL.turnSlideAmount * (1.4 - 0.4 * hf); // low handling = more slide
-      const slideBoost = steerFrac * steerFrac * slideAmount;
-      const effectiveGrip = Math.max(0.15, baseGrip - slideBoost);
-      const grip = 1 - Math.pow(1 - effectiveGrip, dt * 60);
-      this.body.velocity.x += (targetVx - this.body.velocity.x) * grip;
-      this.body.velocity.z += (targetVz - this.body.velocity.z) * grip;
+      // Handling stat adjusts grip: hf=1 → base, hf<1 → more slide, hf>1 → more grip
+      let latFric = CAR_FEEL.lateralFriction + (hf - 1) * 0.06;
+      latFric = Math.max(0.70, Math.min(0.96, latFric));
+      lf = Math.pow(latFric, dt * 60);
     }
 
-    // ── 5. Apply rotation ──
+    // Forward = driven by _currentSpeed, lateral = decays via friction
+    this.body.velocity.x = fwdX * this._currentSpeed + latX * lf;
+    this.body.velocity.z = fwdZ * this._currentSpeed + latZ * lf;
+
+    // ── 6. Apply rotation ──
     this.body.quaternion.setFromEuler(0, this._yaw, 0);
 
     // Velocity cap handled by CollisionHandler._postStep after physics step
