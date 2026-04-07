@@ -54,6 +54,13 @@ export class GameState {
     }
   }
 
+  /** Force-end the current round (e.g. last car standing). */
+  forceEndRound() {
+    if (this.state === GAME_STATES.PLAYING) {
+      this._transition(GAME_STATES.RESULTS);
+    }
+  }
+
   // ── Update (call every frame) ────────────────────────────────────────
 
   update(dt) {

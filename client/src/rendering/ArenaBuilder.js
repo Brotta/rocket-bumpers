@@ -19,6 +19,7 @@ export class ArenaBuilder {
     this.scene = scene;
     this.boostPads = [];
     this.edgeLights = [];
+    this.obstacleGroups = []; // { group, type: 'pillar'|'boulder', config, physicsBody? }
     this._clock = new THREE.Clock();
     this._emberFrameSkip = 0; // throttle ember updates
     this._decorFrameSkip = 0; // throttle decorative pulse updates
@@ -462,6 +463,7 @@ export class ArenaBuilder {
       group.position.set(x, p.height / 2, z);
       group.rotation.y = Math.random() * Math.PI * 2;
       this.scene.add(group);
+      this.obstacleGroups.push({ group, type: 'pillar', config: p });
     }
 
     // ── Boulders — irregular rounded rocks ──
@@ -529,6 +531,7 @@ export class ArenaBuilder {
       group.position.set(x, b.radius * 0.6, z);
       group.rotation.y = Math.random() * Math.PI * 2;
       this.scene.add(group);
+      this.obstacleGroups.push({ group, type: 'boulder', config: b });
     }
   }
 
@@ -615,14 +618,12 @@ export class ArenaBuilder {
     for (let l = 0; l < FX.column.layers; l++) {
       const r = FX.column.baseRadius * FX.column.radiusScale[l];
       colGeos.push(new THREE.CylinderGeometry(r * 0.4, r, FX.column.height, 8));
-      colMats.push(new THREE.MeshStandardMaterial({
+      colMats.push(new THREE.MeshBasicMaterial({
         color: l === 0 ? 0xffaa33 : THEME.lavaColor,
-        emissive: l === 0 ? 0xff6600 : THEME.lavaEmissive,
-        emissiveIntensity: l === 0 ? 3.0 : 2.0,
         transparent: true,
         opacity: FX.column.opacities[l],
-        depthWrite: l === 0,
-        side: l === 0 ? THREE.FrontSide : THREE.DoubleSide,
+        depthWrite: false,
+        side: THREE.FrontSide,
       }));
     }
 

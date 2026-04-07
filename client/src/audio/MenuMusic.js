@@ -32,6 +32,8 @@ function _fade(from, to, duration) {
 }
 
 export const menuMusic = {
+  _pendingRetry: false,
+
   /** Start looping menu music with fade-in. Safe to call multiple times. */
   play() {
     if (_audio) return; // already playing
@@ -40,9 +42,23 @@ export const menuMusic = {
     _audio.volume = 0;
     _audio.play().then(() => {
       _fade(0, VOLUME, FADE_IN_MS);
+      this._pendingRetry = false;
     }).catch(() => {
-      // Autoplay blocked — will be retried on user gesture
+      // Autoplay blocked — retry on first user gesture
       _audio = null;
+      if (!this._pendingRetry) {
+        this._pendingRetry = true;
+        const retry = () => {
+          window.removeEventListener('click', retry);
+          window.removeEventListener('keydown', retry);
+          window.removeEventListener('touchstart', retry);
+          this._pendingRetry = false;
+          this.play();
+        };
+        window.addEventListener('click', retry, { once: true });
+        window.addEventListener('keydown', retry, { once: true });
+        window.addEventListener('touchstart', retry, { once: true });
+      }
     });
   },
 

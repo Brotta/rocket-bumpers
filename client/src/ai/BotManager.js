@@ -62,7 +62,8 @@ export class BotManager {
   /** Tick all bot brains and apply their inputs. */
   update(dt) {
     for (const bot of this.bots) {
-      // Skip dead / fallen bots
+      // Skip dead / fallen / eliminated bots
+      if (bot.carBody.isEliminated) continue;
       if (bot.carBody.body.position.y < -2) continue;
       if (!bot.carBody.mesh.visible) continue;
 
@@ -105,7 +106,7 @@ export class BotManager {
       cb.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r);
       cb._yaw = angle + Math.PI;
       cb.mesh.visible = true;
-      cb.score = 0;
+      cb.resetHP();
       cb.isInvincible = false;
 
       // Invalidate stale timeouts and restore mass/speed/flags

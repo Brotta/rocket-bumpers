@@ -11,7 +11,8 @@ import { BotManager } from '../ai/BotManager.js';
 import { NameTags } from '../ui/NameTags.js';
 import { DynamicHazards } from '../physics/DynamicHazards.js';
 import { TireSmokeFX } from '../rendering/TireSmokeFX.js';
-import { CARS, GAME_STATES, ARENA, ROUND, RESPAWN, CAR_FEEL, OBSTACLE_STUN } from './Config.js';
+import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN } from './Config.js';
+import { HealthBars } from '../ui/HealthBars.js';
 import { StunFX } from '../rendering/StunFX.js';
 import { engineAudio } from '../audio/EngineAudio.js';
 
@@ -54,9 +55,15 @@ export class Game {
       this.physicsWorld.world,
       () => this.carBodies,
     );
+    // Wire obstacle references for missile destruction
+    this.powerUpManager.obstacleBodies = this.physicsWorld.obstacleBodies;
+    this.powerUpManager.obstacleGroups = this.sceneManager.arena.obstacleGroups;
 
     // ── Name tags ──
     this.nameTags = new NameTags();
+
+    // ── Health bars ──
+    this.healthBars = new HealthBars();
 
     // ── Bot manager ──
     this.botManager = new BotManager({
@@ -130,13 +137,16 @@ export class Game {
     // ── Stun visual FX ──
     this.stunFX = new StunFX(this.sceneManager.scene);
 
-    // ── Wire collision events → re-emit ──
-    this.collisionHandler.on('hit', (e) => this._emit('hit', e));
-    this.collisionHandler.on('ko', (e) => this._emit('ko', e));
-    this.collisionHandler.on('self-ko', (e) => this._emit('self-ko', e));
+    // ── Wire collision events ──
+    this.collisionHandler.on('damage', (e) => this._onDamage(e));
+    this.collisionHandler.on('eliminated', (e) => this._onEliminated(e));
     this.collisionHandler.on('fell', (e) => this._onPlayerFell(e));
     this.collisionHandler.on('trail-hit', (e) => this._emit('trail-hit', e));
     this.collisionHandler.on('obstacle-hit', (e) => this._onObstacleHit(e));
+
+    // ── Wire hazard damage/elimination events ──
+    this.dynamicHazards.on('damage', (e) => this._onDamage(e));
+    this.dynamicHazards.on('eliminated', (e) => this._onEliminated(e));
   }
 
   // ── Event system ──────────────────────────────────────────────────────
@@ -198,10 +208,12 @@ export class Game {
     this.nameTags.clear();
     await this.botManager.fillSlots();
 
-    // Register name tags for all cars
+    // Register name tags and health bars for all cars
     this.nameTags.add(carBody, true); // local player
+    this.healthBars.add(carBody, true);
     for (const bot of this.botManager.bots) {
       this.nameTags.add(bot.carBody, false);
+      this.healthBars.add(bot.carBody, false);
     }
   }
 
@@ -312,6 +324,7 @@ export class Game {
 
       // Sync all meshes + floor safety net + visual tilt + wheel animation
       for (const cb of this.carBodies) {
+        if (cb.isEliminated && !cb.mesh.visible) continue;
         const pos = cb.body.position;
         const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
 
@@ -374,8 +387,13 @@ export class Game {
     // Camera always follows
     this._updateCamera();
 
-    // Update name tag positions
+    // Update name tag and health bar positions
     this.nameTags.update(
+      this.sceneManager.camera,
+      window.innerWidth,
+      window.innerHeight,
+    );
+    this.healthBars.update(
       this.sceneManager.camera,
       window.innerWidth,
       window.innerHeight,
@@ -399,16 +417,16 @@ export class Game {
     const absSpeed = Math.abs(car._currentSpeed);
     const speedRatio = Math.min(absSpeed / Math.max(car.maxSpeed, 1), 1);
 
-    // Forward & right vectors — use velocity direction while airborne
+    // Forward & right vectors — use velocity direction while airborne or stunned
     // so the camera doesn't spin with the car
-    if (car._geyserAirborne) {
+    if (car._geyserAirborne || car._isStunned) {
       const vx = car.body.velocity.x;
       const vz = car.body.velocity.z;
       const hSpeed = Math.sqrt(vx * vx + vz * vz);
       if (hSpeed > 0.5) {
         this._camForward.set(vx / hSpeed, 0, vz / hSpeed);
       }
-      // else: keep previous _camForward (no meaningful direction)
+      // else: keep previous _camForward (camera holds steady)
     } else {
       this._camForward.set(0, 0, -1).applyQuaternion(carQuat);
       this._camForward.y = 0;
@@ -541,6 +559,18 @@ export class Game {
   // ── Overlap-based stun (safety net for pass-through) ───────────────
 
   _applyOverlapStun({ carBody, speed, nx, nz }) {
+    // Below stun threshold: soft bounce only
+    if (speed < OBSTACLE_STUN.minStunSpeed) {
+      carBody.body.velocity.x = nx * OBSTACLE_STUN.bounceForce;
+      carBody.body.velocity.z = nz * OBSTACLE_STUN.bounceForce;
+      carBody._currentSpeed *= 0.5;
+      carBody._internalVelX = carBody.body.velocity.x;
+      carBody._internalVelZ = carBody.body.velocity.z;
+      carBody._lastSetVelX = carBody.body.velocity.x;
+      carBody._lastSetVelZ = carBody.body.velocity.z;
+      return;
+    }
+
     // Apply stun state
     const speedT = Math.min(speed / OBSTACLE_STUN.speedForMaxStun, 1);
     const stunDuration = OBSTACLE_STUN.minDuration
@@ -595,27 +625,77 @@ export class Game {
     }
   }
 
-  // ── Respawn ───────────────────────────────────────────────────────────
+  // ── Damage & Elimination ──────────────────────────────────────────────
+
+  _onDamage(e) {
+    // Flash the health bar
+    this.healthBars.flashDamage(e.target);
+    this._emit('damage', e);
+  }
+
+  _onEliminated({ victim, killer, wasAbility }) {
+    const isLocal = victim === this.localPlayer;
+
+    // Disable controls for local player
+    if (isLocal) this._isDead = true;
+
+    // Drop held power-up
+    this.powerUpManager.drop(victim);
+
+    // Hide mesh after a short death-cam
+    setTimeout(() => {
+      victim.mesh.visible = false;
+      // Stop engine sound
+      engineAudio.removeCar(victim);
+    }, RESPAWN.deathCamDuration * 1000);
+
+    this._emit('eliminated', { victim, killer, wasAbility });
+
+    // If local player died and all remaining players are bots → quick restart
+    if (isLocal && this.gameState.isPlaying) {
+      const otherHumans = this.carBodies.filter(
+        (cb) => cb !== this.localPlayer && !this.botManager.isBot(cb) && !cb.isEliminated,
+      );
+      if (otherHumans.length === 0) {
+        // All-bots lobby — skip to results immediately, which triggers new round
+        setTimeout(() => {
+          if (this.gameState.isPlaying) this.gameState.forceEndRound();
+        }, 1500); // brief pause so player sees they died
+        return;
+      }
+    }
+
+    // Check win condition (last car standing)
+    this._checkWinCondition();
+  }
+
+  _checkWinCondition() {
+    if (!this.gameState.isPlaying) return;
+    const alive = this.carBodies.filter((cb) => !cb.isEliminated);
+    if (alive.length <= 1) {
+      // End the round immediately — last car standing wins
+      this.gameState.forceEndRound();
+    }
+  }
+
+  // ── Respawn (fall off edge — NOT eliminated, just damage + respawn) ──
 
   _onPlayerFell({ victim }) {
     const isLocal = victim === this.localPlayer;
     const isBot = this.botManager.isBot(victim);
+
+    // If eliminated by fall damage (hp reached 0 in CollisionHandler._handleFall),
+    // handle as elimination — no respawn
+    if (victim.isEliminated) {
+      this._onEliminated({ victim, killer: null, wasAbility: false });
+      return;
+    }
 
     // Mark local player as dead (disables controls, camera keeps following)
     if (isLocal) this._isDead = true;
 
     // Drop held power-up
     this.powerUpManager.drop(victim);
-
-    // No respawn during last 10s of the round
-    const remaining = this.gameState.remainingTime;
-    if (remaining <= ROUND.noRespawnLastSeconds) {
-      // Stay dead until round ends — hide mesh after death cam
-      setTimeout(() => {
-        victim.mesh.visible = false;
-      }, RESPAWN.deathCamDuration * 1000);
-      return;
-    }
 
     // After death-cam delay (2s): teleport and respawn
     setTimeout(() => {
@@ -704,15 +784,22 @@ export class Game {
     // Lock all cars at spawn positions
     this.disableInput();
 
-    // Reset scores, power-ups, and all mutable state for new round
+    // Reset HP, power-ups, and all mutable state for new round
     for (const cb of this.carBodies) {
-      cb.score = 0;
-      cb.resetState(); // invalidates stale timeouts, resets mass/speed/flags
+      cb.resetHP();
+      cb._eliminationEmitted = false;
+      cb.resetState();
+      cb.mesh.visible = true;
       const ability = this.abilities.get(cb);
       if (ability) ability.forceReset();
     }
     this.powerUpManager.reset();
     this.dynamicHazards.reset();
+
+    // Re-add engine sounds for all cars (some may have been removed on elimination)
+    for (const cb of this.carBodies) {
+      engineAudio.addCar(cb, cb === this.localPlayer);
+    }
 
     // Reposition bots for new round
     this.botManager.resetForNewRound();
@@ -730,10 +817,20 @@ export class Game {
     this.disableInput();
     if (this._timerEl) this._timerEl.style.display = 'none';
 
-    // Emit results with sorted scores
+    // Emit results ranked by survival: alive first (sorted by HP), then eliminated
     const results = this.carBodies
-      .map((cb) => ({ nickname: cb.nickname, carType: cb.carType, score: cb.score }))
-      .sort((a, b) => b.score - a.score);
+      .map((cb) => ({
+        nickname: cb.nickname,
+        carType: cb.carType,
+        hp: cb.hp,
+        maxHp: cb.maxHp,
+        isEliminated: cb.isEliminated,
+      }))
+      .sort((a, b) => {
+        // Alive cars first, then by HP descending
+        if (a.isEliminated !== b.isEliminated) return a.isEliminated ? 1 : -1;
+        return b.hp - a.hp;
+      });
     this._emit('roundEnd', { results });
   }
 

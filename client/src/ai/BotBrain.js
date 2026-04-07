@@ -436,17 +436,17 @@ export class BotBrain {
     if (this._powerupUseDelay < 1.0 + Math.random() * 0.5) return;
 
     switch (held) {
-      case 'ROCKET_BOOST':
+      case 'MISSILE':
+        // Fire when charging at a target or target is ahead
         if (this.state === 'CHARGE' || this.state === 'TARGET') this.powerUpManager.use(this.carBody);
         break;
-      case 'SHOCKWAVE':
-        if (this._countNearby(12) >= 1) this.powerUpManager.use(this.carBody);
+      case 'HOMING_MISSILE':
+        // Fire when any enemy is within range
+        if (this._countNearby(40) >= 1) this.powerUpManager.use(this.carBody);
         break;
       case 'SHIELD':
-        if (this._enemyChargingUs() || this._edgeDanger) this.powerUpManager.use(this.carBody);
-        break;
-      case 'MAGNET':
-        if (this._countNearby(10) >= 1) this.powerUpManager.use(this.carBody);
+        // Activate defensively when under threat or low HP
+        if (this._enemyChargingUs() || this._edgeDanger || this.carBody.hp < 40) this.powerUpManager.use(this.carBody);
         break;
       default:
         if (this._powerupUseDelay > 3.0) this.powerUpManager.use(this.carBody);
@@ -493,13 +493,14 @@ export class BotBrain {
 
     for (const other of others) {
       if (other === this.carBody) continue;
+      if (other.isEliminated) continue;
       if (!other.mesh.visible || other.body.position.y < -2) continue;
 
       const d = this._distTo(other);
       if (d > this.p.targetRange) continue;
 
       let score = (this.p.targetRange - d) + Math.random() * 10;
-      if (other.score < this.carBody.score) score += 3;
+      if (other.hp < this.carBody.hp) score += 3;
 
       if (score > bestScore) { bestScore = score; best = other; }
     }

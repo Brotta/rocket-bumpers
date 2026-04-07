@@ -19,15 +19,13 @@ export class StunFX {
 
     // ── Debris particle pool (InstancedMesh for performance) ──
     const debrisGeo = new THREE.IcosahedronGeometry(OBSTACLE_STUN.fx.debrisSize, 0);
-    const debrisMat = new THREE.MeshStandardMaterial({
+    const debrisMat = new THREE.MeshBasicMaterial({
       color: OBSTACLE_STUN.fx.debrisColor,
-      roughness: 0.9,
-      metalness: 0.0,
     });
     this._debrisPoolSize = 40; // max simultaneous debris particles
     this._debrisMesh = new THREE.InstancedMesh(debrisGeo, debrisMat, this._debrisPoolSize);
     this._debrisMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this._debrisMesh.frustumCulled = false;
+    this._debrisMesh.frustumCulled = true;
     this._scene.add(this._debrisMesh);
 
     // Debris state arrays
@@ -203,9 +201,9 @@ export class StunFX {
       this._debrisVel[i].y -= gravity * dt;
       this._debrisPos[i].addScaledVector(this._debrisVel[i], dt);
 
-      // Scale fades out
+      // Scale fades out (deterministic — no per-frame Math.random())
       const lifeRatio = this._debrisLife[i] / this._debrisMaxLife[i];
-      const scale = lifeRatio * (0.5 + Math.random() * 0.5);
+      const scale = lifeRatio;
 
       this._debrisMatrix.makeScale(scale, scale, scale);
       this._debrisMatrix.setPosition(this._debrisPos[i]);

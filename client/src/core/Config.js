@@ -395,20 +395,45 @@ export const THEME = {
   geyserActive: 0xff3300,
 };
 
-// ── Scoring ──────────────────────────────────────────────────────────
-export const SCORING = {
-  hit:          10,   // >5 u/s relative velocity
-  bigHit:       25,   // >15 u/s
-  megaHit:      50,   // >25 u/s
-  knockOff:    100,
-  fallOff:     -50,
-  powerupKill:  30,
-  abilityKO:    75,
+// ── Damage / HP System ──────────────────────────────────────────────
+export const DAMAGE = {
+  BASE_DAMAGE: 8,          // base damage per collision
+  REF_SPEED: 15,           // reference relative speed (u/s) — at 15 u/s velocityFactor = 1.0
+  MIN_SPEED: 3,            // below this relative speed: zero damage
+  MIN_DAMAGE: 2,           // minimum damage if speed threshold is met
+  MAX_DAMAGE: 45,          // cap per single hit (prevents one-shots)
+
+  // Impact angle multiplier range
+  ANGLE_MIN: 0.3,          // glancing blow (90°)
+  ANGLE_MAX: 1.0,          // head-on (0° / 180°)
+
+  // Armor: victim mass reduces incoming damage
+  ARMOR_FACTOR: 0.08,      // damage / (1 + victimMass * ARMOR_FACTOR)
+
+  // HP
+  MAX_HP: 100,
+
+  // Environmental damage
+  LAVA_DPS: 20,            // damage per second in lava pool
+  GEYSER_DAMAGE: 15,       // instant damage from geyser eruption
+  FALL_DAMAGE: 25,         // damage from falling off edge (+ respawn)
+  OBSTACLE_DAMAGE: 5,      // damage from pillar/boulder impact
+
+  // Ability damage
+  TRAIL_DAMAGE: 12,        // VIPER trail fire (single touch)
+  PULSE_DAMAGE: 8,         // TOAD radial knockback
+  LEAP_DAMAGE: 15,         // MAMMOTH landing shockwave
+
+  // Hit tier thresholds (for VFX feedback, not scoring)
   hitThresholds: {
-    normal: 3,
-    big: 9,
-    mega: 16,
+    light: 3,              // min relative speed for any damage
+    heavy: 12,             // heavy hit VFX
+    devastating: 25,       // devastating hit VFX
   },
+
+  // Per-pair damage cooldown (prevents continuous damage when pushing)
+  PAIR_COOLDOWN: 1.0,      // seconds — same pair can't deal damage again for this long
+  BOUNCE_IMPULSE: 5,       // separation impulse on damage hit (u/s, applied to each car outward)
 };
 
 // ── Round / Timing ───────────────────────────────────────────────────
@@ -441,6 +466,9 @@ export const PHYSICS = {
 
 // ── Obstacle Stun (boulder / pillar collision) ──────────────────────
 export const OBSTACLE_STUN = {
+  // Minimum speed for stun + damage; below this → soft bounce only
+  minStunSpeed: 8,        // u/s — gentle contact just bounces off
+
   // Stun duration scales with impact speed
   minDuration: 0.5,       // seconds — light tap
   maxDuration: 1.5,       // seconds — full speed crash
@@ -682,33 +710,41 @@ export const COLLISION_GROUPS = {
   CAR:    2,
   PICKUP: 4,
   TRAIL:  8,
+  MISSILE: 16,
 };
 
 // ── Power-ups ────────────────────────────────────────────────────────
 export const POWERUPS = {
-  ROCKET_BOOST: {
-    name: 'Rocket Boost',
-    color: 0xff8c00, // Orange
-    speedMultiplier: 2,
-    duration: 2,
+  MISSILE: {
+    name: 'Missile',
+    color: 0xff4400,        // Orange-red
+    icon: '/assets/icons/Missile.png',
+    damage: 30,
+    speedBonus: 0.15,       // 15% faster than car speed
+    accel: 60,              // acceleration (u/s²) — faster than any car
+    lifetime: 4,            // seconds before self-destruct
+    radius: 0.3,            // collision radius
   },
-  SHOCKWAVE: {
-    name: 'Shockwave',
-    color: 0x1e90ff, // Blue
-    radius: 15,
-    duration: 0, // instant
+  HOMING_MISSILE: {
+    name: 'Homing Missile',
+    color: 0xff0066,        // Hot pink
+    icon: '/assets/icons/HomingMissile.png',
+    damage: 30,
+    straightTime: 0.1,      // seconds flying straight before homing
+    turnRate: 2.8,          // rad/s max turn rate (fallible — can be dodged)
+    speed: 28,              // fixed speed (u/s)
+    lifetime: 5,            // seconds before self-destruct
+    radius: 0.3,
+    seekRadius: 80,         // max distance to acquire target
+    losAngle: Math.PI * 0.6, // ~108° — missile loses lock outside this cone
+    reacquireDelay: 0.5,    // seconds before re-acquiring after losing lock
   },
   SHIELD: {
     name: 'Shield',
-    color: 0x32cd32, // Green
-    massMultiplier: 2,
-    duration: 4,
-  },
-  MAGNET: {
-    name: 'Magnet',
-    color: 0x9b30ff, // Purple
-    radius: 8,
-    duration: 3,
+    color: 0x00ff88,        // Green
+    icon: '/assets/icons/Shield.png',
+    damageReduction: 0.5,   // halves incoming damage
+    duration: 5,            // seconds
   },
 };
 

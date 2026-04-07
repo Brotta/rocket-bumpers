@@ -21,15 +21,15 @@ hudDiv.style.cssText = `
 `;
 document.body.appendChild(hudDiv);
 
-// Score (top-left, under player info)
-const scoreDiv = document.createElement('div');
-scoreDiv.style.cssText = `
+// HP display (top-left, under player info)
+const hpDiv = document.createElement('div');
+hpDiv.style.cssText = `
   position:fixed;top:52px;left:16px;
-  color:#0f0;font:bold 22px 'Courier New',monospace;
-  text-shadow:0 0 8px #0f0;
+  color:#44ff44;font:bold 22px 'Courier New',monospace;
+  text-shadow:0 0 8px #44ff44;
   pointer-events:none;z-index:10;display:none;
 `;
-document.body.appendChild(scoreDiv);
+document.body.appendChild(hpDiv);
 
 // Ability cooldown ring (bottom-right)
 const abilityHud = document.createElement('div');
@@ -63,22 +63,23 @@ const powerupHud = document.createElement('div');
 powerupHud.id = 'powerup-hud';
 powerupHud.style.cssText = `
   position:fixed;top:16px;right:16px;
-  width:72px;height:84px;
+  width:96px;height:110px;
   pointer-events:none;z-index:10;display:none;
   font-family:'Courier New',monospace;
 `;
 powerupHud.innerHTML = `
   <div id="pu-box" style="
-    width:64px;height:64px;margin:0 auto;
-    border:3px solid #333;border-radius:10px;
-    background:rgba(10,10,26,0.8);
-    display:flex;align-items:center;justify-content:center;
+    width:88px;height:88px;margin:0 auto;
+    border:3px solid #333;border-radius:12px;
+    background:rgba(10,10,26,0.85);
     transition:border-color .25s,box-shadow .25s,transform .15s;
     position:relative;overflow:hidden;
   ">
     <div id="pu-icon" style="
-      font-size:28px;line-height:1;
-      text-shadow:0 0 10px currentColor;
+      width:100%;height:100%;
+      background-size:contain;
+      background-repeat:no-repeat;
+      background-position:center;
       transition:opacity .2s;
       opacity:0;
     "></div>
@@ -90,8 +91,8 @@ powerupHud.innerHTML = `
     "></div>
   </div>
   <div id="pu-label" style="
-    text-align:center;font:bold 9px 'Courier New',monospace;
-    color:#666;margin-top:3px;letter-spacing:0.1em;
+    text-align:center;font:bold 11px 'Courier New',monospace;
+    color:#666;margin-top:4px;letter-spacing:0.1em;
     transition:color .2s;
   ">[E] ITEM</div>
 `;
@@ -104,10 +105,9 @@ const puFlash = powerupHud.querySelector('#pu-flash');
 
 // Power-up icon/color mapping
 const PU_DISPLAY = {
-  ROCKET_BOOST: { icon: '🚀', label: 'BOOST' },
-  SHOCKWAVE:    { icon: '💥', label: 'SHOCK' },
-  SHIELD:       { icon: '🛡️', label: 'SHIELD' },
-  MAGNET:       { icon: '🧲', label: 'MAGNET' },
+  MISSILE:        { icon: '/assets/icons/Missile.png',       label: 'MISSILE' },
+  HOMING_MISSILE: { icon: '/assets/icons/HomingMissile.png', label: 'HOMING' },
+  SHIELD:         { icon: '/assets/icons/Shield.png',        label: 'SHIELD' },
 };
 
 function setPowerUpHud(type) {
@@ -117,19 +117,18 @@ function setPowerUpHud(type) {
     puBox.style.boxShadow = 'none';
     puBox.style.transform = 'scale(1)';
     puIcon.style.opacity = '0';
+    puIcon.style.backgroundImage = 'none';
     puLabel.textContent = '[E] ITEM';
     puLabel.style.color = '#666';
     return;
   }
-  const cfg = CARS.FANG; // just need POWERUPS
   const powerupCfg = game.powerUpManager.getHeldConfig(game.localPlayer);
   const colorHex = powerupCfg ? '#' + powerupCfg.color.toString(16).padStart(6, '0') : '#fff';
-  const display = PU_DISPLAY[type] || { icon: '?', label: type };
+  const display = PU_DISPLAY[type] || { icon: '', label: type };
 
   puBox.style.borderColor = colorHex;
   puBox.style.boxShadow = `0 0 16px ${colorHex}55, inset 0 0 20px ${colorHex}22`;
-  puIcon.textContent = display.icon;
-  puIcon.style.color = colorHex;
+  puIcon.style.backgroundImage = `url("${display.icon}")`;
   puIcon.style.opacity = '1';
   puLabel.textContent = `[E] ${display.label}`;
   puLabel.style.color = colorHex;
@@ -168,7 +167,7 @@ function showHUD(nickname, carType) {
   const c = CARS[carType];
   hudDiv.textContent = `${nickname} — ${c.name}`;
   hudDiv.style.display = 'block';
-  scoreDiv.style.display = 'block';
+  hpDiv.style.display = 'block';
   abilityHud.style.display = 'block';
   powerupHud.style.display = 'block';
   abilityLabel.textContent = `${c.ability.name}\n[SPACE]`;
@@ -194,26 +193,44 @@ function updateAbilityHud() {
   }
 }
 
-function updateScoreHud() {
+function updateHpHud() {
   if (game.localPlayer) {
-    scoreDiv.textContent = `SCORE: ${game.localPlayer.score}`;
+    const hp = Math.ceil(game.localPlayer.hp);
+    hpDiv.textContent = `HP: ${hp}`;
+    if (hp > 60) {
+      hpDiv.style.color = '#44ff44';
+      hpDiv.style.textShadow = '0 0 8px #44ff44';
+    } else if (hp > 30) {
+      hpDiv.style.color = '#ffcc00';
+      hpDiv.style.textShadow = '0 0 8px #ffcc00';
+    } else {
+      hpDiv.style.color = '#ff3333';
+      hpDiv.style.textShadow = '0 0 8px #ff3333';
+    }
   }
 }
 
 function showResults(results) {
   resultsDiv.style.display = 'flex';
+  const winner = results[0];
+  const title = winner && !winner.isEliminated ? `${winner.nickname} WINS!` : 'ROUND OVER';
   resultsDiv.innerHTML = `
     <h1 style="color:#0ff;font-size:2.5rem;margin-bottom:1.5rem;
-      text-shadow:0 0 20px #0ff;letter-spacing:0.15em;">ROUND OVER</h1>
+      text-shadow:0 0 20px #0ff;letter-spacing:0.15em;">${title}</h1>
     <div style="width:min(400px,90vw)">
-      ${results.map((r, i) => `
-        <div style="display:flex;justify-content:space-between;padding:8px 12px;
-          color:${i === 0 ? '#ff0' : '#ccc'};font-size:${i === 0 ? '1.2rem' : '1rem'};
-          border-bottom:1px solid #222;">
-          <span>${i + 1}. ${r.nickname} (${r.carType})</span>
-          <span style="font-weight:bold">${r.score}</span>
-        </div>
-      `).join('')}
+      ${results.map((r, i) => {
+        const hpText = r.isEliminated ? 'ELIMINATED' : `${Math.ceil(r.hp)} HP`;
+        const color = r.isEliminated ? '#666' : (i === 0 ? '#ff0' : '#ccc');
+        const size = i === 0 ? '1.2rem' : '1rem';
+        return `
+          <div style="display:flex;justify-content:space-between;padding:8px 12px;
+            color:${color};font-size:${size};
+            border-bottom:1px solid #222;${r.isEliminated ? 'text-decoration:line-through;opacity:0.6;' : ''}">
+            <span>${i + 1}. ${r.nickname} (${r.carType})</span>
+            <span style="font-weight:bold">${hpText}</span>
+          </div>
+        `;
+      }).join('')}
     </div>
     <p style="color:#666;margin-top:1.5rem;font-size:0.8rem">Next round starting...</p>
   `;
@@ -250,30 +267,29 @@ const _hudLoop = () => {
   requestAnimationFrame(_hudLoop);
   if (game.gameState.isPlaying) {
     updateAbilityHud();
-    updateScoreHud();
+    updateHpHud();
   }
 };
 requestAnimationFrame(_hudLoop);
 
-// ── Hit feedback flash ──────────────────────────────────────────────────
+// ── Damage feedback flash ───────────────────────────────────────────────
 
-game.on('hit', ({ attacker, victim, tier }) => {
-  if (attacker === game.localPlayer) {
-    _flashScore(tier);
+game.on('damage', ({ target, amount }) => {
+  if (target === game.localPlayer && amount > 0) {
+    // Flash HP display red when taking damage
+    hpDiv.style.color = '#ff0000';
+    hpDiv.style.textShadow = '0 0 12px #ff0000';
+    setTimeout(() => updateHpHud(), 200);
   }
 });
 
-game.on('ko', ({ attacker, isAbilityKO }) => {
-  if (attacker === game.localPlayer) {
-    _flashScore(isAbilityKO ? 'abilityKO' : 'ko');
+game.on('eliminated', ({ victim }) => {
+  if (victim === game.localPlayer) {
+    hpDiv.textContent = 'ELIMINATED';
+    hpDiv.style.color = '#ff0000';
+    hpDiv.style.textShadow = '0 0 12px #ff0000';
   }
 });
-
-function _flashScore(tier) {
-  const colors = { normal: '#fff', big: '#ff0', mega: '#f40', ko: '#0ff', abilityKO: '#f0f' };
-  scoreDiv.style.color = colors[tier] || '#0f0';
-  setTimeout(() => { scoreDiv.style.color = '#0f0'; }, 300);
-}
 
 // ── UI Flow: Splash (load + nickname) → CarSelect → Game ─────────────
 

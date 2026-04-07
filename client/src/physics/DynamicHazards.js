@@ -1,4 +1,4 @@
-import { ARENA } from '../core/Config.js';
+import { ARENA, DAMAGE } from '../core/Config.js';
 import { GeyserAudio } from '../audio/GeyserAudio.js';
 
 /**
@@ -14,7 +14,7 @@ import { GeyserAudio } from '../audio/GeyserAudio.js';
 export class DynamicHazards {
   constructor(arena) {
     this._arena = arena; // ArenaBuilder (for visual hooks)
-    this._callbacks = { kill: [], geyserErupt: [], eruptionBlast: [] };
+    this._callbacks = { kill: [], geyserErupt: [], eruptionBlast: [], damage: [], eliminated: [] };
 
     // ── Lava pool damage ──
     this._lavaTimers = new Map(); // CarBody → seconds in lava
@@ -80,11 +80,19 @@ export class DynamicHazards {
     }
   }
 
-  // ── Lava Pool ────────────────────────────────────────────────────────
+  // ── Lava Pool (DPS damage) ────────────────────────────────────────────
   _updateLava(dt, carBodies) {
-    const { radius, killTime } = ARENA.lava;
+    const { radius } = ARENA.lava;
 
     for (const cb of carBodies) {
+      if (cb.isEliminated || cb.isInvincible) {
+        if (this._lavaTimers.has(cb)) {
+          this._lavaTimers.delete(cb);
+          this._setCarEmissive(cb, 0.15);
+        }
+        continue;
+      }
+
       const pos = cb.body.position;
       const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
       const inLava = dist < radius && pos.y < 1.5;
@@ -93,13 +101,22 @@ export class DynamicHazards {
         const timer = (this._lavaTimers.get(cb) || 0) + dt;
         this._lavaTimers.set(cb, timer);
 
-        // Visual feedback
-        const intensity = Math.min(timer / killTime, 1.0);
+        // Visual feedback: emissive scales with time in lava
+        const intensity = Math.min(timer / 3.0, 1.0);
         this._setCarEmissive(cb, 0.15 + intensity * 1.5);
 
-        if (timer >= killTime) {
+        // Apply DPS damage
+        const dmg = DAMAGE.LAVA_DPS * dt;
+        const actual = cb.takeDamage(dmg);
+        if (actual > 0) {
+          for (const fn of this._callbacks.damage) fn({ target: cb, amount: actual, source: null, tier: 'light', wasAbility: false });
+        }
+
+        // Check elimination
+        if (cb.isEliminated) {
           this._lavaTimers.delete(cb);
           this._setCarEmissive(cb, 0.15);
+          for (const fn of this._callbacks.eliminated) fn({ victim: cb, killer: null, wasAbility: false });
           for (const fn of this._callbacks.kill) fn(cb);
         }
       } else if (this._lavaTimers.has(cb)) {
@@ -131,12 +148,19 @@ export class DynamicHazards {
         this._arena._lavaMaterial.uniforms.uEmissiveBoost.value = 0;
       }
 
-      // Apply radial force to all cars
+      // Apply radial force to all cars (knockback only, no damage)
+      // Safe zone: cars beyond 80% of arena radius are NOT pushed (prevents unfair edge kills)
       const { force, radius: maxRadius } = ARENA.eruption;
+      const arenaRadius = ARENA.diameter / 2;
+      const safeZoneRadius = arenaRadius * 0.8;
       for (const cb of carBodies) {
+        if (cb.isEliminated) continue;
         const pos = cb.body.position;
         const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
         if (dist > maxRadius || dist < 0.1) continue;
+
+        // Safe zone: no push near the edge
+        if (dist > safeZoneRadius) continue;
 
         const falloff = 1 - (dist / maxRadius);
         const pushForce = force * falloff;
@@ -208,8 +232,9 @@ export class DynamicHazards {
           break;
 
         case 'active':
-          // Launch cars that touch the geyser
+          // Launch cars that touch the geyser + deal damage
           for (const cb of carBodies) {
+            if (cb.isEliminated || cb.isInvincible) continue;
             const dx = cb.body.position.x - g.x;
             const dz = cb.body.position.z - g.z;
             const dist = Math.sqrt(dx * dx + dz * dz);
@@ -230,6 +255,15 @@ export class DynamicHazards {
                 // Random spin: 1.5–3 full rotations/sec, random direction
                 cb._geyserSpinRate = (Math.random() > 0.5 ? 1 : -1)
                   * (Math.PI * 3 + Math.random() * Math.PI * 3);
+
+                // Geyser damage (once per launch, not every frame)
+                const actual = cb.takeDamage(DAMAGE.GEYSER_DAMAGE);
+                if (actual > 0) {
+                  for (const fn of this._callbacks.damage) fn({ target: cb, amount: actual, source: null, tier: 'heavy', wasAbility: false });
+                }
+                if (cb.isEliminated) {
+                  for (const fn of this._callbacks.eliminated) fn({ victim: cb, killer: null, wasAbility: false });
+                }
               }
             }
           }

@@ -5,7 +5,7 @@ import * as THREE from 'three';
  * projected from 3D world positions to 2D screen coordinates.
  */
 
-const TAG_OFFSET_Y = 2.2; // units above the car
+const TAG_OFFSET_Y = 3.6; // units above the car (above health bar)
 
 export class NameTags {
   constructor() {
@@ -30,9 +30,9 @@ export class NameTags {
       .name-tag {
         position:absolute;
         left:0;top:0;
-        font:bold 12px 'Courier New',monospace;
+        font:bold 22px 'Courier New',monospace;
         color:#fff;
-        text-shadow:0 0 4px #000, 0 0 8px #000;
+        text-shadow:0 0 6px #000, 0 0 12px #000;
         white-space:nowrap;
         pointer-events:none;
         opacity:0.9;

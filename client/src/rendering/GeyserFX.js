@@ -47,14 +47,11 @@ export class GeyserFX {
 
     // ── Global InstancedMesh for all droplets ──
     const dropletGeo = new THREE.SphereGeometry(FX.droplets.radius, 4, 3);
-    const dropletMat = new THREE.MeshStandardMaterial({
+    const dropletMat = new THREE.MeshBasicMaterial({
       color: THEME.lavaColor,
-      emissive: THEME.lavaEmissive,
-      emissiveIntensity: 2.5,
-      roughness: 0.3,
     });
     this._dropletMesh = new THREE.InstancedMesh(dropletGeo, dropletMat, TOTAL_DROPLETS);
-    this._dropletMesh.frustumCulled = false;
+    this._dropletMesh.frustumCulled = true;
     // Hide all instances initially (move below ground)
     for (let i = 0; i < TOTAL_DROPLETS; i++) {
       _dummy.position.set(0, -100, 0);
@@ -72,10 +69,8 @@ export class GeyserFX {
     // ── Single shared splash ring ──
     const splashGeo = new THREE.TorusGeometry(1, 0.15, 6, 16);
     splashGeo.rotateX(-Math.PI / 2);
-    this._splashMat = new THREE.MeshStandardMaterial({
+    this._splashMat = new THREE.MeshBasicMaterial({
       color: THEME.lavaColor,
-      emissive: THEME.lavaEmissive,
-      emissiveIntensity: 3.0,
       transparent: true,
       opacity: 0.8,
       depthWrite: false,
@@ -103,6 +98,9 @@ export class GeyserFX {
     const steamGeo = new THREE.BufferGeometry();
     steamGeo.setAttribute('position', new THREE.BufferAttribute(steamPositions, 3));
     slot.steamPoints = new THREE.Points(steamGeo, this._steamMat);
+    // Keep frustumCulled false for point clouds — their particles scatter far
+    // and Three.js auto-bounding would pop them in/out incorrectly.
+    // The real perf win is MeshBasicMaterial on columns/droplets.
     slot.steamPoints.frustumCulled = false;
     slot.steamPoints.visible = false;
     this.scene.add(slot.steamPoints);

@@ -1,6 +1,6 @@
 import * as CANNON from 'cannon-es';
 import * as THREE from 'three';
-import { CARS, STAT_MAP, COLLISION_GROUPS, CAR_FEEL, OBSTACLE_STUN } from '../core/Config.js';
+import { CARS, STAT_MAP, COLLISION_GROUPS, CAR_FEEL, OBSTACLE_STUN, DAMAGE } from '../core/Config.js';
 
 // Reusable helpers for contact shadow rotation (avoid per-frame allocations)
 const _csQuatHelper = new THREE.Quaternion();
@@ -58,16 +58,21 @@ export class CarBody {
     this.driftMode = false;     // DRIFT sets this
     this._originalMass = this.mass;
 
-    // Identity & scoring (set externally by Game)
+    // Identity (set externally by Game)
     this.playerId = null;
     this.nickname = '';
-    this.score = 0;
+
+    // HP system
+    this.hp = DAMAGE.MAX_HP;
+    this.maxHp = DAMAGE.MAX_HP;
+    this.isEliminated = false;
 
     // KO attribution — updated by CollisionHandler & AbilitySystem
     this.lastHitBy = null; // { source: CarBody, wasAbility: bool, time: number }
 
     // Status flags (set by powerup / ability systems)
     this.hasShield = false;
+    this._shieldDamageReduction = 0; // 0..1 fraction of damage absorbed
     this.isInvincible = false;  // respawn invincibility
     this.hasRam = false;        // RAM ability active
 
@@ -143,6 +148,7 @@ export class CarBody {
     this.speedMultiplier = 1;
     this.driftMode = false;
     this.hasShield = false;
+    this._shieldDamageReduction = 0;
     this.hasRam = false;
     this.lastHitBy = null;
     this._isStunned = false;
@@ -161,6 +167,37 @@ export class CarBody {
     this._accelInput = 0;
     this._currentRoll = 0;
     this._currentPitch = 0;
+  }
+
+  /** Reset HP for a new round. */
+  resetHP() {
+    this.hp = this.maxHp;
+    this.isEliminated = false;
+  }
+
+  /**
+   * Apply damage to this car. Returns actual damage dealt.
+   * @param {number} amount — raw damage
+   * @param {CarBody|null} source — who dealt it (for kill attribution)
+   * @param {boolean} wasAbility — ability-sourced damage
+   * @returns {number} actual damage applied
+   */
+  takeDamage(amount, source = null, wasAbility = false) {
+    if (this.isEliminated || this.isInvincible) return 0;
+    // Shield halves incoming damage
+    if (this.hasShield && this._shieldDamageReduction > 0) {
+      amount *= (1 - this._shieldDamageReduction);
+    }
+    const actual = Math.min(amount, this.hp);
+    this.hp -= actual;
+    if (source) {
+      this.lastHitBy = { source, wasAbility, time: performance.now() };
+    }
+    if (this.hp <= 0) {
+      this.hp = 0;
+      this.isEliminated = true;
+    }
+    return actual;
   }
 
   // ── Controls (Drift-style kinematic model) ──────────────────────────

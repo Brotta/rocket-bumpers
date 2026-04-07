@@ -1,16 +1,16 @@
 # 🚀 ROCKET BUMPERS — Game Design Document
 
 ## Concept
-Arena vehicular combat. Pick your ride, crash into others for points. 8 unique cars with different stats and abilities. Pure chaos, zero skill floor, infinite skill ceiling. Think **Destruction Derby × Mario Kart Battle Mode × Rocket League** but simpler.
+Arena vehicular combat. Pick your ride, crash into others to deal damage. 8 unique cars with different stats and abilities. 100 HP per car — last one standing wins. Think **Destruction Derby × Mario Kart Battle Mode × Rocket League** but simpler.
 
 ---
 
 ## Core Loop (30 seconds to understand)
 1. Pick a car (each plays different)
-2. Crash into other cars = points
-3. Knock cars off the edge = bonus points
+2. Crash into other cars = deal damage (100 HP system)
+3. At 0 HP you're eliminated — last car standing wins
 4. Grab power-ups + use your car's unique ability
-5. Round ends after 90 seconds → scoreboard → new round
+5. Round ends when 1 car remains or timer runs out (90s) → results → new round
 
 ---
 
@@ -78,7 +78,7 @@ rocket-bumpers/
 │   │   │   ├── PhysicsWorld.js    # Cannon-es world setup
 │   │   │   ├── CarBody.js         # Vehicle rigid body + controls (reads car stats)
 │   │   │   ├── AbilitySystem.js   # Per-car unique ability logic
-│   │   │   └── CollisionHandler.js # Detect impacts, calc damage/score
+│   │   │   └── CollisionHandler.js # Detect impacts, calc damage (approach-velocity model)
 │   │   ├── network/
 │   │   │   ├── NetworkManager.js  # PartyKit client connection
 │   │   │   ├── MessageTypes.js    # Enum of all message types
@@ -90,10 +90,11 @@ rocket-bumpers/
 │   │   ├── audio/
 │   │   │   └── AudioManager.js    # Howler.js wrapper, SFX + music
 │   │   ├── ui/
-│   │   │   ├── HUD.js             # Timer, score, ability indicator
+│   │   │   ├── HUD.js             # Timer, HP display, ability indicator
+│   │   │   ├── HealthBars.js      # Floating HP bars above cars (DOM overlay, 3D→2D projection)
 │   │   │   ├── Lobby.js           # Join screen (nickname input)
 │   │   │   ├── CarSelect.js       # Car selection carousel
-│   │   │   ├── Scoreboard.js      # End-of-round results
+│   │   │   ├── Scoreboard.js      # End-of-round results (HP-based ranking)
 │   │   │   ├── NameTags.js        # Floating player names above cars (DOM overlay, 3D→2D projection)
 │   │   │   └── MobileControls.js  # Touch joystick + buttons
 │   │   └── utils/
@@ -200,9 +201,9 @@ rocket-bumpers/
 
 ### Arena (Volcano Flat)
 - **Shape**: Octagonal platform (flat, 120 units diameter — 50% larger than original)
-- **Edges**: No walls — you fall off and respawn (costs points)
+- **Edges**: No walls — you fall off and take 25 HP damage + respawn
 - **Surface**: Flat volcanic rock with procedural texture (FBM noise) + normal map for depth
-- **Central lava pool**: Radius 10, recessed at Y=-0.08. Procedural lava texture with animated UV offset (flowing effect). Cars in lava for 2s die (self-KO). Visual feedback: car emissive glows red proportionally to contact time
+- **Central lava pool**: Radius 10, recessed at Y=-0.08. Procedural lava texture with animated UV offset (flowing effect). **Deals 20 HP/s DPS** (continuous damage while in lava). Visual feedback: car emissive glows red proportionally to time in lava
 - **Boost pads**: 8 glowing strips at 55% radius, volcano yellow (0xffcc00)
 - **Visual style**: Volcanic theme — warm amber/orange lighting, dark rock surface, lava glow, ash cloud skybox, ember particles, distant volcanic mountains, decorative rock pillars at arena edges
 - **Theme**: `THEME` export in Config.js centralizes all volcano palette colors
@@ -216,9 +217,9 @@ Three hazard systems managed by `DynamicHazards.js`, all active during PLAYING s
    - Both physics bodies (CANNON.Box, updated every frame) and visual meshes (with rough detail rocks on top)
    - Cars collide with arms and get pushed/blocked — creates dynamic chokepoints
 
-2. **Lava eruptions** (every ~20s)
+2. **Lava eruptions** (every ~20s) — **knockback only, no damage**
    - 2s warning: lava pool emissive pulses with rising intensity (1.5→5.0) + sinusoidal wobble (4Hz), lava bubbles accelerate (×3). Procedural audio: sub-bass rumble 20→40Hz + filtered noise sweep 50→250Hz + accelerating LFO tremolo
-   - Blast: radial shockwave pushes all cars outward (force 25, with distance falloff). Ease-out expanding ring VFX (1.0s). 30 lava surge particles (additive blending, gravity arc from pool). 8 debris chunks (InstancedMesh, DodecahedronGeometry, arcing outward with spin). Screen flash (orange additive, 0.25s). Procedural audio: 4-layer blast (sub thud 80→15Hz + wideband noise burst + 3s rumble tail + debris crackle pops)
+   - Blast: radial shockwave pushes all cars outward (force 25, with distance falloff). **Safe zone: cars beyond 80% of arena radius are NOT pushed** (prevents unfair edge kills from unavoidable events). Ease-out expanding ring VFX (1.0s). 30 lava surge particles (additive blending, gravity arc from pool). 8 debris chunks (InstancedMesh, DodecahedronGeometry, arcing outward with spin). Screen flash (orange additive, 0.25s). Procedural audio: 4-layer blast (sub thud 80→15Hz + wideband noise burst + 3s rumble tail + debris crackle pops)
    - Camera shake: intensity 0.012 (4× geyser), 400ms, always felt with distance falloff (100% within 30u, 15% minimum beyond 60u)
    - First eruption at half interval (~10s)
 
@@ -226,7 +227,7 @@ Three hazard systems managed by `DynamicHazards.js`, all active during PLAYING s
    - Random positions on arena (avoids lava center and very edge)
    - Lifecycle: idle → warning (1.5s) → active (3s) → cooldown (5s) → idle
    - **Warning phase**: 5 radial ground cracks (merged into single mesh) grow outward with pulsing emissive. Warning ring pulses on ground. 10 steam particles (white/grey, additive blending) rise upward. Shared point light fades in (orange, from 2-light pool). Procedural audio: low rumble with frequency sweep + sub-bass + LFO tremolo
-   - **Active phase**: 2-layer tapered eruption column (inner bright + outer ghost) with wobble animation. 20 lava fountain particles (gravity arc). 4 lava droplets (InstancedMesh spheres arcing outward). Splash ring expands at base (0.6s). Scorch mark appears (procedural Canvas2D texture with charred cracks + ember-glow veins + emissive map). Shared point light intensifies (red, flicker). Cars launched upward (force 15). Procedural audio: explosion burst + sustained hiss + random crackle pops. Camera shake if within 15 units of player (intensity 0.003, 150ms)
+   - **Active phase**: 2-layer tapered eruption column (inner bright + outer ghost) with wobble animation. 20 lava fountain particles (gravity arc). 4 lava droplets (InstancedMesh spheres arcing outward). Splash ring expands at base (0.6s). Scorch mark appears (procedural Canvas2D texture with charred cracks + ember-glow veins + emissive map). Shared point light intensifies (red, flicker). Cars launched upward (force 15) + **15 HP damage on first launch** (once per geyser activation, not per frame). Procedural audio: explosion burst + sustained hiss + random crackle pops. Camera shake if within 15 units of player (intensity 0.003, 150ms)
    - **Cooldown phase**: Column shrinks smoothly (not instant hide). Steam lingers 1.5s. Light fades. Scorch mark: emissive fades first, then opacity fades after 2s delay over 3s. Procedural audio: sizzle decay
    - Staggered initial spawns
    - **Performance**: 2 shared PointLights (pooled, assigned to highest-priority geysers). InstancedMesh for all droplets (1 draw call for all 24). Merged crack geometry (1 mesh per slot, not 5). Shared materials where possible. Idle geysers cost zero per-frame work
@@ -276,46 +277,92 @@ All textures generated via Canvas2D at startup — no external files:
 - All touch areas prevent default scroll/zoom
 - Multitouch: joystick + button simultaneously
 
-### Scoring
-| Event | Points |
-|-------|--------|
-| Hit another car (>5 u/s relative velocity) | +10 |
-| Big hit (>15 u/s) | +25 |
-| Mega hit (>25 u/s) | +50 |
-| Knock car off arena edge | +100 |
-| Fall off edge yourself | -50 |
-| Destroy with power-up | +30 |
-| Ability KO (knock off using ability) | +75 |
+### HP & Damage System
 
-### Collision & Damage Rules
+#### Health Points
+- Every car starts each round with **100 HP**
+- At **0 HP** the car is **eliminated** (no respawn during the round)
+- HP displayed as a **floating lifebar above each car** (DOM overlay, green→yellow→red, pulsing below 30%)
+- HUD shows local player HP (top-left)
 
-#### KO Attribution (who gets credit?)
-- Every car tracks `lastHitBy: { playerId, timestamp, wasAbility }`.
-- On any collision or force-applying event (ability shockwave, TRAIL fire, PULSE, LEAP landing), update the victim's `lastHitBy`.
-- When a car falls off (Y < -5): if `lastHitBy.timestamp` was within **3 seconds**, credit that player with KO (+100). If `lastHitBy.wasAbility` is true, give Ability KO (+75) instead of normal KO.
-- If no `lastHitBy` within 3s → self-KO, victim gets -50, nobody gets +100.
+#### Damage Formula (Approach-Velocity Model)
+Only cars **moving toward** the other car deal damage. A stationary or retreating car deals 0.
 
-#### Ability Damage Sources
-These abilities apply force without a direct car-to-car collision. They must still update the victim's `lastHitBy`:
-- **LEAP** landing shockwave → all cars in radius get `lastHitBy = MAMMOTH player, wasAbility = true`
-- **PULSE** radial push → all cars in radius get `lastHitBy = TOAD player, wasAbility = true`
-- **TRAIL** fire objects → car touching trail gets `lastHitBy = VIPER player, wasAbility = true`
-- **RAM** collisions → normal collision but `wasAbility = true` (since RAM is active)
-- **DASH** overlap → if HORNET teleports into another car, cannon-es separates them violently; this counts as a normal collision and scores normally
+```
+approachSpeed = car's velocity projected onto axis toward other car (clamped ≥ 0)
+
+rawDamage = BASE_DAMAGE × (approachSpeed / REF_SPEED) × sqrt(attackerMass) × angleFactor
+finalDamage = rawDamage / (1 + victimMass × ARMOR_FACTOR)
+```
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| BASE_DAMAGE | 8 | Global damage scaling — one knob to tune all damage |
+| REF_SPEED | 15 u/s | At this approach speed, velocityFactor = 1.0 |
+| MIN_SPEED | 3 u/s | Below this approach speed: zero damage |
+| MIN_DAMAGE | 2 | Floor per hit (if above speed threshold) |
+| MAX_DAMAGE | 45 | Cap per single hit (prevents one-shots) |
+| ARMOR_FACTOR | 0.08 | Victim mass reduces incoming damage |
+| ANGLE_MIN | 0.3 | Glancing blow multiplier (90° impact) |
+| ANGLE_MAX | 1.0 | Head-on multiplier (0°/180° impact) |
+
+**Angle factor**: `abs(dot(impactDirection, victimForward))` — head-on = 1.0, lateral = 0.0.
+
+**Why this works**:
+- **Attacker is rewarded**: if you ram someone, YOU deal damage — the stationary target doesn't hurt you back
+- **Speed is king**: high approach speed = high damage (linear scaling)
+- **Mass helps both ways**: `sqrt(attackerMass)` boosts your damage, `ARMOR_FACTOR × victimMass` reduces incoming
+- **Angle rewards precision**: head-on hits deal 3× more than glancing blows
+
+#### Per-Pair Damage Cooldown
+- After two cars collide and deal damage, that **specific pair** cannot deal damage to each other for **1.0 second**
+- Prevents continuous damage from pushing/grinding
+- On damage hit, both cars receive a **bounce impulse** (5 u/s outward) to separate them
+- Damage from other cars or hazards is unaffected by pair cooldowns
+
+#### Environmental Damage
+| Source | Damage | Note |
+|--------|--------|------|
+| **Lava pool** | 20 HP/s | Continuous DPS, evitable |
+| **Geyser eruption** | 15 HP | Once per launch (not per frame) |
+| **Lava eruption** | 0 HP | Knockback only, safe zone at 80% radius |
+| **Pillars/Boulders** | 5 HP max | Only above 8 u/s (stun threshold), proportional to speed |
+| **Fall off edge** | 25 HP | + respawn at center. If HP reaches 0 → eliminated |
+
+#### Ability Damage
+| Ability | Damage | Note |
+|---------|--------|------|
+| **NITRO** (FANG) | Indirect | Increases speed → more impact damage |
+| **DASH** (HORNET) | Indirect | Teleport → cannon-es separation → impact formula |
+| **RAM** (RHINO) | Indirect | Mass 999 → sqrt(999) = huge damage via formula, capped at 45 |
+| **TRAIL** (VIPER) | 12 HP | Single-touch, one-shot per trail segment |
+| **PULSE** (TOAD) | 8 HP | Scaled by distance falloff + knockback |
+| **DRIFT** (LYNX) | — | No direct damage |
+| **LEAP** (MAMMOTH) | 15 HP | Landing shockwave, scaled by distance falloff |
+| **PHASE** (GHOST) | — | No direct damage |
+
+#### Kill Attribution
+- Every car tracks `lastHitBy: { source: CarBody, wasAbility, time }`.
+- Updated on any damage event (collision, ability, trail, hazard with source).
+- On elimination: last attacker credited as killer (for kill feed messages).
+- On fall-off that eliminates: if `lastHitBy` within 3 seconds, that player credited.
+
+#### Obstacle Stun Threshold
+- Below **8 u/s**: soft bounce only (no stun, no damage, no VFX) — like hitting a wall in Mario Kart
+- Above **8 u/s**: full stun (0.5–1.5s based on speed) + up to 5 HP damage + debris/stars VFX
 
 #### Global Max Velocity Cap
-- **Max velocity: 70 u/s** regardless of any ability/power-up stacking.
-- Applied every physics frame: `if (velocity.length() > 70) velocity.normalize().scale(70)`
-- This prevents FANG NITRO (1.8×) + Rocket Boost power-up (2×) + boost pad from reaching absurd speeds.
+- **Max velocity: 45 u/s** regardless of any ability/power-up stacking.
+- Applied every physics frame: `if (velocity.length() > 45) velocity.normalize().scale(45)`
 
 #### Boost Pad Effect
-- Instant impulse: adds **15 u/s** in the car's current forward direction.
+- Instant impulse: adds **10 u/s** in the car's current forward direction.
 - No cooldown per pad, but each pad has a **1s individual cooldown per car** (same car can't re-trigger the same pad for 1s).
 
 #### Shield vs RAM Resolution
 - **Shield** protects from knockback (no velocity change from collisions).
 - **RAM** applies force with mass 999.
-- When RAM hits Shield: Shield absorbs **50% of the force** instead of 100%. The shielded car gets pushed, but at half the normal knockback. RAM still gets full points for the hit.
+- When RAM hits Shield: Shield absorbs **50% of the force** instead of 100%. The shielded car gets pushed, but at half the normal knockback.
 - Hierarchy: RAM partially overrides Shield. No other ability overrides Shield.
 
 #### Collision Filter Groups (cannon-es)
@@ -338,19 +385,27 @@ Spawn on 6 fixed pedestals. Respawn 8s after pickup. Max 1 held at a time.
 
 ### Round Structure
 1. **LOBBY** (5-30s): Players join, pick car, bots fill to 8
-2. **COUNTDOWN** (3s): "3… 2… 1… SMASH!" — cars locked on spawn points
-3. **PLAYING** (90s): Active gameplay
-4. **RESULTS** (8s): Scoreboard → "PLAY AGAIN" or "CHANGE CAR"
-5. Loop back to COUNTDOWN
+2. **COUNTDOWN** (3s): "3… 2… 1… SMASH!" — cars locked on spawn points, HP reset to 100
+3. **PLAYING** (up to 90s): Active gameplay, cars get eliminated at 0 HP
+4. **Round ends** when: **1 car remaining** (instant win) OR **timer expires** (most HP wins)
+5. **RESULTS** (8s): Ranking by survival (alive first by HP, then eliminated). Shows "NICKNAME WINS!" or "ROUND OVER"
+6. **Quick restart**: if local player is eliminated and all remaining players are bots → round ends after 1.5s automatically
+7. Loop back to COUNTDOWN
 
-### Respawn
-- Fall off edge (Y < -5) → controls disabled, camera follows falling car for 2s → teleport to random arena position (radius 8-18 from center)
+### Elimination
+- At 0 HP → car is **eliminated** (no respawn for the rest of the round)
+- Mesh hidden after 2s death-cam, engine sound stopped
+- Eliminated bots stop acting (no controls, no brain updates)
+- `isEliminated` flag prevents all damage, collision, and ability processing
+
+### Respawn (fall off edge — NOT eliminated)
+- Fall off edge (Y < -5) → **25 HP damage** + respawn (unless HP reaches 0 → eliminated instead)
+- Controls disabled, camera follows falling car for 2s → teleport to random arena position
 - Velocity zeroed on respawn, car faces center
 - 1.5s invincibility (car blinks at 8Hz, collision mask = ARENA only)
 - Controls restored after invincibility ends
 - Held power-up is **dropped** (lost) on fall — `PowerUpManager.drop(victim)` called immediately
 - White screen flash on respawn (0.4s fade-out)
-- No respawn during last 10s of round — car stays dead until round ends
 - `_isDead` flag on Game prevents `applyControls()` during fall+respawn sequence
 
 ---
@@ -359,9 +414,9 @@ Spawn on 6 fixed pedestals. Respawn 8s after pickup. Max 1 held at a time.
 
 ### PartyKit Room Logic
 - Each room = 1 arena, max 8 players
-- Server authoritative for: round state, scores, power-up spawns, join/leave
+- Server authoritative for: round state, HP/eliminations, power-up spawns, join/leave
 - Client authoritative for: own position/velocity (client-side prediction)
-- Server validates: scoring events, power-up pickups (first-come)
+- Server validates: damage events, power-up pickups (first-come), eliminations
 
 ### Network Messages (Client → Server)
 ```
@@ -382,8 +437,9 @@ PLAYER_JOINED   { id, nickname, carType, color }
 PLAYER_LEFT     { id }
 PLAYER_UPDATE   { id, pos, rot, vel, abilityActive }
 ROUND_START     { countdown: number }
-ROUND_END       { scores: [...] }
-SCORE_UPDATE    { playerId, score, event }
+ROUND_END       { results: [...] }  // ranked by HP (alive first, then eliminated)
+DAMAGE_DEALT    { targetId, amount, sourceId, wasAbility }
+PLAYER_ELIMINATED { playerId, killerId }
 POWERUP_SPAWNED { id, type, position }
 POWERUP_TAKEN   { id, playerId }
 POWERUP_USED    { playerId, type, pos }
@@ -437,7 +493,7 @@ PLAYER_RESPAWN  { playerId, pos }
 - Ability cooldown circle in HUD
 
 ### P1 (nice-to-have)
-- Boost trail on ground, slow-mo on last KO, score popups, bloom
+- Boost trail on ground, slow-mo on last elimination, damage number popups, bloom
 
 ---
 
@@ -472,7 +528,7 @@ Custom domain: add `"domain"` in partykit.json
 
 ### ✅ DONE — Foundation
 - [x] **Project setup**: Vite + vanilla JS, package.json (three, cannon-es, howler, vite), index.html fullscreen canvas
-- [x] **Config.js**: All constants from this doc — 8 cars with stats/abilities, stat mapping, arena, scoring, round timing, collision groups, power-ups, respawn, physics caps
+- [x] **Config.js**: All constants from this doc — 8 cars with stats/abilities, stat mapping, arena, DAMAGE config (formula constants, environmental/ability damage, pair cooldown), round timing, collision groups, power-ups, respawn, physics caps, obstacle stun thresholds
 - [x] **SceneManager.js**: THREE.WebGLRenderer (antialias, PCFSoft shadows, ACES tone mapping), PerspectiveCamera, FogExp2 (dark warm fog 0x0d0805, density 0.004), resize handling, render loop
 - [x] **ArenaBuilder.js**: Volcano-themed flat arena. Octagonal platform (120u diameter) with ExtrudeGeometry + center hole for lava pool. Procedural rock texture + normal map on floor. Lava pool with procedural texture + animated UV offset + emissive map + bubbles. Warm orange edge tubes (TubeGeometry per segment). 8 pulsing yellow boost pads. Volcanic skybox (sky dome, 22 ash clouds, 500 ember particles drifting upward, 5 distant cone mountains with lava tips). Lighting: warm ambient (0x443322), directional sun (0xffd4a0) with shadow map 2048, cool fill light from opposite side (0x6688aa), hemisphere fill. 2 rotating rock arm meshes (synced with physics). 6 geyser visual slots (ground markers + eruption columns). Eruption shockwave ring VFX. 6 decorative rock pillars at arena edge. Magma underlay texture below floor. Animated: boost pad pulse, edge light pulse, lava pulse + UV scroll, magma vein glow, ember particle drift, rock arm rotation
 - [x] **ProceduralTextures.js**: Canvas2D-generated textures — rock texture (512px tileable FBM), rock normal map (512px), lava texture (512px seamless), lava emissive map (512px), magma underlay (256px). All tileable via torus-mapped noise coordinates
@@ -480,7 +536,7 @@ Custom domain: add `"domain"` in partykit.json
 
 ### ✅ DONE — Physics & Driving
 - [x] **PhysicsWorld.js**: cannon-es World (gravity -9.82), SAPBroadphase, `allowSleep=false`. Octagonal ConvexPolyhedron floor (120u diameter, 8 vertices top + 8 bottom). Central lava floor (16-sided ConvexPolyhedron, radius 10, recessed at Y=-0.6, tagged `_isLava`). 2 rotating rock arm physics bodies (CANNON.Box, mass 0, collision group ARENA → CAR only). `updateRockArms(elapsed)` repositions arm bodies each frame. Default contact material: friction 0.05, restitution 0.3. **Car-Arena ContactMaterial**: restitution 0.0. Fixed timestep 1/120s, max 5 sub-steps
-- [x] **CarBody.js**: `CarBody(carType, mesh, world, opts?)` — reads STAT_MAP for maxSpeed/mass/handling. CANNON.Box half-extents (1.0, 0.6, 0.6). `fixedRotation=true` (rotation managed manually via `_yaw`). **Rear-axle bicycle model**: `applyControls(input, dt)` computes `angularVel = speed × tan(steerAngle) / wheelbase`, capped at `maxAngularVel` (3.2 rad/s). Car pivots around rear axle (`rearAxleOffset: 0.5u`) — front sweeps through turns like a real car. **No turning at zero speed** (`minTurnSpeed: 1.0 u/s`). Steering angle smoothly interpolated (`_steerAngle`), self-centers when released. Handling stat scales max steer angle via `handlingFactor = handling / 3.5`. High-speed steering reduction (`highSpeedSteerFactor: 0.5`). **Braking model**: forward+backward = brake; from standstill, backward = reverse (separate `reverseAccel`, capped at 35% of max speed). **Drift mode**: 1.5× wider steer angle + slow velocity blend (2.5 Hz) = tail slides out. **Lateral grip** (0.95) snaps velocity to facing direction — car feels planted. Global 70 u/s cap enforced. **Visual tilt system**: `_updateVisualTilt()` raycasts downward to find ground normal, builds quaternion from yaw + normal, slerps smoothly. Visual roll on turns (0.06 rad max, ~3.4°) + pitch on accel/brake. `syncMesh()` uses visual quaternion (with tilt) instead of physics quaternion. **Properties**: `playerId`, `nickname`, `score`, `lastHitBy` (KO attribution), `hasShield`, `hasRam`, `isInvincible`, `speedMultiplier`, `driftMode`, `_originalMass`, `_arenaGroup` (set by Game.js for tilt raycasting). **`_isFalling`** flag prevents duplicate fall handling. **`_generation`** counter increments on death/respawn. **`resetState()`** hard-resets mass/speed/flags/steerAngle
+- [x] **CarBody.js**: `CarBody(carType, mesh, world, opts?)` — reads STAT_MAP for maxSpeed/mass/handling. CANNON.Box half-extents (1.0, 0.6, 0.6). `fixedRotation=true` (rotation managed manually via `_yaw`). **Rear-axle bicycle model**: `applyControls(input, dt)` computes `angularVel = speed × tan(steerAngle) / wheelbase`, capped at `maxAngularVel` (3.2 rad/s). Car pivots around rear axle (`rearAxleOffset: 0.5u`) — front sweeps through turns like a real car. **No turning at zero speed** (`minTurnSpeed: 1.0 u/s`). Steering angle smoothly interpolated (`_steerAngle`), self-centers when released. Handling stat scales max steer angle via `handlingFactor = handling / 3.5`. High-speed steering reduction (`highSpeedSteerFactor: 0.5`). **Braking model**: forward+backward = brake; from standstill, backward = reverse (separate `reverseAccel`, capped at 35% of max speed). **Drift mode**: 1.5× wider steer angle + slow velocity blend (2.5 Hz) = tail slides out. **Lateral grip** (0.95) snaps velocity to facing direction — car feels planted. Global 70 u/s cap enforced. **Visual tilt system**: `_updateVisualTilt()` raycasts downward to find ground normal, builds quaternion from yaw + normal, slerps smoothly. Visual roll on turns (0.06 rad max, ~3.4°) + pitch on accel/brake. `syncMesh()` uses visual quaternion (with tilt) instead of physics quaternion. **Properties**: `playerId`, `nickname`, `hp`, `maxHp`, `isEliminated`, `lastHitBy` (kill attribution), `hasShield`, `hasRam`, `isInvincible`, `speedMultiplier`, `driftMode`, `_originalMass`, `_arenaGroup` (set by Game.js for tilt raycasting). **`_isFalling`** flag prevents duplicate fall handling. **`_generation`** counter increments on death/respawn. **`resetState()`** hard-resets mass/speed/flags/steerAngle. **`resetHP()`** resets HP to 100 and clears `isEliminated`. **`takeDamage(amount, source, wasAbility)`** applies damage, updates `lastHitBy`, sets `isEliminated` at 0 HP
 
 ### ✅ DONE — UI Flow
 - [x] **Lobby.js** (`src/ui/Lobby.js`): Fullscreen overlay, neon "ROCKET BUMPERS" title, nickname input (max 12 chars, auto-generated placeholder), PLAY button / Enter to submit
@@ -493,9 +549,9 @@ Custom domain: add `"domain"` in partykit.json
   - **DASH** (HORNET): Teleport 5 units forward, ghost trail clone fades 0.5s. Instant → CD 4s
   - **RAM** (RHINO): `body.mass = 999`, `speedMultiplier = 1.2`, sets `hasRam = true`, red glow VFX. 2s duration, CD 8s
   - **TRAIL** (VIPER): `speedMultiplier = 1.5`, spawns fire boxes every 0.3s (CANNON trigger bodies, TRAIL collision group, `_isTrailFire` tag, `_ownerId` for attribution). Trail persists 2s with fade + flicker. 3s duration, CD 7s
-  - **PULSE** (TOAD): Radial knockback (radius 8, force 300) with distance falloff + upward pop. Sets `lastHitBy` (wasAbility). Expanding purple ring VFX. Instant → CD 6s
+  - **PULSE** (TOAD): Radial knockback (radius 8, force 300) with distance falloff + upward pop + **8 HP damage** (scaled by distance). Expanding purple ring VFX. Instant → CD 6s
   - **DRIFT** (LYNX): Sets `carBody.driftMode = true` (1.5× wider steer angle + slow velocity blend at 2.5 Hz = tail slides out). 2s duration, CD 5s
-  - **LEAP** (MAMMOTH): `velocity.y = 12`, tracks `isLeaping`. Landing detection via downward CANNON raycast (distance < 1.2, collisionFilterMask: ARENA) — works at any height. Shockwave on landing (radius 6, force 200, sets `lastHitBy`). Orange ring VFX. Instant → CD 7s
+  - **LEAP** (MAMMOTH): `velocity.y = 12`, tracks `isLeaping`. Landing detection via downward CANNON raycast (distance < 1.2, collisionFilterMask: ARENA) — works at any height. Shockwave on landing (radius 6, force 200) + **15 HP damage** (scaled by distance). Orange ring VFX. Instant → CD 7s
   - **PHASE** (GHOST): `collisionFilterMask = ARENA only`. Semi-transparent + cyan emissive VFX. 0.8s duration, CD 5s
   - **Static helper**: `AbilitySystem.setInvincible(carBody, bool)` — same PHASE collision mask logic for respawn invincibility
   - **`forceReset()`**: Resets ability to `ready` state without running deactivation logic (CarBody.resetState already cleaned up). Clears all timers, VFX, leap state. Called on respawn and round reset

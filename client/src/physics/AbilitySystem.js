@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
-import { CARS, COLLISION_GROUPS } from '../core/Config.js';
+import { CARS, COLLISION_GROUPS, DAMAGE } from '../core/Config.js';
 
 // Reusable objects for leap landing raycast (avoid per-frame allocations)
 const _leapFrom = new CANNON.Vec3();
@@ -365,6 +365,7 @@ export class AbilitySystem {
       const dz = oPos.z - pos.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
       if (dist < radius && dist > 0.1) {
+        if (other.isEliminated || other.isInvincible) continue;
         const falloff = 1 - dist / radius;
         const impulse = force * falloff;
         const nx = dx / dist;
@@ -373,8 +374,9 @@ export class AbilitySystem {
         other.body.velocity.z += nz * impulse * 0.05;
         other.body.velocity.y += 3 * falloff; // slight upward pop
 
-        // KO attribution
-        other.lastHitBy = { source: this.carBody, wasAbility: true, time: performance.now() };
+        // PULSE damage (scaled by falloff — closer = more damage)
+        const pulseDmg = DAMAGE.PULSE_DAMAGE * falloff;
+        other.takeDamage(pulseDmg, this.carBody, true);
       }
     }
 
@@ -478,6 +480,7 @@ export class AbilitySystem {
       const dz = oPos.z - pos.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
       if (dist < radius && dist > 0.1) {
+        if (other.isEliminated || other.isInvincible) continue;
         const falloff = 1 - dist / radius;
         const nx = dx / dist;
         const nz = dz / dist;
@@ -485,8 +488,9 @@ export class AbilitySystem {
         other.body.velocity.z += nz * force * falloff * 0.05;
         other.body.velocity.y += 5 * falloff;
 
-        // KO attribution
-        other.lastHitBy = { source: this.carBody, wasAbility: true, time: performance.now() };
+        // LEAP damage (scaled by falloff — closer to epicenter = more damage)
+        const leapDmg = DAMAGE.LEAP_DAMAGE * falloff;
+        other.takeDamage(leapDmg, this.carBody, true);
       }
     }
 
