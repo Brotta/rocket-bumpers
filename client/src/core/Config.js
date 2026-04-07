@@ -523,7 +523,7 @@ export const OBSTACLE_STUN = {
 export const CAR_FEEL = {
   // ── Steering ──
   // maxSteerAngle: per-frame steering increment (rad) — like Drift Zero's maxSteer
-  maxSteerAngle: 0.055,      // max steer per frame (rad) — tuned for arcade feel
+  maxSteerAngle: 0.095,      // max steer per frame (rad) — tuned for arcade feel
   steerSpeed: 0.14,          // interpolation factor toward target steer (per frame at 60fps)
   steerReturnSpeed: 0.09,    // how fast steer self-centers when no input
   // High-speed steering reduction (understeer) — at max speed, steer is scaled by this
@@ -553,7 +553,7 @@ export const CAR_FEEL = {
   // velocity blends toward desired (heading-aligned) velocity each frame.
   // lateralFriction < 1 = the car slides laterally (drifts).
   // lf = pow(lateralFriction, dt*60); vel = vel*lf + desired*(1-lf)
-  lateralFriction: 0.87,     // base lateral grip (lower = more drift)
+  lateralFriction: 0.94,     // base lateral grip (lower = more drift)
 
   // ── Drift mode tuning (LYNX ability + general drift feel) ──
   driftLateralFriction: 0.70, // much lower grip during drift ability
