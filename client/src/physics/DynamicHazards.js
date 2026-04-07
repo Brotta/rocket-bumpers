@@ -214,11 +214,22 @@ export class DynamicHazards {
             const dz = cb.body.position.z - g.z;
             const dist = Math.sqrt(dx * dx + dz * dz);
             if (dist < geyserR && cb.body.position.y < 2) {
+              // Dampen horizontal velocity so car doesn't fly off the map
+              cb.body.velocity.x *= 0.3;
+              cb.body.velocity.z *= 0.3;
               cb.body.velocity.y = launchForce;
               // Slight outward push
               if (dist > 0.1) {
-                cb.body.velocity.x += (dx / dist) * 5;
-                cb.body.velocity.z += (dz / dist) * 5;
+                cb.body.velocity.x += (dx / dist) * 2;
+                cb.body.velocity.z += (dz / dist) * 2;
+              }
+              // Set airborne state — no traction until landing
+              if (!cb._geyserAirborne) {
+                cb._geyserAirborne = true;
+                cb._geyserAirborneTime = 0;
+                // Random spin: 1.5–3 full rotations/sec, random direction
+                cb._geyserSpinRate = (Math.random() > 0.5 ? 1 : -1)
+                  * (Math.PI * 3 + Math.random() * Math.PI * 3);
               }
             }
           }

@@ -973,17 +973,17 @@ export class ArenaBuilder {
     const dirLight = new THREE.DirectionalLight(0xffdcb0, 1.4);
     dirLight.position.set(20, 40, 15);
     dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 1024;
-    dirLight.shadow.mapSize.height = 1024;
+    dirLight.shadow.mapSize.width = 2048;
+    dirLight.shadow.mapSize.height = 2048;
     dirLight.shadow.camera.near = 1;
     dirLight.shadow.camera.far = 80;
     dirLight.shadow.camera.left = -45;
     dirLight.shadow.camera.right = 45;
     dirLight.shadow.camera.top = 45;
     dirLight.shadow.camera.bottom = -45;
-    // Bias to prevent shadow acne and peter-panning (cars appearing to float)
-    dirLight.shadow.bias = -0.0005;
-    dirLight.shadow.normalBias = 0.02;
+    // Bias to prevent shadow acne and peter-panning
+    dirLight.shadow.bias = -0.001;
+    dirLight.shadow.normalBias = 0.05;
     this.scene.add(dirLight);
     this._dirLight = dirLight;
 

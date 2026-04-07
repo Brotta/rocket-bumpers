@@ -1,12 +1,24 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { ARENA, POWERUPS, COLLISION_GROUPS, SCORING } from './Config.js';
+import { loadModel } from '../rendering/AssetLoader.js';
 
 const PEDESTAL_COUNT = ARENA.powerupPedestalCount; // 6
 const RESPAWN_TIME = ARENA.powerupRespawnTime;      // 8s
 const PICKUP_RADIUS = 2.0;                          // detection distance
 const FLOAT_HEIGHT = 1.4;                           // pickup hover Y
 const SPIN_SPEED = 2.0;                             // rad/s
+const BOX_MODEL_PATH = 'assets/models/box.glb';
+
+// Rainbow colors for the rotating glow
+const RAINBOW_COLORS = [
+  new THREE.Color(0xff0000), // red
+  new THREE.Color(0xff8800), // orange
+  new THREE.Color(0xffff00), // yellow
+  new THREE.Color(0x00ff00), // green
+  new THREE.Color(0x0088ff), // blue
+  new THREE.Color(0x8800ff), // violet
+];
 
 const POWERUP_TYPES = Object.keys(POWERUPS); // ['ROCKET_BOOST','SHOCKWAVE','SHIELD','MAGNET']
 
@@ -47,6 +59,14 @@ export class PowerUpManager {
       metalness: 0.4,
     });
 
+    // Preload box model, then build pedestals
+    this._boxModelReady = loadModel(BOX_MODEL_PATH).then((model) => {
+      this._boxTemplate = model;
+    }).catch((err) => {
+      console.warn('PowerUpManager: failed to load box model, falling back', err);
+      this._boxTemplate = null;
+    });
+
     this._buildPedestals();
   }
 
@@ -75,9 +95,49 @@ export class PowerUpManager {
 
       // ── Animate active pickups ──
       if (pedestal.active && pedestal.pickupMesh) {
-        pedestal.pickupMesh.rotation.y += SPIN_SPEED * dt;
-        pedestal.pickupMesh.position.y =
+        const mesh = pedestal.pickupMesh;
+
+        // Bob up and down
+        mesh.position.y =
           (pedestal.y || 0) + FLOAT_HEIGHT + Math.sin(now * 0.003 + pedestal.angle) * 0.15;
+
+        // Slowly spin the box
+        if (mesh.userData.boxMesh) {
+          mesh.userData.boxMesh.rotation.y += SPIN_SPEED * 0.5 * dt;
+        }
+
+        // Rainbow cycling on glow rings
+        const t = (now * 0.001 + pedestal.angle) % 6; // cycle through 6 rainbow colors
+        const idx = Math.floor(t);
+        const frac = t - idx;
+        const colorA = RAINBOW_COLORS[idx % 6];
+        const colorB = RAINBOW_COLORS[(idx + 1) % 6];
+        const rainbowColor = new THREE.Color().lerpColors(colorA, colorB, frac);
+
+        // Offset second ring by half the cycle
+        const t2 = (now * 0.001 + pedestal.angle + 3) % 6;
+        const idx2 = Math.floor(t2);
+        const frac2 = t2 - idx2;
+        const rainbowColor2 = new THREE.Color().lerpColors(
+          RAINBOW_COLORS[idx2 % 6], RAINBOW_COLORS[(idx2 + 1) % 6], frac2);
+
+        // Rotate glow rings around the box in different axes
+        const ringAngle = now * 0.002 + pedestal.angle;
+        if (mesh.userData.glowRing) {
+          mesh.userData.glowRing.rotation.x = ringAngle;
+          mesh.userData.glowRing.rotation.y = ringAngle * 0.7;
+          mesh.userData.glowRingMat.emissive.copy(rainbowColor);
+          mesh.userData.glowRingMat.color.copy(rainbowColor);
+        }
+        if (mesh.userData.glowRing2) {
+          mesh.userData.glowRing2.rotation.x = ringAngle * 0.5 + Math.PI / 2;
+          mesh.userData.glowRing2.rotation.z = ringAngle * 0.8;
+          mesh.userData.glowRing2Mat.emissive.copy(rainbowColor2);
+          mesh.userData.glowRing2Mat.color.copy(rainbowColor2);
+        }
+
+        // Pulse the pedestal light with rainbow
+        pedestal.glowLight.color.copy(rainbowColor);
         pedestal.glowLight.intensity =
           0.6 + Math.sin(now * 0.004 + pedestal.angle * 2) * 0.3;
       }
@@ -197,49 +257,81 @@ export class PowerUpManager {
 
   _spawnPickup(pedestal) {
     const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
-    const config = POWERUPS[type];
-    const color = config.color;
 
-    // Pickup mesh — small glowing shape
+    // Mystery box — all pickups look the same (Mario Kart style)
     const group = new THREE.Group();
     group.position.set(pedestal.x, (pedestal.y || 0) + FLOAT_HEIGHT, pedestal.z);
 
-    // Core shape: octahedron
-    const coreGeo = new THREE.OctahedronGeometry(0.5, 0);
-    const coreMat = new THREE.MeshStandardMaterial({
-      color,
-      emissive: color,
-      emissiveIntensity: 2,
-      transparent: true,
-      opacity: 0.9,
-    });
-    const core = new THREE.Mesh(coreGeo, coreMat);
-    group.add(core);
-
-    // Outer glow ring
-    const outerRingGeo = new THREE.TorusGeometry(0.65, 0.06, 8, 24);
-    const outerRingMat = new THREE.MeshStandardMaterial({
-      color,
-      emissive: color,
+    // Rainbow glow ring that orbits the box
+    const glowRingGeo = new THREE.TorusGeometry(1.0, 0.08, 8, 32);
+    const glowRingMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0xff0000,
       emissiveIntensity: 3,
       transparent: true,
-      opacity: 0.5,
+      opacity: 0.7,
     });
-    const outerRing = new THREE.Mesh(outerRingGeo, outerRingMat);
-    outerRing.rotation.x = Math.PI / 2;
-    group.add(outerRing);
+    const glowRing = new THREE.Mesh(glowRingGeo, glowRingMat);
+    group.add(glowRing);
+
+    // Second glow ring (perpendicular, creates a sphere-like orbit effect)
+    const glowRing2Mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0x00ff00,
+      emissiveIntensity: 3,
+      transparent: true,
+      opacity: 0.7,
+    });
+    const glowRing2 = new THREE.Mesh(glowRingGeo, glowRing2Mat);
+    group.add(glowRing2);
+
+    // Store references for animation
+    group.userData.glowRing = glowRing;
+    group.userData.glowRingMat = glowRingMat;
+    group.userData.glowRing2 = glowRing2;
+    group.userData.glowRing2Mat = glowRing2Mat;
+    group.userData.boxMesh = null;
+
+    // Load box model into the group
+    if (this._boxTemplate) {
+      this._addBoxModel(group);
+    } else {
+      // Model still loading — add once ready
+      this._boxModelReady.then(() => {
+        if (pedestal.pickupMesh === group && pedestal.active) {
+          this._addBoxModel(group);
+        }
+      });
+    }
 
     this.scene.add(group);
 
-    // Update pedestal ring and light color
-    pedestal.ringMat.emissive.setHex(color);
-    pedestal.glowLight.color.setHex(color);
+    // Mystery color: white/rainbow for pedestal
+    pedestal.ringMat.emissive.setHex(0xffffff);
+    pedestal.glowLight.color.setHex(0xffffff);
     pedestal.glowLight.intensity = 0.6;
 
     pedestal.active = true;
     pedestal.type = type;
     pedestal.pickupMesh = group;
     pedestal.respawnAt = 0;
+  }
+
+  _addBoxModel(group) {
+    if (!this._boxTemplate) return;
+    const box = this._boxTemplate.clone(true);
+    box.scale.setScalar(1.2);
+    box.traverse((c) => {
+      if (c.isMesh) {
+        c.castShadow = true;
+        c.receiveShadow = true;
+      }
+    });
+    // Center the box vertically so the rings orbit around its middle
+    const bbox = new THREE.Box3().setFromObject(box);
+    box.position.y = -(bbox.min.y + bbox.max.y) / 2;
+    group.add(box);
+    group.userData.boxMesh = box;
   }
 
   // ── Pickup handling ───────────────────────────────────────────────────

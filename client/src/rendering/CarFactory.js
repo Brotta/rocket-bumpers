@@ -85,7 +85,7 @@ export async function buildCar(carType, playerColor) {
       } else {
         backWheels.push(child);
       }
-    } else if (child.isMesh) {
+    } else if (child.isMesh && child.name !== 'character') {
       bodyParts.push(child);
     }
   });
@@ -100,20 +100,30 @@ export async function buildCar(carType, playerColor) {
   // Attach motion-blur disc overlays to each wheel
   _attachWheelBlurDiscs(wheels);
 
+  // Find character/driver node for kart models (head lean when turning)
+  let characterNode = null;
+  model.traverse((child) => {
+    if (child.name === 'character') {
+      characterNode = child;
+    }
+  });
+
   group.userData.wheels = wheels;
   group.userData.frontWheels = frontWheels;
   group.userData.backWheels = backWheels;
   group.userData.bodyParts = bodyParts;
   group.userData.emissiveMaterials = emissiveMaterials;
+  group.userData.characterNode = characterNode;
 
   // Normalize to target bounding box (includes 180° rotation to face -Z)
   _normalizeScale(group);
 
-  // Enable shadows
+  // Enable shadows — cars cast but do NOT receive directional shadows
+  // (receiveShadow on car meshes causes self-shadowing artifacts: black triangles)
   group.traverse((child) => {
     if (child.isMesh) {
       child.castShadow = true;
-      child.receiveShadow = true;
+      child.receiveShadow = false;
     }
   });
 
@@ -295,6 +305,24 @@ export function animateWheels(carMesh, speed, dt, steerAngle = 0, driftMode = fa
   for (const wheel of wheels) {
     const disc = wheel.userData.blurDisc;
     if (disc) disc.material.opacity = blurAlpha;
+  }
+
+  // Kart driver head lean — tilt the character into the turn direction
+  const charNode = carMesh.userData.characterNode;
+  if (charNode) {
+    // steerAngle is small (~0.05 rad max), normalize to -1..1 range
+    const normalizedSteer = Math.max(-1, Math.min(1, steerAngle / 0.06));
+    const speedFactor = Math.min(Math.abs(speed) / 10, 1);
+    const maxLean = 0.4; // ~23° max lean angle
+    const targetLean = -normalizedSteer * speedFactor * maxLean;
+    // Smooth toward target (stored on userData to persist across frames)
+    const prev = charNode.userData._leanAngle || 0;
+    const smoothing = 0.15;
+    const lean = prev + (targetLean - prev) * smoothing;
+    charNode.userData._leanAngle = lean;
+    charNode.rotation.z = lean;
+    // Slight forward lean into the turn
+    charNode.rotation.x = Math.abs(lean) * 0.25;
   }
 }
 

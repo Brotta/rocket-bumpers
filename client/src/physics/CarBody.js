@@ -1,6 +1,6 @@
 import * as CANNON from 'cannon-es';
 import * as THREE from 'three';
-import { CARS, STAT_MAP, COLLISION_GROUPS, CAR_FEEL } from '../core/Config.js';
+import { CARS, STAT_MAP, COLLISION_GROUPS, CAR_FEEL, OBSTACLE_STUN } from '../core/Config.js';
 
 // Reusable helpers for contact shadow rotation (avoid per-frame allocations)
 const _csQuatHelper = new THREE.Quaternion();
@@ -74,9 +74,30 @@ export class CarBody {
     // Fall guard — prevents multiple _handleFall calls for the same fall
     this._isFalling = false;
 
+    // ── Geyser airborne state ──
+    this._geyserAirborne = false;
+    this._geyserAirborneTime = 0;
+    this._geyserSpinRate = 0; // rad/s random yaw spin while airborne
+
+    // ── Obstacle stun state ──
+    this._isStunned = false;
+    this._stunTimer = 0;
+    this._stunSpinRate = 0;    // rad/s — random direction spin while stunned
+    this._stunImmunityTimer = 0; // prevents chain-stuns
+
     // Generation counter — increments on death/respawn.
     // Pending setTimeout effects check this to avoid corrupting state.
     this._generation = 0;
+
+    // ── Internal velocity tracking (avoids CANNON substep jitter) ──
+    this._internalVelX = 0;
+    this._internalVelZ = 0;
+    this._lastSetVelX = 0;
+    this._lastSetVelZ = 0;
+    // Smooth visual position (predicted from velocity, corrected toward physics)
+    this._smoothPosX = 0;
+    this._smoothPosZ = 0;
+    this._smoothPosInited = false;
 
     // ── Driving dynamics state (for visual roll/pitch, set by applyControls) ──
     this._steerInput = 0;    // -1 / 0 / +1 current frame
@@ -124,6 +145,17 @@ export class CarBody {
     this.hasShield = false;
     this.hasRam = false;
     this.lastHitBy = null;
+    this._isStunned = false;
+    this._stunTimer = 0;
+    this._stunSpinRate = 0;
+    this._stunImmunityTimer = 0;
+    this._geyserAirborne = false;
+    this._geyserAirborneTime = 0;
+    this._geyserSpinRate = 0;
+    this._internalVelX = 0;
+    this._internalVelZ = 0;
+    this._lastSetVelX = 0;
+    this._lastSetVelZ = 0;
     this._steerAngle = 0;
     this._steerInput = 0;
     this._accelInput = 0;
@@ -137,6 +169,58 @@ export class CarBody {
   applyControls(input, dt) {
     // Wake sleeping body so velocity changes take effect (allowSleep optimization)
     if (this.body.sleepState !== 0) this.body.wakeUp();
+
+    // ── Stun immunity cooldown ──
+    if (this._stunImmunityTimer > 0) {
+      this._stunImmunityTimer -= dt;
+    }
+
+    // ── Obstacle stun: no input, spin in place, decay timer ──
+    if (this._isStunned) {
+      this._stunTimer -= dt;
+      if (this._stunTimer <= 0) {
+        this._isStunned = false;
+        this._stunImmunityTimer = OBSTACLE_STUN.immunityDuration;
+      } else {
+        // Spin the car (dizzy effect)
+        this._yaw += this._stunSpinRate * dt;
+        this.body.quaternion.setFromEuler(0, this._yaw, 0);
+        // Bleed off remaining velocity
+        this.body.velocity.x *= 0.95;
+        this.body.velocity.z *= 0.95;
+        this._internalVelX *= 0.95;
+        this._internalVelZ *= 0.95;
+        this._currentSpeed *= 0.95;
+        this._lastSetVelX = this.body.velocity.x;
+        this._lastSetVelZ = this.body.velocity.z;
+        return; // skip all driving controls
+      }
+    }
+
+    // ── Geyser airborne: no traction, ballistic trajectory only ──
+    if (this._geyserAirborne) {
+      this._geyserAirborneTime += dt;
+
+      // Detect landing: car is near ground, falling, and has been airborne a bit
+      if (this.body.position.y < 1.0 && this.body.velocity.y <= 0 && this._geyserAirborneTime > 0.3) {
+        this._geyserAirborne = false;
+        // Align yaw to travel direction for smooth landing
+        const vx = this.body.velocity.x;
+        const vz = this.body.velocity.z;
+        const hSpeed = Math.sqrt(vx * vx + vz * vz);
+        if (hSpeed > 1) {
+          this._yaw = Math.atan2(-vx, -vz);
+        }
+        this._currentSpeed = hSpeed;
+      } else {
+        // Spin: full rate for first 0.8s, then ease out
+        const spinEase = this._geyserAirborneTime < 0.8 ? 1.0
+          : Math.max(0, 1.0 - (this._geyserAirborneTime - 0.8) * 1.5);
+        this._yaw += this._geyserSpinRate * spinEase * dt;
+        this.body.quaternion.setFromEuler(0, this._yaw, 0);
+        return; // skip all driving controls — wheels don't touch ground
+      }
+    }
 
     const effectiveMax = this.maxSpeed * this.speedMultiplier;
     const absSpeed = Math.abs(this._currentSpeed);
@@ -215,41 +299,44 @@ export class CarBody {
     this._currentSpeed *= Math.pow(frictionFactor, dt * 60);
     if (Math.abs(this._currentSpeed) < 0.05) this._currentSpeed = 0;
 
-    // ── 5. Apply velocity via lateral friction blending ──
-    // Forward component follows _currentSpeed directly.
-    // Lateral component blends via lateralFriction — this creates drift.
+    // ── 5. Apply velocity — Drift Zero model with internal tracking ──
+    // Velocity is tracked internally to avoid CANNON substep noise.
+    // Only real collision impulses (large deltas) are absorbed.
     const fwdX = -Math.sin(this._yaw);
     const fwdZ = -Math.cos(this._yaw);
 
-    // Decompose current body velocity into forward and lateral components
-    const vx = this.body.velocity.x;
-    const vz = this.body.velocity.z;
-    const fwdDot = vx * fwdX + vz * fwdZ;          // forward speed from physics
-    const latX = vx - fwdDot * fwdX;                // lateral velocity
-    const latZ = vz - fwdDot * fwdZ;
+    // Desired velocity = heading × speed
+    const desiredVx = fwdX * this._currentSpeed;
+    const desiredVz = fwdZ * this._currentSpeed;
 
-    // Lateral friction: determines how much lateral velocity persists.
-    // Lower value = more slide (drift). Higher = more grip.
-    const isSteering = Math.abs(this._steerAngle) > 0.001;
-    let lf;
-
-    if (!isSteering) {
-      // Not steering: zero out lateral velocity completely.
-      // CANNON.js contact resolution injects small lateral forces every step;
-      // any non-zero retention creates a persistent diagonal drift.
-      lf = 0;
-    } else if (this.driftMode) {
-      lf = Math.pow(CAR_FEEL.driftLateralFriction, dt * 60);
+    // Lateral friction: blend internal velocity toward desired.
+    // This is the pure Drift Zero model: vel = vel * lf + desired * (1 - lf)
+    let latFric;
+    if (this.driftMode) {
+      latFric = CAR_FEEL.driftLateralFriction;
     } else {
-      // Handling stat adjusts grip: hf=1 → base, hf<1 → more slide, hf>1 → more grip
-      let latFric = CAR_FEEL.lateralFriction + (hf - 1) * 0.06;
+      latFric = CAR_FEEL.lateralFriction + (hf - 1) * 0.06;
       latFric = Math.max(0.70, Math.min(0.96, latFric));
-      lf = Math.pow(latFric, dt * 60);
     }
 
-    // Forward = driven by _currentSpeed, lateral = decays via friction
-    this.body.velocity.x = fwdX * this._currentSpeed + latX * lf;
-    this.body.velocity.z = fwdZ * this._currentSpeed + latZ * lf;
+    const lf = Math.pow(latFric, dt * 60);
+    this._internalVelX = this._internalVelX * lf + desiredVx * (1 - lf);
+    this._internalVelZ = this._internalVelZ * lf + desiredVz * (1 - lf);
+
+    // Absorb real collision impulses from CANNON (ignore ground contact noise)
+    const cannonDx = this.body.velocity.x - this._lastSetVelX;
+    const cannonDz = this.body.velocity.z - this._lastSetVelZ;
+    const impulseSq = cannonDx * cannonDx + cannonDz * cannonDz;
+    if (impulseSq > 1.0) { // threshold: 1 u/s²
+      this._internalVelX += cannonDx;
+      this._internalVelZ += cannonDz;
+    }
+
+    // Write to CANNON body
+    this.body.velocity.x = this._internalVelX;
+    this.body.velocity.z = this._internalVelZ;
+    this._lastSetVelX = this._internalVelX;
+    this._lastSetVelZ = this._internalVelZ;
 
     // ── 6. Apply rotation ──
     this.body.quaternion.setFromEuler(0, this._yaw, 0);
@@ -339,10 +426,29 @@ export class CarBody {
   }
 
   // ── Sync physics body → Three.js mesh ──────────────────────────────
-  syncMesh() {
-    this.mesh.position.copy(this.body.position);
-    // Sink mesh to match visible ground plane at Y≈0 (physics body is at Y=0.6)
-    this.mesh.position.y -= 0.55;
+  syncMesh(dt) {
+    // Velocity-predicted smooth position: avoids CANNON fixed-timestep jitter.
+    // The visual position advances each frame based on internal velocity (always smooth),
+    // and gently corrects toward the physics truth to absorb collisions.
+    if (!this._smoothPosInited) {
+      this._smoothPosX = this.body.position.x;
+      this._smoothPosZ = this.body.position.z;
+      this._smoothPosInited = true;
+    }
+
+    const frameDt = dt || (1 / 60);
+    // Predict: advance by velocity
+    this._smoothPosX += this._internalVelX * frameDt;
+    this._smoothPosZ += this._internalVelZ * frameDt;
+    // Correct: drift toward physics position (handles collisions, boundaries)
+    const correctionRate = 0.15;
+    this._smoothPosX += (this.body.position.x - this._smoothPosX) * correctionRate;
+    this._smoothPosZ += (this.body.position.z - this._smoothPosZ) * correctionRate;
+
+    this.mesh.position.x = this._smoothPosX;
+    this.mesh.position.z = this._smoothPosZ;
+    // Y follows directly (vertical snaps for floor/fall need to be instant)
+    this.mesh.position.y = this.body.position.y - 0.55;
     // Use visual quaternion (with tilt) instead of physics quaternion
     this.mesh.quaternion.copy(this._visualQuat);
 
@@ -376,5 +482,12 @@ export class CarBody {
     this._currentSpeed = 0;
     this._steerAngle = 0;
     this._yaw = 0;
+    this._internalVelX = 0;
+    this._internalVelZ = 0;
+    this._lastSetVelX = 0;
+    this._lastSetVelZ = 0;
+    this._smoothPosX = x;
+    this._smoothPosZ = z;
+    this._smoothPosInited = true;
   }
 }

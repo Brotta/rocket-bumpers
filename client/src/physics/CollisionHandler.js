@@ -5,6 +5,7 @@ import {
   RESPAWN,
   KO_ATTRIBUTION,
   SHIELD_VS_RAM,
+  OBSTACLE_STUN,
 } from '../core/Config.js';
 import { AbilitySystem } from './AbilitySystem.js';
 
@@ -110,17 +111,27 @@ export class CollisionHandler {
     const otherCar = this._bodyToCarMap.get(otherPhysBody.id) || null;
 
     // Car-obstacle collision: static arena bodies (pillars, boulders)
-    // The bicycle model overwrites velocity each frame, so we must apply
-    // an explicit bounce impulse + kill forward speed on contact.
+    // Instead of a hard bounce, apply a stun effect — car loses control briefly.
     if (!otherCar && otherPhysBody.mass === 0
         && (otherPhysBody.collisionFilterGroup & COLLISION_GROUPS.ARENA)
         && !otherPhysBody._isLava && otherPhysBody !== this._floorBody) {
       const contact = event.contact;
       if (!contact) return;
+
+      // Skip if already stunned or in stun immunity window
+      if (carBody._isStunned || carBody._stunImmunityTimer > 0) {
+        // Still push out to prevent sticking
+        const dx2 = carBody.body.position.x - otherPhysBody.position.x;
+        const dz2 = carBody.body.position.z - otherPhysBody.position.z;
+        const d2 = Math.sqrt(dx2 * dx2 + dz2 * dz2) || 1;
+        carBody.body.position.x += (dx2 / d2) * 0.2;
+        carBody.body.position.z += (dz2 / d2) * 0.2;
+        return;
+      }
+
       // Normal pointing from obstacle toward car
       const nx = contact.ni.x;
       const nz = contact.ni.z;
-      // Flip normal if it points away from the car
       const dx = carBody.body.position.x - otherPhysBody.position.x;
       const dz = carBody.body.position.z - otherPhysBody.position.z;
       const dot = dx * nx + dz * nz;
@@ -128,22 +139,49 @@ export class CollisionHandler {
       const nnx = nx * sign;
       const nnz = nz * sign;
 
-      // Push car away from obstacle
+      // Impact speed
       const speed = Math.sqrt(
         carBody.body.velocity.x * carBody.body.velocity.x +
         carBody.body.velocity.z * carBody.body.velocity.z,
       );
-      const bounceForce = Math.max(speed * 0.6, 5);
-      carBody.body.velocity.x = nnx * bounceForce;
-      carBody.body.velocity.z = nnz * bounceForce;
 
-      // Also push position out to prevent sticking
-      carBody.body.position.x += nnx * 0.3;
-      carBody.body.position.z += nnz * 0.3;
+      // Gentle push-away (capped, not speed-proportional)
+      carBody.body.velocity.x = nnx * OBSTACLE_STUN.bounceForce;
+      carBody.body.velocity.z = nnz * OBSTACLE_STUN.bounceForce;
 
-      // Kill the car's internal speed so the bicycle model doesn't
-      // immediately push back into the obstacle
-      carBody._currentSpeed *= -0.3;
+      // Push position out to prevent sticking
+      carBody.body.position.x += nnx * OBSTACLE_STUN.pushOut;
+      carBody.body.position.z += nnz * OBSTACLE_STUN.pushOut;
+
+      // Kill car speed
+      carBody._currentSpeed *= (1 - OBSTACLE_STUN.speedKill);
+      carBody._internalVelX = carBody.body.velocity.x;
+      carBody._internalVelZ = carBody.body.velocity.z;
+      carBody._lastSetVelX = carBody.body.velocity.x;
+      carBody._lastSetVelZ = carBody.body.velocity.z;
+
+      // Stun duration scales with impact speed
+      const speedT = Math.min(speed / OBSTACLE_STUN.speedForMaxStun, 1);
+      const stunDuration = OBSTACLE_STUN.minDuration
+        + speedT * (OBSTACLE_STUN.maxDuration - OBSTACLE_STUN.minDuration);
+
+      // Apply stun state to car
+      carBody._isStunned = true;
+      carBody._stunTimer = stunDuration;
+      carBody._stunSpinRate = (Math.random() > 0.5 ? 1 : -1) * OBSTACLE_STUN.spinRate;
+
+      // Emit event for visual FX
+      const hitX = (carBody.body.position.x + otherPhysBody.position.x) * 0.5;
+      const hitZ = (carBody.body.position.z + otherPhysBody.position.z) * 0.5;
+      const hitY = carBody.body.position.y;
+      this._emit('obstacle-hit', {
+        carBody,
+        speed,
+        stunDuration,
+        hitX, hitY, hitZ,
+        normalX: nnx,
+        normalZ: nnz,
+      });
       return;
     }
 

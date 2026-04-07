@@ -8,8 +8,8 @@
 // proportionally.  Stat range is 2–8, MAX_STAT = 10.
 export const STAT_BASE = {
   maxStat: 10,          // denominator for scaling — never change
-  speed: 28,            // u/s at stat 10 → stat 8 = 22.4, stat 3 = 8.4
-  accel: 36,            // u/s² at stat 10 → per-car, proportional to speed stat
+  speed: 35,            // u/s at stat 10 → stat 8 = 22.4, stat 3 = 8.4
+  accel: 40,            // u/s² at stat 10 → per-car, proportional to speed stat
   mass: 10,             // kg at stat 10
   handling: 5.5,        // handling factor at stat 10
 };
@@ -439,6 +439,55 @@ export const PHYSICS = {
   networkSendRate: 20,    // Hz
 };
 
+// ── Obstacle Stun (boulder / pillar collision) ──────────────────────
+export const OBSTACLE_STUN = {
+  // Stun duration scales with impact speed
+  minDuration: 0.5,       // seconds — light tap
+  maxDuration: 1.5,       // seconds — full speed crash
+  speedForMaxStun: 25,    // u/s — at this speed or above, max stun duration
+
+  // Physics response on impact
+  bounceForce: 3,         // gentle push-away (replaces old speed*0.6)
+  speedKill: 0.95,        // kill 95% of car speed on impact
+  pushOut: 0.4,           // positional push to prevent sticking (units)
+
+  // Stun behaviour
+  spinRate: 8,            // rad/s — dizzy spin while stunned
+  wobbleFreq: 12,         // Hz — visual wobble frequency
+  wobbleAmplitude: 0.08,  // rad — max roll wobble angle
+
+  // Immunity after stun ends (prevents chain-stuns from sliding along obstacle)
+  immunityDuration: 0.3,  // seconds
+
+  // Camera shake on impact
+  cameraShake: {
+    intensity: 0.015,
+    duration: 250,        // ms
+  },
+
+  // Visual FX
+  fx: {
+    // Rock debris particles at impact point
+    debrisCount: 8,
+    debrisSize: 0.15,
+    debrisSpeed: 4,
+    debrisLifetime: 0.8,
+    debrisColor: 0x8B7355,
+
+    // Orbiting stars/sparkles around stunned car
+    starCount: 5,
+    starSize: 0.25,
+    starOrbitRadius: 1.8,
+    starOrbitSpeed: 6,     // rad/s
+    starColor: 0xFFDD44,
+
+    // Impact flash on car
+    flashDuration: 0.15,   // seconds
+    flashColor: 0xFFFFFF,
+    flashIntensity: 3.0,
+  },
+};
+
 // ── Car Feel — visual + handling dynamics ─────────────────────────────
 // Drift-style kinematic model: heading rotates proportionally to speed,
 // velocity blends toward facing direction via lateral friction.
@@ -446,11 +495,11 @@ export const PHYSICS = {
 export const CAR_FEEL = {
   // ── Steering ──
   // maxSteerAngle: per-frame steering increment (rad) — like Drift Zero's maxSteer
-  maxSteerAngle: 0.042,      // max steer per frame (rad) — tuned for arcade feel
+  maxSteerAngle: 0.055,      // max steer per frame (rad) — tuned for arcade feel
   steerSpeed: 0.14,          // interpolation factor toward target steer (per frame at 60fps)
   steerReturnSpeed: 0.09,    // how fast steer self-centers when no input
   // High-speed steering reduction (understeer) — at max speed, steer is scaled by this
-  steerAtSpeed: 0.60,        // 0=no reduction, 1=zero steer at max speed
+  steerAtSpeed: 0.40,        // 0=no reduction, 1=zero steer at max speed
 
   // ── Heading rotation ──
   // heading += steerAngle * (speed/maxSpeed) * direction * dt*60

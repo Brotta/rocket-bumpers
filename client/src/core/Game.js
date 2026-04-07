@@ -11,7 +11,8 @@ import { BotManager } from '../ai/BotManager.js';
 import { NameTags } from '../ui/NameTags.js';
 import { DynamicHazards } from '../physics/DynamicHazards.js';
 import { TireSmokeFX } from '../rendering/TireSmokeFX.js';
-import { CARS, GAME_STATES, ARENA, ROUND, RESPAWN, CAR_FEEL } from './Config.js';
+import { CARS, GAME_STATES, ARENA, ROUND, RESPAWN, CAR_FEEL, OBSTACLE_STUN } from './Config.js';
+import { StunFX } from '../rendering/StunFX.js';
 import { engineAudio } from '../audio/EngineAudio.js';
 
 const MAX_DT = 1 / 30; // cap delta to avoid spiral of death
@@ -126,12 +127,16 @@ export class Game {
     this.gameState.on('countdownTick', (e) => this._onCountdownTick(e));
     this.gameState.on('roundTimeUpdate', (e) => this._onRoundTimeUpdate(e));
 
+    // ── Stun visual FX ──
+    this.stunFX = new StunFX(this.sceneManager.scene);
+
     // ── Wire collision events → re-emit ──
     this.collisionHandler.on('hit', (e) => this._emit('hit', e));
     this.collisionHandler.on('ko', (e) => this._emit('ko', e));
     this.collisionHandler.on('self-ko', (e) => this._emit('self-ko', e));
     this.collisionHandler.on('fell', (e) => this._onPlayerFell(e));
     this.collisionHandler.on('trail-hit', (e) => this._emit('trail-hit', e));
+    this.collisionHandler.on('obstacle-hit', (e) => this._onObstacleHit(e));
   }
 
   // ── Event system ──────────────────────────────────────────────────────
@@ -322,7 +327,7 @@ export class Game {
         cb._arenaGroup = this._arenaGroup;
         cb._tiltFloorMesh = this._tiltFloorMesh;
         cb._updateVisualTilt();
-        cb.syncMesh();
+        cb.syncMesh(dt);
 
         // Animate wheel rotation, steering, and contra-steer
         animateWheels(cb.mesh, cb._currentSpeed, dt, cb._steerAngle, cb.driftMode);
@@ -331,11 +336,20 @@ export class Game {
       // Tire smoke particles (after mesh sync so wheel positions are current)
       this.tireSmokeFX.update(dt, this.carBodies);
 
+      // Stun visual FX (debris, stars, wobble, flash)
+      this.stunFX.update(dt);
+
       // Dynamic hazards (lava pool, eruptions, geysers)
       this.dynamicHazards.update(dt, this.carBodies);
 
       // Collision detection (after physics step)
       this.collisionHandler.update();
+
+      // Per-frame obstacle overlap enforcement (safety net for pass-through)
+      const overlapHits = this.physicsWorld.enforceObstacleOverlaps(this.carBodies);
+      for (const hit of overlapHits) {
+        this._applyOverlapStun(hit);
+      }
 
       // Power-up spawns, pickups, animations
       this.powerUpManager.update(dt);
@@ -346,7 +360,7 @@ export class Game {
         cb._arenaGroup = this._arenaGroup;
         cb._tiltFloorMesh = this._tiltFloorMesh;
         cb._updateVisualTilt();
-        cb.syncMesh();
+        cb.syncMesh(dt);
       }
     }
 
@@ -385,13 +399,22 @@ export class Game {
     const absSpeed = Math.abs(car._currentSpeed);
     const speedRatio = Math.min(absSpeed / Math.max(car.maxSpeed, 1), 1);
 
-    // Forward & right vectors from car facing
-    this._camForward.set(0, 0, -1).applyQuaternion(carQuat);
-    this._camForward.y = 0;
-    this._camForward.normalize();
-    this._camRight.set(1, 0, 0).applyQuaternion(carQuat);
-    this._camRight.y = 0;
-    this._camRight.normalize();
+    // Forward & right vectors — use velocity direction while airborne
+    // so the camera doesn't spin with the car
+    if (car._geyserAirborne) {
+      const vx = car.body.velocity.x;
+      const vz = car.body.velocity.z;
+      const hSpeed = Math.sqrt(vx * vx + vz * vz);
+      if (hSpeed > 0.5) {
+        this._camForward.set(vx / hSpeed, 0, vz / hSpeed);
+      }
+      // else: keep previous _camForward (no meaningful direction)
+    } else {
+      this._camForward.set(0, 0, -1).applyQuaternion(carQuat);
+      this._camForward.y = 0;
+      this._camForward.normalize();
+    }
+    this._camRight.set(-this._camForward.z, 0, this._camForward.x);
 
     // ── Follow distance: pulls back at speed ──
     const followDist = cc.followDist + cc.speedPullback * speedRatio;
@@ -408,12 +431,13 @@ export class Game {
       .addScaledVector(this._camRight, this._currentSteerOffset)
       .setY(carPos.y + cc.height);
 
-    // ── Smooth follow ──
-    cam.position.lerp(this._camDesired, cc.followSmoothing);
+    // ── Smooth follow (tighter when airborne so camera locks on) ──
+    const followLerp = car._geyserAirborne ? 0.15 : cc.followSmoothing;
+    cam.position.lerp(this._camDesired, followLerp);
 
     // ── Look-at: ahead of car ──
     this._lookAt.copy(carPos).addScaledVector(this._camForward, cc.lookAhead);
-    this._lookAtSmoothed.lerp(this._lookAt, cc.followSmoothing);
+    this._lookAtSmoothed.lerp(this._lookAt, followLerp);
     cam.lookAt(this._lookAtSmoothed);
 
     // ── FOV: widens at speed for drama ──
@@ -512,6 +536,45 @@ export class Game {
     this._cameraShakeIntensity = intensity;
     this._cameraShakeDuration = shakeCfg.duration / 1000;
     this._cameraShakeTimer = this._cameraShakeDuration;
+  }
+
+  // ── Overlap-based stun (safety net for pass-through) ───────────────
+
+  _applyOverlapStun({ carBody, speed, nx, nz }) {
+    // Apply stun state
+    const speedT = Math.min(speed / OBSTACLE_STUN.speedForMaxStun, 1);
+    const stunDuration = OBSTACLE_STUN.minDuration
+      + speedT * (OBSTACLE_STUN.maxDuration - OBSTACLE_STUN.minDuration);
+
+    carBody._isStunned = true;
+    carBody._stunTimer = stunDuration;
+    carBody._stunSpinRate = (Math.random() > 0.5 ? 1 : -1) * OBSTACLE_STUN.spinRate;
+    carBody._currentSpeed *= (1 - OBSTACLE_STUN.speedKill);
+
+    // Trigger same visual FX as collision-based stun
+    const hitX = carBody.body.position.x - nx * 1.0;
+    const hitZ = carBody.body.position.z - nz * 1.0;
+    const hitY = carBody.body.position.y;
+    this._onObstacleHit({
+      carBody, speed, stunDuration,
+      hitX, hitY, hitZ,
+      normalX: nx, normalZ: nz,
+    });
+  }
+
+  // ── Obstacle hit (stun) ────────────────────────────────────────────
+
+  _onObstacleHit(e) {
+    // Visual FX (debris, stars, wobble, flash)
+    this.stunFX.onObstacleHit(e);
+
+    // Camera shake (local player only)
+    if (e.carBody === this.localPlayer) {
+      const shakeCfg = OBSTACLE_STUN.cameraShake;
+      this._cameraShakeIntensity = shakeCfg.intensity;
+      this._cameraShakeDuration = shakeCfg.duration / 1000;
+      this._cameraShakeTimer = this._cameraShakeDuration;
+    }
   }
 
   // ── Geyser eruption camera shake ───────────────────────────────────
