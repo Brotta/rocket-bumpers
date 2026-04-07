@@ -110,6 +110,12 @@ export class CarBody {
     this._currentRoll = 0;   // smoothed visual roll angle (rad)
     this._currentPitch = 0;  // smoothed visual pitch angle (rad)
 
+    // ── Previous-frame state for render interpolation ──
+    this._prevPosX = 0;
+    this._prevPosY = 0;
+    this._prevPosZ = 0;
+    this._prevYaw = 0;
+
     // ── Visual tilt system (mesh tilts on slopes, physics body stays upright) ──
     this._tiltRaycaster = new THREE.Raycaster();
     this._tiltRaycaster.far = 5;
@@ -463,29 +469,41 @@ export class CarBody {
   }
 
   // ── Sync physics body → Three.js mesh ──────────────────────────────
-  syncMesh(dt) {
-    // Velocity-predicted smooth position: avoids CANNON fixed-timestep jitter.
-    // The visual position advances each frame based on internal velocity (always smooth),
-    // and gently corrects toward the physics truth to absorb collisions.
-    if (!this._smoothPosInited) {
-      this._smoothPosX = this.body.position.x;
-      this._smoothPosZ = this.body.position.z;
-      this._smoothPosInited = true;
+  syncMesh(dt, alpha) {
+    // With fixed-timestep, interpolate between previous and current physics
+    // state for smooth rendering at any display refresh rate.
+    if (alpha !== undefined && alpha < 1) {
+      const ix = this._prevPosX + (this.body.position.x - this._prevPosX) * alpha;
+      const iy = this._prevPosY + (this.body.position.y - this._prevPosY) * alpha;
+      const iz = this._prevPosZ + (this.body.position.z - this._prevPosZ) * alpha;
+
+      this.mesh.position.x = ix;
+      this.mesh.position.z = iz;
+      this.mesh.position.y = iy - 0.55;
+
+      // Also update smooth pos to stay in sync (for systems that read it)
+      this._smoothPosX = ix;
+      this._smoothPosZ = iz;
+    } else {
+      // Fallback: velocity-predicted smooth position (countdown, no alpha)
+      if (!this._smoothPosInited) {
+        this._smoothPosX = this.body.position.x;
+        this._smoothPosZ = this.body.position.z;
+        this._smoothPosInited = true;
+      }
+
+      const frameDt = dt || (1 / 60);
+      this._smoothPosX += this._internalVelX * frameDt;
+      this._smoothPosZ += this._internalVelZ * frameDt;
+      const correctionRate = 0.15;
+      this._smoothPosX += (this.body.position.x - this._smoothPosX) * correctionRate;
+      this._smoothPosZ += (this.body.position.z - this._smoothPosZ) * correctionRate;
+
+      this.mesh.position.x = this._smoothPosX;
+      this.mesh.position.z = this._smoothPosZ;
+      this.mesh.position.y = this.body.position.y - 0.55;
     }
 
-    const frameDt = dt || (1 / 60);
-    // Predict: advance by velocity
-    this._smoothPosX += this._internalVelX * frameDt;
-    this._smoothPosZ += this._internalVelZ * frameDt;
-    // Correct: drift toward physics position (handles collisions, boundaries)
-    const correctionRate = 0.15;
-    this._smoothPosX += (this.body.position.x - this._smoothPosX) * correctionRate;
-    this._smoothPosZ += (this.body.position.z - this._smoothPosZ) * correctionRate;
-
-    this.mesh.position.x = this._smoothPosX;
-    this.mesh.position.z = this._smoothPosZ;
-    // Y follows directly (vertical snaps for floor/fall need to be instant)
-    this.mesh.position.y = this.body.position.y - 0.55;
     // Use visual quaternion (with tilt) instead of physics quaternion
     this.mesh.quaternion.copy(this._visualQuat);
 
@@ -526,5 +544,9 @@ export class CarBody {
     this._smoothPosX = x;
     this._smoothPosZ = z;
     this._smoothPosInited = true;
+    this._prevPosX = x;
+    this._prevPosY = y;
+    this._prevPosZ = z;
+    this._prevYaw = 0;
   }
 }

@@ -8,6 +8,34 @@ import { menuMusic } from './audio/MenuMusic.js';
 // ── Create game instance ──────────────────────────────────────────────
 const game = new Game();
 
+// ── FPS / Frame-time counter (top-right) ─────────────────────────────
+const fpsDiv = document.createElement('div');
+fpsDiv.style.cssText = `
+  position:fixed;top:16px;right:16px;
+  color:#0f0;font:bold 14px 'Courier New',monospace;
+  background:rgba(0,0,0,0.6);padding:6px 10px;
+  border-radius:4px;pointer-events:none;z-index:100;
+  line-height:1.4;
+`;
+document.body.appendChild(fpsDiv);
+
+let _fpsFrames = 0;
+let _fpsLastTime = performance.now();
+const _fpsLoop = () => {
+  requestAnimationFrame(_fpsLoop);
+  _fpsFrames++;
+  const now = performance.now();
+  const elapsed = now - _fpsLastTime;
+  if (elapsed >= 500) {
+    const fps = (_fpsFrames / elapsed * 1000).toFixed(0);
+    const frameTime = (elapsed / _fpsFrames).toFixed(1);
+    fpsDiv.textContent = `${fps} FPS\n${frameTime} ms`;
+    _fpsFrames = 0;
+    _fpsLastTime = now;
+  }
+};
+requestAnimationFrame(_fpsLoop);
+
 // ── HUD elements ──────────────────────────────────────────────────────
 
 // Player info (top-left)

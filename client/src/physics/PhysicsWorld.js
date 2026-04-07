@@ -28,11 +28,12 @@ export class PhysicsWorld {
     this._buildRockObstacles();
 
     this._fixedTimeStep = 1 / 60;
-    this._maxSubSteps = 3;
   }
 
   step(dt) {
-    this.world.step(this._fixedTimeStep, dt, this._maxSubSteps);
+    // Single fixed step — the game loop already runs at fixed 1/60 intervals,
+    // so no internal accumulator or substeps are needed.
+    this.world.step(dt);
   }
 
   // ── Octagonal floor (diameter 120, surface Y=0) ─────────────────────

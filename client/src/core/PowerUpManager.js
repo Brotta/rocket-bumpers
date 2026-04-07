@@ -21,6 +21,44 @@ const RAINBOW_COLORS = [
 
 const POWERUP_TYPES = Object.keys(POWERUPS);
 
+/**
+ * Swept-sphere test: checks if a moving point (segment from prev to curr)
+ * passes within `radius` of a stationary target point.
+ * Returns true if the closest point on the segment is within radius.
+ */
+function sweptSphereHit(prevX, prevZ, currX, currZ, targetX, targetY, targetZ, projY, radius) {
+  // Vertical check first (cheap early-out)
+  if (Math.abs(targetY - projY) > radius) return false;
+
+  const segX = currX - prevX;
+  const segZ = currZ - prevZ;
+  const segLenSq = segX * segX + segZ * segZ;
+
+  // If segment is zero-length, fall back to point check
+  if (segLenSq < 0.0001) {
+    const dx = targetX - currX;
+    const dz = targetZ - currZ;
+    const dy = targetY - projY;
+    return (dx * dx + dz * dz + dy * dy) < radius * radius;
+  }
+
+  // Project target onto segment, clamped to [0, 1]
+  const toTargetX = targetX - prevX;
+  const toTargetZ = targetZ - prevZ;
+  let t = (toTargetX * segX + toTargetZ * segZ) / segLenSq;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+
+  // Closest point on segment to target
+  const closestX = prevX + segX * t;
+  const closestZ = prevZ + segZ * t;
+  const dx = targetX - closestX;
+  const dz = targetZ - closestZ;
+  const dy = targetY - projY;
+
+  return (dx * dx + dz * dz + dy * dy) < radius * radius;
+}
+
 // ── Shared geometries & materials (created once, reused everywhere) ──
 const _sharedGeo = {
   trailParticle: new THREE.SphereGeometry(0.08, 3, 3),
@@ -377,6 +415,7 @@ export class PowerUpManager {
       isHoming, owner: car, config,
       group: missileGroup, light: missileLight,
       x: spawnX, y: spawnY, z: spawnZ,
+      prevX: spawnX, prevZ: spawnZ, // previous position for swept collision
       vx: fwdX * speed, vz: fwdZ * speed, speed, yaw,
       age: 0, lifetime: config.lifetime,
       target: null,
@@ -478,6 +517,10 @@ export class PowerUpManager {
         p.vz = fwdZ * p.speed;
       }
 
+      // Save previous position for swept collision
+      p.prevX = p.x;
+      p.prevZ = p.z;
+
       // Move
       p.x += p.vx * dt;
       p.z += p.vz * dt;
@@ -502,14 +545,15 @@ export class PowerUpManager {
       }
       this._tickTrailPool(p, dt);
 
-      // Collision: cars
+      // Collision: cars (swept sphere — traces the full path to prevent tunneling)
       let hit = false;
       for (const car of carBodies) {
         if (car === p.owner || car.isEliminated || car.isInvincible) continue;
-        const dx = car.body.position.x - p.x;
-        const dz = car.body.position.z - p.z;
-        const dy = car.body.position.y - p.y;
-        if (dx * dx + dz * dz + dy * dy < 2.25) { // 1.5²
+        if (sweptSphereHit(
+          p.prevX, p.prevZ, p.x, p.z,
+          car.body.position.x, car.body.position.y, car.body.position.z,
+          p.y, 1.5,
+        )) {
           car.takeDamage(p.config.damage, p.owner, false);
           const knockback = 8;
           car.body.velocity.x -= Math.sin(p.yaw) * knockback;
@@ -524,14 +568,16 @@ export class PowerUpManager {
       }
       if (hit) { this._removeProjectile(i); continue; }
 
-      // Collision: obstacles
+      // Collision: obstacles (swept sphere along missile path)
       if (this.obstacleBodies) {
         for (let j = this.obstacleBodies.length - 1; j >= 0; j--) {
           const ob = this.obstacleBodies[j];
-          const dx = ob.position.x - p.x;
-          const dz = ob.position.z - p.z;
           const hitDist = (ob._obstacleRadius || 2) + 0.5;
-          if (dx * dx + dz * dz < hitDist * hitDist) {
+          if (sweptSphereHit(
+            p.prevX, p.prevZ, p.x, p.z,
+            ob.position.x, ob.position.y, ob.position.z,
+            p.y, hitDist,
+          )) {
             this._destroyObstacle(j);
             this._detonateProjectile(p);
             hit = true;

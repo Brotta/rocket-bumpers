@@ -419,11 +419,13 @@ export class CollisionHandler {
     });
   }
 
-  // ── Trail fire proximity check ────────────────────────────────────────
+  // ── Trail fire proximity check (swept — car path vs stationary trail) ──
 
   _checkTrailHits(carBodies) {
     const trailBodies = AbilitySystem._activeTrailBodies;
     if (!trailBodies || trailBodies.size === 0) return;
+
+    const TRAIL_RADIUS_SQ = 1.44; // 1.2²
 
     for (const worldBody of trailBodies) {
       if (!worldBody._isTrailFire) continue;
@@ -436,13 +438,40 @@ export class CollisionHandler {
         if (cb === owner) continue;
         if (cb.isInvincible || cb.isEliminated) continue;
 
-        const dx = cb.body.position.x - tx;
-        const dz = cb.body.position.z - tz;
-        const distSq = dx * dx + dz * dz;
+        // Swept check: trace the car's movement path (prev→curr) against trail
+        const cx = cb.body.position.x;
+        const cz = cb.body.position.z;
+        const px = cb._prevPosX !== undefined ? cb._prevPosX : cx;
+        const pz = cb._prevPosZ !== undefined ? cb._prevPosZ : cz;
 
-        if (distSq < 1.44) { // 1.2 * 1.2
+        // Segment: car previous pos → car current pos
+        const segX = cx - px;
+        const segZ = cz - pz;
+        const segLenSq = segX * segX + segZ * segZ;
+
+        let closestX, closestZ;
+        if (segLenSq < 0.0001) {
+          closestX = cx;
+          closestZ = cz;
+        } else {
+          const toTrailX = tx - px;
+          const toTrailZ = tz - pz;
+          let t = (toTrailX * segX + toTrailZ * segZ) / segLenSq;
+          if (t < 0) t = 0;
+          else if (t > 1) t = 1;
+          closestX = px + segX * t;
+          closestZ = pz + segZ * t;
+        }
+
+        const dx = cx - tx; // use current pos for knockback direction
+        const dz = cz - tz;
+        const cdx = closestX - tx;
+        const cdz = closestZ - tz;
+        const distSq = cdx * cdx + cdz * cdz;
+
+        if (distSq < TRAIL_RADIUS_SQ) {
           // Apply knockback away from trail fire
-          const dist = Math.sqrt(distSq);
+          const dist = Math.sqrt(dx * dx + dz * dz);
           const nx = dist > 0.01 ? dx / dist : 0;
           const nz = dist > 0.01 ? dz / dist : 1;
           cb.body.velocity.x += nx * 8;

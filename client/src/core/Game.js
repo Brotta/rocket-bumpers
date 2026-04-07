@@ -17,6 +17,7 @@ import { StunFX } from '../rendering/StunFX.js';
 import { engineAudio } from '../audio/EngineAudio.js';
 
 const MAX_DT = 1 / 30; // cap delta to avoid spiral of death
+const FIXED_DT = 1 / 60; // fixed timestep for deterministic game logic
 
 /**
  * Game — top-level orchestrator.
@@ -120,6 +121,7 @@ export class Game {
     // ── Clock ──
     this._clock = new THREE.Clock();
     this._running = false;
+    this._accumulator = 0; // fixed-timestep accumulator
 
     // ── Event listeners ──
     this._listeners = {};
@@ -292,88 +294,118 @@ export class Game {
     e.preventDefault();
   };
 
-  // ── Main animation loop ───────────────────────────────────────────────
+  // ── Main animation loop (fixed timestep + visual interpolation) ────────
 
   _animate = () => {
     if (!this._running) return;
     requestAnimationFrame(this._animate);
 
-    let dt = this._clock.getDelta();
-    if (dt > MAX_DT) dt = MAX_DT;
+    let frameDt = this._clock.getDelta();
+    if (frameDt > MAX_DT) frameDt = MAX_DT;
 
-    // Game state timers
-    this.gameState.update(dt);
+    // Game state timers (safe to run at render rate — only drives countdowns/UI)
+    this.gameState.update(frameDt);
 
-    // Physics + abilities (only during PLAYING)
+    // ── Fixed-timestep game logic ──
     if (this.gameState.isPlaying) {
-      // Apply controls to local player (skip while dead/falling)
-      if (this.localPlayer && !this._isDead) {
-        this.localPlayer.applyControls(this.input, dt);
+      // Save previous positions for render interpolation
+      for (const cb of this.carBodies) {
+        cb._prevPosX = cb.body.position.x;
+        cb._prevPosY = cb.body.position.y;
+        cb._prevPosZ = cb.body.position.z;
+        cb._prevYaw = cb._yaw;
       }
 
-      // Update bot brains (produces input + calls applyControls internally)
-      this.botManager.update(dt);
-
-      // Update all abilities
-      for (const [, ability] of this.abilities) {
-        ability.update(dt);
+      this._accumulator += frameDt;
+      while (this._accumulator >= FIXED_DT) {
+        this._fixedUpdate(FIXED_DT);
+        this._accumulator -= FIXED_DT;
       }
+    }
 
-      // Step physics
-      this.physicsWorld.step(dt);
+    // ── Render update (runs at display refresh rate) ──
+    const alpha = this.gameState.isPlaying
+      ? this._accumulator / FIXED_DT
+      : 0;
+    this._renderUpdate(frameDt, alpha);
+  };
 
-      // Sync all meshes + floor safety net + visual tilt + wheel animation
+  // ── Deterministic game logic at fixed 1/60s timestep ─────────────────
+
+  _fixedUpdate(dt) {
+    // Apply controls to local player (skip while dead/falling)
+    if (this.localPlayer && !this._isDead) {
+      this.localPlayer.applyControls(this.input, dt);
+    }
+
+    // Update bot brains (produces input + calls applyControls internally)
+    this.botManager.update(dt);
+
+    // Update all abilities
+    for (const [, ability] of this.abilities) {
+      ability.update(dt);
+    }
+
+    // Step physics (single fixed step — no internal accumulator needed)
+    this.physicsWorld.step(dt);
+
+    // Floor safety net (runs at fixed rate — no dt scaling needed)
+    for (const cb of this.carBodies) {
+      if (cb.isEliminated && !cb.mesh.visible) continue;
+      const pos = cb.body.position;
+      const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
+
+      if (dist < ARENA.diameter / 2 - 1 && pos.y < 0 && pos.y > RESPAWN.fallOffY) {
+        pos.y += (0.6 - pos.y) * 0.3;
+        if (pos.y > 0.55) pos.y = 0.6;
+        cb.body.velocity.y = Math.max(cb.body.velocity.y, 0);
+      }
+    }
+
+    // Dynamic hazards (lava pool, eruptions, geysers)
+    this.dynamicHazards.update(dt, this.carBodies);
+
+    // Collision detection (after physics step)
+    this.collisionHandler.update();
+
+    // Per-frame obstacle overlap enforcement (safety net for pass-through)
+    const overlapHits = this.physicsWorld.enforceObstacleOverlaps(this.carBodies);
+    for (const hit of overlapHits) {
+      this._applyOverlapStun(hit);
+    }
+
+    // Power-up spawns, pickups, projectile physics, collision
+    this.powerUpManager.update(dt);
+  }
+
+  // ── Visual update at display refresh rate ────────────────────────────
+
+  _renderUpdate(frameDt, alpha) {
+    if (this.gameState.isPlaying) {
+      // Sync meshes with interpolation between prev and current physics state
       for (const cb of this.carBodies) {
         if (cb.isEliminated && !cb.mesh.visible) continue;
-        const pos = cb.body.position;
-        const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
 
-        // Safety net: prevent tunneling through floor within arena bounds
-        // Use soft correction to avoid visual jitter from hard Y snaps
-        if (dist < ARENA.diameter / 2 - 1 && pos.y < 0 && pos.y > RESPAWN.fallOffY) {
-          pos.y += (0.6 - pos.y) * 0.3; // soft push toward 0.6 instead of hard snap
-          if (pos.y > 0.55) pos.y = 0.6; // clamp once close enough
-          cb.body.velocity.y = Math.max(cb.body.velocity.y, 0);
-        }
-
-        // Update visual tilt then sync mesh
         cb._arenaGroup = this._arenaGroup;
         cb._tiltFloorMesh = this._tiltFloorMesh;
         cb._updateVisualTilt();
-        cb.syncMesh(dt);
+        cb.syncMesh(frameDt, alpha);
 
         // Animate wheel rotation, steering, and contra-steer
-        animateWheels(cb.mesh, cb._currentSpeed, dt, cb._steerAngle, cb.driftMode);
+        animateWheels(cb.mesh, cb._currentSpeed, frameDt, cb._steerAngle, cb.driftMode);
       }
 
       // Tire smoke particles (after mesh sync so wheel positions are current)
-      this.tireSmokeFX.update(dt, this.carBodies);
+      this.tireSmokeFX.update(frameDt, this.carBodies);
 
       // Stun visual FX (debris, stars, wobble, flash)
-      this.stunFX.update(dt);
-
-      // Dynamic hazards (lava pool, eruptions, geysers)
-      this.dynamicHazards.update(dt, this.carBodies);
-
-      // Collision detection (after physics step)
-      this.collisionHandler.update();
-
-      // Per-frame obstacle overlap enforcement (safety net for pass-through)
-      const overlapHits = this.physicsWorld.enforceObstacleOverlaps(this.carBodies);
-      for (const hit of overlapHits) {
-        this._applyOverlapStun(hit);
-      }
-
-      // Power-up spawns, pickups, animations
-      this.powerUpManager.update(dt);
+      this.stunFX.update(frameDt);
     } else if (this.gameState.isCountdown) {
-      // During countdown: keep rendering but no controls / physics
-      // Cars are locked, just sync visuals with tilt
       for (const cb of this.carBodies) {
         cb._arenaGroup = this._arenaGroup;
         cb._tiltFloorMesh = this._tiltFloorMesh;
         cb._updateVisualTilt();
-        cb.syncMesh(dt);
+        cb.syncMesh(frameDt);
       }
     }
 
@@ -382,10 +414,10 @@ export class Game {
       const lp = this.localPlayer.body.position;
       engineAudio.setListenerPosition(lp.x, lp.z);
     }
-    engineAudio.update(dt);
+    engineAudio.update(frameDt);
 
     // Camera always follows
-    this._updateCamera();
+    this._updateCamera(frameDt);
 
     // Update name tag and health bar positions
     this.nameTags.update(
@@ -401,11 +433,11 @@ export class Game {
 
     // Render
     this.sceneManager.update();
-  };
+  }
 
   // ── Camera ────────────────────────────────────────────────────────────
 
-  _updateCamera() {
+  _updateCamera(dt) {
     if (!this.localPlayer) return;
     const cam = this.sceneManager.camera;
     const cc = CAR_FEEL.camera;
@@ -441,7 +473,7 @@ export class Game {
     const steerInput = car._steerInput; // -1 / 0 / +1
     const targetOffset = -steerInput * cc.steerOffsetMax * speedRatio;
     this._currentSteerOffset += (targetOffset - this._currentSteerOffset)
-      * Math.min(1, cc.steerOffsetSmoothing * (1 / 60));
+      * Math.min(1, cc.steerOffsetSmoothing * dt);
 
     // ── Desired position: behind + above + lateral offset ──
     this._camDesired.copy(carPos)
@@ -450,7 +482,8 @@ export class Game {
       .setY(carPos.y + cc.height);
 
     // ── Smooth follow (tighter when airborne so camera locks on) ──
-    const followLerp = car._geyserAirborne ? 0.15 : cc.followSmoothing;
+    const followBase = car._geyserAirborne ? 0.15 : cc.followSmoothing;
+    const followLerp = Math.min(1, followBase * dt * 60);
     cam.position.lerp(this._camDesired, followLerp);
 
     // ── Look-at: ahead of car ──
@@ -461,7 +494,7 @@ export class Game {
     // ── FOV: widens at speed for drama ──
     const targetFOV = cc.baseFOV + cc.maxFOVBoost * speedRatio;
     this._currentFOV += (targetFOV - this._currentFOV)
-      * Math.min(1, cc.fovSmoothing * (1 / 60));
+      * Math.min(1, cc.fovSmoothing * dt);
     if (Math.abs(cam.fov - this._currentFOV) > 0.05) {
       cam.fov = this._currentFOV;
       cam.updateProjectionMatrix();
@@ -470,7 +503,7 @@ export class Game {
     // ── Camera tilt: slight roll into turns (via quaternion, not euler) ──
     const targetTilt = steerInput * cc.steerTiltMax * speedRatio;
     this._currentCamTilt += (targetTilt - this._currentCamTilt)
-      * Math.min(1, cc.steerTiltSmoothing * (1 / 60));
+      * Math.min(1, cc.steerTiltSmoothing * dt);
     if (Math.abs(this._currentCamTilt) > 0.001) {
       // Apply roll around the camera's local forward (Z) axis after lookAt
       this._camTiltQuat.setFromAxisAngle(this._camForward, this._currentCamTilt);
@@ -479,7 +512,7 @@ export class Game {
 
     // ── Camera shake (geyser + eruption) ──
     if (this._cameraShakeTimer > 0) {
-      this._cameraShakeTimer -= 1 / 60;
+      this._cameraShakeTimer -= dt;
       const decay = this._cameraShakeDuration > 0
         ? Math.max(0, this._cameraShakeTimer / this._cameraShakeDuration)
         : 0;
