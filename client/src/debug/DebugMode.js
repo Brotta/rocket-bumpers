@@ -1,24 +1,38 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
-import { CAR_FEEL, DAMAGE, OBSTACLE_STUN, ARENA, PHYSICS, CAR_ORDER, GAME_STATES, COLLISION_GROUPS } from '../core/Config.js';
+import { CAR_FEEL, DAMAGE, OBSTACLE_STUN, ARENA, PHYSICS, CAR_ORDER, CARS, POWERUPS, POWERUP_WEIGHTS, GAME_STATES, COLLISION_GROUPS, BOTS, PLAYERS, getSpawnPosition } from '../core/Config.js';
 import { AbilitySystem } from '../physics/AbilitySystem.js';
+import { PERSONALITIES, randomPersonality } from '../ai/BotPersonalities.js';
 
 /**
  * DebugMode — all-in-one debug overlay for Rocket Bumpers.
  *
  * Features:
- *   1. Hitbox wireframe visualization
- *   2. Real-time parameter tweaking panel
- *   3. Click-to-teleport
- *   4. God mode
- *   5. Spawn controls
- *   6. Debug map toggle (flat, no obstacles/hazards)
- *   7. Sandbox mode (flat map, no enemies, no timer)
- *   8. Entity spawner (click to place missiles, geysers, obstacles)
- *   9. Multi-vehicle sync input (compare car handling side-by-side)
+ *   1.  Hitbox wireframe visualization
+ *   2.  Real-time parameter tweaking panel
+ *   3.  Click-to-teleport
+ *   4.  God mode
+ *   5.  Spawn controls
+ *   6.  Debug map toggle (flat, no obstacles/hazards)
+ *   7.  Sandbox mode (flat map, no enemies, no timer)
+ *   8.  Entity spawner (click to place missiles, geysers, obstacles)
+ *   9.  Multi-vehicle sync input (compare car handling side-by-side)
+ *   10. FX visibility toggles (tire smoke, stun FX, geyser FX)
+ *   11. Slow motion time scale
+ *   12. Free camera (orbit controls)
+ *   13. Physics debug overlay (static bodies wireframe)
+ *   14. Bot AI visualizer
+ *   15. Performance stats panel
+ *   16. Collision logger
+ *   17. Bot spawner (click to place)
+ *   18. Power-up box spawner (click to place)
+ *   19. Instant elimination/respawn
  *
  * Toggle with ' (apostrophe) key.
  */
+
+const POWERUP_TYPES = Object.keys(POWERUPS);
+
 export class DebugMode {
   constructor(game) {
     this.game = game;
@@ -38,7 +52,7 @@ export class DebugMode {
     this._syncActive = false;
 
     // ── Entity spawner ──
-    this._spawnerMode = null;  // null | 'missile' | 'homing' | 'geyser' | 'obstacle'
+    this._spawnerMode = null;  // null | 'missile' | 'homing' | 'geyser' | 'bot_*' | 'powerup_*'
     this._spawnerHandler = null;
 
     // ── Hitbox wireframes ──
@@ -61,12 +75,12 @@ export class DebugMode {
     this._hazardsDisabled = false;
 
     // ── Sandbox map state ──
-    this._sandboxFloorMesh = null;   // THREE.Mesh for sandbox floor
-    this._sandboxFloorBody = null;   // CANNON.Body for sandbox floor
-    this._sandboxGridMesh = null;    // grid lines
-    this._hiddenSceneChildren = [];  // scene children hidden during sandbox
-    this._origFloorBody = null;      // original physics floor
-    this._origLavaBody = null;       // original physics lava
+    this._sandboxFloorMesh = null;
+    this._sandboxFloorBody = null;
+    this._sandboxGridMesh = null;
+    this._hiddenSceneChildren = [];
+    this._origFloorBody = null;
+    this._origLavaBody = null;
     this._origBackground = null;
     this._origFog = null;
 
@@ -74,6 +88,46 @@ export class DebugMode {
     this._raycaster = new THREE.Raycaster();
     this._mouseNDC = new THREE.Vector2();
     this._teleportMarker = null;
+
+    // ── Time scale ──
+    this._timeScale = 1.0;
+
+    // ── Free camera ──
+    this._freeCamActive = false;
+    this._freeCamSavedPos = new THREE.Vector3();
+    this._freeCamSavedQuat = new THREE.Quaternion();
+    this._freeCamTheta = 0;
+    this._freeCamPhi = Math.PI / 4;
+    this._freeCamDist = 30;
+    this._freeCamTarget = new THREE.Vector3(0, 0, 0);
+    this._freeCamDragging = false;
+    this._freeCamLastMouse = { x: 0, y: 0 };
+
+    // ── Physics debug overlay ──
+    this._physicsOverlayActive = false;
+    this._physicsOverlayMeshes = [];
+
+    // ── Bot AI visualizer ──
+    this._aiVizActive = false;
+    this._aiVizLines = [];
+    this._aiVizLabels = [];
+
+    // ── Performance stats ──
+    this._perfStatsActive = false;
+    this._perfDisplay = null;
+
+    // ── Collision logger ──
+    this._collisionLogActive = false;
+    this._collisionLog = [];
+    this._collisionLogMax = 8;
+    this._collisionLogDisplay = null;
+    this._onDamageForLog = (e) => this._logCollision(e);
+
+    // ── Bot spawner ──
+    this._selectedBotCarType = CAR_ORDER[0];
+
+    // ── Power-up spawner ──
+    this._selectedPowerupType = 'RANDOM';
 
     // ── UI ──
     this._panel = null;
@@ -98,10 +152,15 @@ export class DebugMode {
     }
   }
 
+  /** Time scale getter — Game._animate reads this to scale dt */
+  get timeScale() { return this._timeScale; }
+
   // ── Per-frame update (call from game loop) ──
 
   update() {
-    if (!this.enabled && !this._syncActive && !this._sandboxActive) return;
+    if (!this.enabled && !this._syncActive && !this._sandboxActive
+        && !this._freeCamActive && !this._aiVizActive && !this._perfStatsActive
+        && !this._collisionLogActive && !this._physicsOverlayActive) return;
 
     // God mode
     if (this._godMode && this.game.localPlayer) {
@@ -119,6 +178,31 @@ export class DebugMode {
     // Hitboxes
     if (this._showHitboxes) {
       this._updateHitboxes();
+    }
+
+    // Physics overlay
+    if (this._physicsOverlayActive) {
+      this._updatePhysicsOverlay();
+    }
+
+    // Bot AI visualizer
+    if (this._aiVizActive) {
+      this._updateAIViz();
+    }
+
+    // Performance stats
+    if (this._perfStatsActive) {
+      this._updatePerfStats();
+    }
+
+    // Collision log
+    if (this._collisionLogActive) {
+      this._updateCollisionLogDisplay();
+    }
+
+    // Free camera
+    if (this._freeCamActive) {
+      this._updateFreeCamera();
     }
 
     // Info display
@@ -162,6 +246,51 @@ export class DebugMode {
     this._addToggle(panel, 'Show Hitboxes', false, (v) => this._setHitboxes(v));
     this._addToggle(panel, 'Teleport (click)', false, (v) => this._setTeleportMode(v));
     this._addToggle(panel, 'Debug Map (flat)', false, (v) => this._setDebugMap(v));
+    this._addToggle(panel, 'Show FX: Tire Smoke', true, (v) => {
+      if (this.game.tireSmokeFX) this.game.tireSmokeFX._points.visible = v;
+    });
+    this._addToggle(panel, 'Show FX: Stun', true, (v) => {
+      if (this.game.stunFX) this.game.stunFX._debrisMesh.visible = v;
+      this._stunFXVisible = v;
+    });
+    this._addToggle(panel, 'Show FX: Geyser', true, (v) => {
+      this._geyserFXVisible = v;
+      const gfx = this.game.dynamicHazards?._arena?.geyserFX;
+      if (gfx) {
+        gfx._dropletMesh.visible = v;
+        gfx._splashRing.visible = v && gfx._splashActive;
+        for (const slot of gfx._slots) {
+          slot.steamPoints.visible = v && slot.steamActive;
+          slot.fountainPoints.visible = v && slot.fountainActive;
+        }
+      }
+    });
+    this._stunFXVisible = true;
+    this._geyserFXVisible = true;
+
+    // ── Slow Motion ──
+    this._addSection(panel, 'TIME SCALE');
+    this._addSlider(panel, 'timeScale', 0.1, 2.0, 1.0, 0.05, (v) => { this._timeScale = v; });
+
+    // ── Free Camera ──
+    this._addSection(panel, 'FREE CAMERA');
+    this._addToggle(panel, 'Free Camera (orbit)', false, (v) => this._setFreeCamera(v));
+
+    // ── Physics Debug Overlay ──
+    this._addSection(panel, 'PHYSICS OVERLAY');
+    this._addToggle(panel, 'Show Physics Bodies', false, (v) => this._setPhysicsOverlay(v));
+
+    // ── Bot AI Visualizer ──
+    this._addSection(panel, 'BOT AI VISUALIZER');
+    this._addToggle(panel, 'Show Bot AI', false, (v) => this._setAIViz(v));
+
+    // ── Performance Stats ──
+    this._addSection(panel, 'PERFORMANCE STATS');
+    this._addToggle(panel, 'Show Perf Stats', false, (v) => this._setPerfStats(v));
+
+    // ── Collision Logger ──
+    this._addSection(panel, 'COLLISION LOG');
+    this._addToggle(panel, 'Show Collision Log', false, (v) => this._setCollisionLog(v));
 
     // ── Sandbox Mode ──
     this._addSection(panel, 'SANDBOX MODE');
@@ -174,6 +303,88 @@ export class DebugMode {
     this._addButton(panel, 'Spawn: Homing Missile (click)', () => this._setSpawnerMode('homing'));
     this._addButton(panel, 'Spawn: Geyser (click)', () => this._setSpawnerMode('geyser'));
     this._addButton(panel, 'Stop Spawner', () => this._setSpawnerMode(null));
+
+    // ── Bot Spawner ──
+    this._addSection(panel, 'BOT SPAWNER (click to place)');
+    const botRow = document.createElement('div');
+    botRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin:4px 0;';
+    const botSelect = document.createElement('select');
+    botSelect.style.cssText = 'flex:1;background:#0f02;color:#0f0;border:1px solid #0f04;font:11px monospace;padding:2px;';
+    for (const ct of CAR_ORDER) {
+      const opt = document.createElement('option');
+      opt.value = ct; opt.textContent = ct;
+      botSelect.appendChild(opt);
+    }
+    botSelect.addEventListener('change', () => { this._selectedBotCarType = botSelect.value; });
+    botRow.appendChild(botSelect);
+    panel.appendChild(botRow);
+    this._addButton(panel, 'Spawn Bot at Click', () => this._setSpawnerMode('bot'));
+    this._addButton(panel, 'Remove All Bots', () => {
+      this.game.botManager.removeAll();
+      this.game.nameTags.clear();
+      this.game.healthBars.clear();
+      if (this.game.localPlayer) {
+        this.game.nameTags.add(this.game.localPlayer, true);
+        this.game.healthBars.add(this.game.localPlayer, true);
+      }
+    });
+
+    // ── Power-up Spawner ──
+    this._addSection(panel, 'POWER-UP SPAWNER (click to place)');
+    const puRow = document.createElement('div');
+    puRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin:4px 0;';
+    const puSelect = document.createElement('select');
+    puSelect.style.cssText = 'flex:1;background:#0f02;color:#0f0;border:1px solid #0f04;font:11px monospace;padding:2px;';
+    const randOpt = document.createElement('option');
+    randOpt.value = 'RANDOM'; randOpt.textContent = 'RANDOM';
+    puSelect.appendChild(randOpt);
+    for (const pt of POWERUP_TYPES) {
+      const opt = document.createElement('option');
+      opt.value = pt; opt.textContent = pt;
+      puSelect.appendChild(opt);
+    }
+    puSelect.addEventListener('change', () => { this._selectedPowerupType = puSelect.value; });
+    puRow.appendChild(puSelect);
+    panel.appendChild(puRow);
+    this._addButton(panel, 'Spawn Power-up Box at Click', () => this._setSpawnerMode('powerup'));
+
+    // ── Instant Elimination / Respawn ──
+    this._addSection(panel, 'ELIMINATION / RESPAWN');
+    this._addButton(panel, 'Eliminate Player', () => {
+      const lp = this.game.localPlayer;
+      if (lp && !lp.isEliminated) lp.takeDamage(lp.hp + 1, null, false);
+    });
+    this._addButton(panel, 'Respawn Player (center)', () => {
+      const lp = this.game.localPlayer;
+      if (!lp) return;
+      lp.hp = lp.maxHp;
+      lp.isEliminated = false;
+      lp.mesh.visible = true;
+      lp.resetState();
+      lp.setPosition(0, 0.6, 0);
+      lp._yaw = 0;
+      lp.body.quaternion.setFromEuler(0, 0, 0);
+    });
+    this._addButton(panel, 'Eliminate All Bots', () => {
+      for (const bot of this.game.botManager.bots) {
+        if (!bot.carBody.isEliminated) {
+          bot.carBody.takeDamage(bot.carBody.hp + 1, this.game.localPlayer, false);
+        }
+      }
+    });
+    this._addButton(panel, 'Respawn All Bots', () => {
+      for (let i = 0; i < this.game.botManager.bots.length; i++) {
+        const bot = this.game.botManager.bots[i];
+        const cb = bot.carBody;
+        cb.hp = cb.maxHp;
+        cb.isEliminated = false;
+        cb.mesh.visible = true;
+        cb.resetState();
+        const sp = getSpawnPosition(i + 1);
+        cb.setPosition(sp.x, sp.y, sp.z, sp.yaw);
+        bot.brain.reset();
+      }
+    });
 
     // ── Multi-Vehicle Sync ──
     this._addSection(panel, 'MULTI-VEHICLE SYNC INPUT');
@@ -365,7 +576,8 @@ export class DebugMode {
       `steer: ${lp._steerAngle.toFixed(3)} rad\n` +
       `hp:    ${lp.hp.toFixed(0)} / ${lp.maxHp}\n` +
       `stun:  ${lp._isStunned ? lp._stunTimer.toFixed(2) + 's' : 'no'}\n` +
-      `drift: ${lp.driftMode ? 'ON' : 'off'}  shield: ${lp.hasShield ? 'ON' : 'off'}`;
+      `drift: ${lp.driftMode ? 'ON' : 'off'}  shield: ${lp.hasShield ? 'ON' : 'off'}\n` +
+      `time:  ${this._timeScale.toFixed(2)}x`;
     if (this._syncActive) {
       text += `\n\n── SYNC CARS (${this._syncCars.length}) ──`;
       for (const sc of this._syncCars) {
@@ -602,18 +814,32 @@ export class DebugMode {
 
     // ── Hide ALL existing arena visuals ──
     this._hiddenSceneChildren = [];
-    // Snapshot current children (skip camera and lights we want to keep)
     const keep = new Set();
     // Keep car meshes
     for (const cb of this.game.carBodies) keep.add(cb.mesh);
     // Keep hitbox/debug meshes
     for (const h of this._hitboxMeshes) keep.add(h.mesh);
     if (this._teleportMarker) keep.add(this._teleportMarker);
+    // Keep FX objects so they remain visible in sandbox
+    if (this.game.tireSmokeFX) keep.add(this.game.tireSmokeFX._points);
+    if (this.game.stunFX) keep.add(this.game.stunFX._debrisMesh);
+    const gfx = this.game.dynamicHazards?._arena?.geyserFX;
+    if (gfx) {
+      keep.add(gfx._dropletMesh);
+      keep.add(gfx._splashRing);
+      for (const slot of gfx._slots) {
+        keep.add(slot.steamPoints);
+        keep.add(slot.fountainPoints);
+      }
+    }
+    // Keep physics overlay meshes
+    for (const m of this._physicsOverlayMeshes) keep.add(m);
+    // Keep AI viz lines
+    for (const l of this._aiVizLines) keep.add(l);
 
     for (const child of [...this.scene.children]) {
       if (keep.has(child)) continue;
       if (child.isCamera) continue;
-      // Hide arena elements
       if (child.visible) {
         child.visible = false;
         this._hiddenSceneChildren.push(child);
@@ -689,7 +915,6 @@ export class DebugMode {
 
     // ── Update tilt raycasting to use sandbox floor ──
     this.game._tiltFloorMesh = this._sandboxFloorMesh;
-    // Add sandbox floor to arena group for tilt raycasting
     this.game._arenaGroup = new THREE.Group();
     this.game._arenaGroup.add(this._sandboxFloorMesh.clone());
     this.scene.add(this.game._arenaGroup);
@@ -846,16 +1071,20 @@ export class DebugMode {
       case 'geyser':
         this._spawnGeyserAt(target.x, target.z);
         break;
+      case 'bot':
+        this._spawnBotAt(target.x, target.z);
+        break;
+      case 'powerup':
+        this._spawnPowerupAt(target.x, target.z);
+        break;
     }
   }
 
   _spawnMissileAt(x, z, isHoming) {
     const lp = this.game.localPlayer;
     if (!lp) return;
-    // Fire missile from clicked position toward arena center
     const yaw = Math.atan2(-x, -z);
     const pm = this.game.powerUpManager;
-    // Temporarily override car position to spawn missile from click location
     const origX = lp.body.position.x;
     const origZ = lp.body.position.z;
     const origYaw = lp._yaw;
@@ -870,7 +1099,6 @@ export class DebugMode {
 
   _spawnGeyserAt(x, z) {
     const hazards = this.game.dynamicHazards;
-    // Find an idle geyser slot and force it to erupt at this position
     for (const g of hazards._geysers) {
       if (g.state === 'idle' || g.state === 'cooldown') {
         g.x = x;
@@ -885,11 +1113,79 @@ export class DebugMode {
   }
 
   // =====================================================================
+  //  BOT SPAWNER (click to place)
+  // =====================================================================
+
+  async _spawnBotAt(x, z) {
+    const carType = this._selectedBotCarType;
+    const bm = this.game.botManager;
+    const availableNames = BOTS.names.filter(
+      n => !bm.bots.some(b => b.carBody.nickname === n)
+    );
+    const name = availableNames.length > 0
+      ? availableNames[Math.floor(Math.random() * availableNames.length)]
+      : `Bot${bm.bots.length + 1}`;
+
+    const slotIndex = this.game.carBodies.length;
+    await bm._spawnBot(name, carType, slotIndex);
+
+    // Reposition to click location
+    const bot = bm.bots[bm.bots.length - 1];
+    const yaw = Math.atan2(-x, -z); // face center
+    bot.carBody.setPosition(x, 0.6, z, yaw);
+    bot.carBody.body.quaternion.setFromEuler(0, yaw, 0);
+
+    this.game.nameTags.add(bot.carBody, false);
+    this.game.healthBars.add(bot.carBody, false);
+  }
+
+  // =====================================================================
+  //  POWER-UP BOX SPAWNER (click to place)
+  // =====================================================================
+
+  _spawnPowerupAt(x, z) {
+    const pm = this.game.powerUpManager;
+    const wantedType = this._selectedPowerupType === 'RANDOM'
+      ? POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)]
+      : this._selectedPowerupType;
+
+    // Build a real pedestal entry with all required visual objects
+    // so the PowerUpManager update/pickup code works without errors.
+    const ringGeo = new THREE.TorusGeometry(1.0, 0.08, 8, 32);
+    const ringMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff, emissive: 0xff6600, emissiveIntensity: 2,
+      transparent: true, opacity: 0.7,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.position.set(x, 0.8, z);
+    ring.rotation.x = Math.PI / 2;
+    this.scene.add(ring);
+
+    const light = new THREE.PointLight(0xff6600, 0.4, 8);
+    light.position.set(x, 1.6, z);
+    this.scene.add(light);
+
+    const pedestal = {
+      index: pm._pedestals.length,
+      x, z, y: 0, angle: 0,
+      pedestalMesh: null, ringMesh: ring, ringMat, glowLight: light,
+      active: false, type: null, pickupMesh: null, respawnAt: 0,
+      _isDebugSpawned: true,
+    };
+    pm._pedestals.push(pedestal);
+
+    // Use the real _spawnPickup to create the floating box with correct model
+    pm._spawnPickup(pedestal);
+
+    // Override the randomly-chosen type with what the user selected
+    pedestal.type = wantedType;
+  }
+
+  // =====================================================================
   //  MULTI-VEHICLE SYNC INPUT
   // =====================================================================
 
   async _startSyncTest() {
-    // Get selected car types
     const selectedTypes = [];
     for (const carType of CAR_ORDER) {
       if (this._syncCarSelect[carType].checked) {
@@ -898,18 +1194,15 @@ export class DebugMode {
     }
     if (selectedTypes.length === 0) return;
 
-    // Remove existing sync cars
     this._removeSyncCars();
 
-    // Enter sandbox if not already
     if (!this._sandboxActive) this._enterSandbox();
 
-    // Spawn cars in a line, spaced 4 units apart, centered at z=0
     const spacing = 4;
     const totalWidth = (selectedTypes.length - 1) * spacing;
     const startX = -totalWidth / 2;
-    const spawnZ = 20; // in front of center
-    const yaw = Math.PI; // face toward negative Z (toward center)
+    const spawnZ = 20;
+    const yaw = Math.PI;
 
     for (let i = 0; i < selectedTypes.length; i++) {
       const carType = selectedTypes[i];
@@ -920,17 +1213,14 @@ export class DebugMode {
       carBody._yaw = yaw;
       carBody.body.quaternion.setFromEuler(0, yaw, 0);
 
-      // God mode for sync cars
       carBody.isInvincible = true;
 
-      // Add name tag and health bar
       this.game.nameTags.add(carBody, false);
       this.game.healthBars.add(carBody, false);
 
       this._syncCars.push(carBody);
     }
 
-    // Also position local player on the line
     if (this.game.localPlayer) {
       const lpX = startX - spacing;
       this.game.localPlayer.setPosition(lpX, 0.6, spawnZ);
@@ -961,7 +1251,6 @@ export class DebugMode {
     if (this.game.localPlayer) allCars.push(this.game.localPlayer);
     if (allCars.length === 0) return;
 
-    // Compute bounding box of all cars
     let minX = Infinity, maxX = -Infinity;
     let minZ = Infinity, maxZ = -Infinity;
     for (const cb of allCars) {
@@ -972,36 +1261,433 @@ export class DebugMode {
       if (p.z > maxZ) maxZ = p.z;
     }
 
-    // Center of group
     const cx = (minX + maxX) / 2;
     const cz = (minZ + maxZ) / 2;
 
-    // Span — add padding
     const spanX = maxX - minX + 20;
     const spanZ = maxZ - minZ + 20;
-    const span = Math.max(spanX, spanZ, 30); // minimum 30 units visible
+    const span = Math.max(spanX, spanZ, 30);
 
-    // Height: proportional to span so everything fits in view
-    // Using FOV to calculate needed distance
     const fovRad = (cam.fov * Math.PI) / 180;
     const aspect = cam.aspect;
     const hFov = 2 * Math.atan(Math.tan(fovRad / 2) * aspect);
     const neededH = span / (2 * Math.tan(Math.min(fovRad, hFov) / 2));
-    const targetH = Math.max(neededH * 0.6, 15); // 0.6 factor for angled view
+    const targetH = Math.max(neededH * 0.6, 15);
 
-    // Camera position: behind and above center, looking slightly forward
     const targetX = cx;
-    const targetZ = cz + span * 0.4; // offset back
+    const targetZ = cz + span * 0.4;
     const targetY = targetH;
 
-    // Smooth lerp
     const lerpFactor = Math.min(1, 3 * dt);
     cam.position.x += (targetX - cam.position.x) * lerpFactor;
     cam.position.y += (targetY - cam.position.y) * lerpFactor;
     cam.position.z += (targetZ - cam.position.z) * lerpFactor;
 
-    // Look at center of group
     cam.lookAt(cx, 0, cz);
+  }
+
+  // =====================================================================
+  //  FREE CAMERA (orbit controls)
+  // =====================================================================
+
+  _setFreeCamera(on) {
+    this._freeCamActive = on;
+    if (on) {
+      // Save current camera state
+      this._freeCamSavedPos.copy(this.camera.position);
+      this._freeCamSavedQuat.copy(this.camera.quaternion);
+      // Initialize orbit from current camera
+      const lp = this.game.localPlayer;
+      if (lp) {
+        this._freeCamTarget.copy(lp.body.position);
+      } else {
+        this._freeCamTarget.set(0, 0, 0);
+      }
+      const offset = this.camera.position.clone().sub(this._freeCamTarget);
+      this._freeCamDist = offset.length();
+      this._freeCamTheta = Math.atan2(offset.x, offset.z);
+      this._freeCamPhi = Math.acos(Math.min(1, offset.y / this._freeCamDist));
+
+      // Mouse handlers
+      this._freeCamMouseDown = (e) => {
+        if (e.button === 2 || e.button === 1) { // right or middle
+          this._freeCamDragging = true;
+          this._freeCamLastMouse = { x: e.clientX, y: e.clientY };
+          e.preventDefault();
+        }
+      };
+      this._freeCamMouseMove = (e) => {
+        if (!this._freeCamDragging) return;
+        const dx = e.clientX - this._freeCamLastMouse.x;
+        const dy = e.clientY - this._freeCamLastMouse.y;
+        this._freeCamTheta -= dx * 0.005;
+        this._freeCamPhi = Math.max(0.1, Math.min(Math.PI - 0.1, this._freeCamPhi + dy * 0.005));
+        this._freeCamLastMouse = { x: e.clientX, y: e.clientY };
+      };
+      this._freeCamMouseUp = () => { this._freeCamDragging = false; };
+      this._freeCamWheel = (e) => {
+        this._freeCamDist = Math.max(5, Math.min(200, this._freeCamDist + e.deltaY * 0.05));
+        e.preventDefault();
+      };
+      this._freeCamContext = (e) => e.preventDefault();
+
+      window.addEventListener('mousedown', this._freeCamMouseDown);
+      window.addEventListener('mousemove', this._freeCamMouseMove);
+      window.addEventListener('mouseup', this._freeCamMouseUp);
+      window.addEventListener('wheel', this._freeCamWheel, { passive: false });
+      window.addEventListener('contextmenu', this._freeCamContext);
+    } else {
+      // Restore and clean up
+      window.removeEventListener('mousedown', this._freeCamMouseDown);
+      window.removeEventListener('mousemove', this._freeCamMouseMove);
+      window.removeEventListener('mouseup', this._freeCamMouseUp);
+      window.removeEventListener('wheel', this._freeCamWheel);
+      window.removeEventListener('contextmenu', this._freeCamContext);
+      this._freeCamDragging = false;
+    }
+  }
+
+  _updateFreeCamera() {
+    const cam = this.camera;
+    // Pan target with WASD-like movement using arrow keys? No — just orbit around target
+    // Target follows local player loosely
+    const lp = this.game.localPlayer;
+    if (lp && !this._freeCamDragging) {
+      this._freeCamTarget.lerp(lp.body.position, 0.02);
+    }
+
+    const x = this._freeCamTarget.x + this._freeCamDist * Math.sin(this._freeCamPhi) * Math.sin(this._freeCamTheta);
+    const y = this._freeCamTarget.y + this._freeCamDist * Math.cos(this._freeCamPhi);
+    const z = this._freeCamTarget.z + this._freeCamDist * Math.sin(this._freeCamPhi) * Math.cos(this._freeCamTheta);
+
+    cam.position.set(x, y, z);
+    cam.lookAt(this._freeCamTarget);
+  }
+
+  // =====================================================================
+  //  PHYSICS DEBUG OVERLAY
+  // =====================================================================
+
+  _setPhysicsOverlay(on) {
+    this._physicsOverlayActive = on;
+    if (!on) {
+      for (const m of this._physicsOverlayMeshes) {
+        this.scene.remove(m);
+        m.geometry.dispose();
+      }
+      this._physicsOverlayMeshes = [];
+    }
+  }
+
+  _updatePhysicsOverlay() {
+    const pw = this.game.physicsWorld;
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x00ffff, wireframe: true, transparent: true, opacity: 0.3,
+    });
+
+    // Only rebuild if body count changed
+    const totalBodies = 2 + pw.obstacleBodies.length; // floor + lava + obstacles
+    if (this._physicsOverlayMeshes.length === totalBodies) {
+      // Just update positions
+      let idx = 0;
+      if (pw.floorBody && this._physicsOverlayMeshes[idx]) {
+        this._physicsOverlayMeshes[idx].position.copy(pw.floorBody.position);
+        idx++;
+      }
+      if (pw.lavaBody && this._physicsOverlayMeshes[idx]) {
+        this._physicsOverlayMeshes[idx].position.copy(pw.lavaBody.position);
+        idx++;
+      }
+      for (const ob of pw.obstacleBodies) {
+        if (this._physicsOverlayMeshes[idx]) {
+          this._physicsOverlayMeshes[idx].position.copy(ob.position);
+        }
+        idx++;
+      }
+      mat.dispose();
+      return;
+    }
+
+    // Rebuild
+    for (const m of this._physicsOverlayMeshes) {
+      this.scene.remove(m);
+      m.geometry.dispose();
+    }
+    this._physicsOverlayMeshes = [];
+
+    // Floor body
+    if (pw.floorBody) {
+      const shape = pw.floorBody.shapes[0];
+      let geo;
+      if (shape instanceof CANNON.Box) {
+        const he = shape.halfExtents;
+        geo = new THREE.BoxGeometry(he.x * 2, he.y * 2, he.z * 2);
+      } else {
+        geo = new THREE.PlaneGeometry(120, 120);
+        geo.rotateX(-Math.PI / 2);
+      }
+      const mesh = new THREE.Mesh(geo, mat.clone());
+      mesh.position.copy(pw.floorBody.position);
+      this.scene.add(mesh);
+      this._physicsOverlayMeshes.push(mesh);
+    }
+
+    // Lava body
+    if (pw.lavaBody) {
+      const shape = pw.lavaBody.shapes[0];
+      let geo;
+      if (shape instanceof CANNON.Cylinder) {
+        geo = new THREE.CylinderGeometry(shape.radiusTop, shape.radiusBottom, shape.height, 16);
+      } else if (shape instanceof CANNON.Box) {
+        const he = shape.halfExtents;
+        geo = new THREE.BoxGeometry(he.x * 2, he.y * 2, he.z * 2);
+      } else {
+        geo = new THREE.CylinderGeometry(10, 10, 1, 16);
+      }
+      const lavaMat = mat.clone();
+      lavaMat.color.set(0xff4400);
+      const mesh = new THREE.Mesh(geo, lavaMat);
+      mesh.position.copy(pw.lavaBody.position);
+      this.scene.add(mesh);
+      this._physicsOverlayMeshes.push(mesh);
+    }
+
+    // Obstacle bodies
+    for (const ob of pw.obstacleBodies) {
+      const r = ob._obstacleRadius || 2;
+      const geo = new THREE.CylinderGeometry(r, r, 6, 8);
+      const obMat = mat.clone();
+      obMat.color.set(0xffaa00);
+      const mesh = new THREE.Mesh(geo, obMat);
+      mesh.position.copy(ob.position);
+      this.scene.add(mesh);
+      this._physicsOverlayMeshes.push(mesh);
+    }
+
+    mat.dispose();
+  }
+
+  // =====================================================================
+  //  BOT AI VISUALIZER
+  // =====================================================================
+
+  _setAIViz(on) {
+    this._aiVizActive = on;
+    if (!on) {
+      for (const l of this._aiVizLines) {
+        this.scene.remove(l);
+        l.geometry.dispose();
+        l.material.dispose();
+      }
+      this._aiVizLines = [];
+      // Remove labels
+      for (const lbl of this._aiVizLabels) {
+        if (lbl.parentNode) lbl.parentNode.removeChild(lbl);
+      }
+      this._aiVizLabels = [];
+    }
+  }
+
+  _updateAIViz() {
+    const bots = this.game.botManager.bots;
+    const cam = this.camera;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+
+    // Ensure we have enough lines and labels
+    while (this._aiVizLines.length < bots.length) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(6), 3));
+      const mat = new THREE.LineBasicMaterial({ color: 0xff0000 });
+      const line = new THREE.Line(geo, mat);
+      line.frustumCulled = false;
+      this.scene.add(line);
+      this._aiVizLines.push(line);
+
+      const lbl = document.createElement('div');
+      lbl.style.cssText = 'position:fixed;color:#ff0;font:bold 10px monospace;pointer-events:none;z-index:999;text-shadow:0 0 3px #000;';
+      document.body.appendChild(lbl);
+      this._aiVizLabels.push(lbl);
+    }
+
+    // Hide excess
+    for (let i = bots.length; i < this._aiVizLines.length; i++) {
+      this._aiVizLines[i].visible = false;
+      this._aiVizLabels[i].style.display = 'none';
+    }
+
+    const _proj = new THREE.Vector3();
+
+    for (let i = 0; i < bots.length; i++) {
+      const bot = bots[i];
+      const cb = bot.carBody;
+      const brain = bot.brain;
+      const line = this._aiVizLines[i];
+      const lbl = this._aiVizLabels[i];
+
+      if (cb.isEliminated) {
+        line.visible = false;
+        lbl.style.display = 'none';
+        continue;
+      }
+
+      line.visible = true;
+      lbl.style.display = 'block';
+
+      // State colors
+      const stateColors = {
+        ROAM: 0x888888,
+        HUNT: 0xffaa00,
+        CHARGE: 0xff0000,
+        EVADE: 0x00aaff,
+        FLEE: 0x00ff00,
+        POWERUP_SEEK: 0xff00ff,
+      };
+      line.material.color.set(stateColors[brain.state] || 0xffffff);
+
+      // Line from bot to target
+      const posArr = line.geometry.attributes.position.array;
+      posArr[0] = cb.body.position.x;
+      posArr[1] = cb.body.position.y + 1.5;
+      posArr[2] = cb.body.position.z;
+
+      if (brain._target && !brain._target.isEliminated) {
+        posArr[3] = brain._target.body.position.x;
+        posArr[4] = brain._target.body.position.y + 1.5;
+        posArr[5] = brain._target.body.position.z;
+      } else {
+        // Point forward if no target
+        const fwd = 5;
+        posArr[3] = cb.body.position.x - Math.sin(cb._yaw) * fwd;
+        posArr[4] = cb.body.position.y + 1.5;
+        posArr[5] = cb.body.position.z - Math.cos(cb._yaw) * fwd;
+      }
+      line.geometry.attributes.position.needsUpdate = true;
+
+      // Project bot position to screen for label
+      _proj.set(cb.body.position.x, cb.body.position.y + 2.5, cb.body.position.z);
+      _proj.project(cam);
+      const sx = ((_proj.x + 1) / 2) * w;
+      const sy = ((-_proj.y + 1) / 2) * h;
+
+      if (_proj.z > 1) {
+        lbl.style.display = 'none';
+      } else {
+        lbl.style.left = `${sx}px`;
+        lbl.style.top = `${sy}px`;
+        const targetName = brain._target ? (brain._target.nickname || brain._target.carType) : '-';
+        lbl.textContent = `${cb.nickname} [${brain.state}] → ${targetName}`;
+        lbl.style.color = '#' + (stateColors[brain.state] || 0xffffff).toString(16).padStart(6, '0');
+      }
+    }
+  }
+
+  // =====================================================================
+  //  PERFORMANCE STATS
+  // =====================================================================
+
+  _setPerfStats(on) {
+    this._perfStatsActive = on;
+    if (on) {
+      if (!this._perfDisplay) {
+        this._perfDisplay = document.createElement('div');
+        this._perfDisplay.style.cssText = `
+          position:fixed;top:50px;right:16px;width:220px;
+          background:rgba(0,0,0,0.85);color:#0f0;
+          font:11px 'Courier New',monospace;padding:10px;border-radius:6px;
+          border:1px solid #0f0;z-index:1000;white-space:pre;line-height:1.6;
+        `;
+        document.body.appendChild(this._perfDisplay);
+      }
+      this._perfDisplay.style.display = 'block';
+      this._perfFrameTimes = [];
+      this._perfLastTime = performance.now();
+    } else {
+      if (this._perfDisplay) this._perfDisplay.style.display = 'none';
+    }
+  }
+
+  _updatePerfStats() {
+    if (!this._perfDisplay) return;
+    const now = performance.now();
+    const dt = now - this._perfLastTime;
+    this._perfLastTime = now;
+    this._perfFrameTimes.push(dt);
+    if (this._perfFrameTimes.length > 60) this._perfFrameTimes.shift();
+
+    const avgDt = this._perfFrameTimes.reduce((a, b) => a + b, 0) / this._perfFrameTimes.length;
+    const fps = (1000 / avgDt).toFixed(0);
+    const minFps = (1000 / Math.max(...this._perfFrameTimes)).toFixed(0);
+
+    const renderer = this.game.sceneManager.renderer;
+    const info = renderer.info;
+    const r = info.render;
+    const m = info.memory;
+
+    const bodies = this.game.physicsWorld.world.bodies.length;
+    const cars = this.game.carBodies.length;
+    const bots = this.game.botManager.bots.length;
+
+    this._perfDisplay.textContent =
+      `── PERFORMANCE ──\n` +
+      `FPS:       ${fps} (min ${minFps})\n` +
+      `Frame:     ${avgDt.toFixed(1)}ms\n` +
+      `Draw calls: ${r.calls}\n` +
+      `Triangles:  ${r.triangles}\n` +
+      `Points:     ${r.points}\n` +
+      `Geometries: ${m.geometries}\n` +
+      `Textures:   ${m.textures}\n` +
+      `── WORLD ──\n` +
+      `Physics:    ${bodies} bodies\n` +
+      `Cars:       ${cars} (${bots} bots)\n` +
+      `TimeScale:  ${this._timeScale.toFixed(2)}x`;
+  }
+
+  // =====================================================================
+  //  COLLISION LOGGER
+  // =====================================================================
+
+  _setCollisionLog(on) {
+    this._collisionLogActive = on;
+    if (on) {
+      if (!this._collisionLogDisplay) {
+        this._collisionLogDisplay = document.createElement('div');
+        this._collisionLogDisplay.style.cssText = `
+          position:fixed;bottom:16px;right:16px;width:320px;
+          background:rgba(0,0,0,0.85);color:#0f0;
+          font:10px 'Courier New',monospace;padding:10px;border-radius:6px;
+          border:1px solid #0f0;z-index:1000;white-space:pre;line-height:1.5;
+          max-height:200px;overflow-y:auto;
+        `;
+        document.body.appendChild(this._collisionLogDisplay);
+      }
+      this._collisionLogDisplay.style.display = 'block';
+      this._collisionLog = [];
+      // Listen for damage events
+      this.game.on('damage', this._onDamageForLog);
+    } else {
+      if (this._collisionLogDisplay) this._collisionLogDisplay.style.display = 'none';
+      this.game.off('damage', this._onDamageForLog);
+    }
+  }
+
+  _logCollision(e) {
+    const targetName = e.target?.nickname || e.target?.carType || '?';
+    const sourceName = e.source?.nickname || e.source?.carType || 'env';
+    const entry = `[${new Date().toLocaleTimeString()}] ${sourceName} → ${targetName}: ${e.amount.toFixed(0)} dmg`;
+    this._collisionLog.push(entry);
+    if (this._collisionLog.length > this._collisionLogMax) {
+      this._collisionLog.shift();
+    }
+  }
+
+  _updateCollisionLogDisplay() {
+    if (!this._collisionLogDisplay) return;
+    if (this._collisionLog.length === 0) {
+      this._collisionLogDisplay.textContent = '── COLLISION LOG ──\n(no hits yet)';
+    } else {
+      this._collisionLogDisplay.textContent = '── COLLISION LOG ──\n' + this._collisionLog.join('\n');
+    }
   }
 
   // =====================================================================

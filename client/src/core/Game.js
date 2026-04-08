@@ -161,6 +161,14 @@ export class Game {
     (this._listeners[event] ??= []).push(fn);
   }
 
+  off(event, fn) {
+    const arr = this._listeners[event];
+    if (arr) {
+      const idx = arr.indexOf(fn);
+      if (idx !== -1) arr.splice(idx, 1);
+    }
+  }
+
   _emit(event, data) {
     const arr = this._listeners[event];
     if (arr) for (const fn of arr) fn(data);
@@ -314,6 +322,9 @@ export class Game {
     let frameDt = this._clock.getDelta();
     if (frameDt > MAX_DT) frameDt = MAX_DT;
 
+    // Apply debug time scale
+    frameDt *= this.debug.timeScale;
+
     // Game state timers (safe to run at render rate — only drives countdowns/UI)
     this.gameState.update(frameDt);
 
@@ -446,8 +457,10 @@ export class Game {
     }
     engineAudio.update(frameDt);
 
-    // Camera — debug sync override or normal follow
-    if (this.debug._syncActive) {
+    // Camera — debug free cam / sync override / normal follow
+    if (this.debug._freeCamActive) {
+      // Free camera is updated in debug.update()
+    } else if (this.debug._syncActive) {
       this.debug.updateSyncCamera(frameDt);
     } else {
       this._updateCamera(frameDt);
