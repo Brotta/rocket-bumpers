@@ -34,7 +34,7 @@ export class SceneManager {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.6;
     document.body.appendChild(this.renderer.domElement);
@@ -120,8 +120,10 @@ export class SceneManager {
   }
 
   update() {
-    const elapsed = this._clock.getElapsedTime();
-    this.arena.update(elapsed);
+    if (!this._sandboxMode) {
+      const elapsed = this._clock.getElapsedTime();
+      this.arena.update(elapsed);
+    }
     this.composer.render();
   }
 }

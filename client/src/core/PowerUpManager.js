@@ -21,6 +21,25 @@ const RAINBOW_COLORS = [
 
 const POWERUP_TYPES = Object.keys(POWERUPS);
 
+// Procedural radial glow texture (generated once, shared by all glow sprites)
+const _glowTexture = (() => {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, 'rgba(255,255,255,1)');
+  gradient.addColorStop(0.3, 'rgba(255,255,255,0.5)');
+  gradient.addColorStop(0.7, 'rgba(255,255,255,0.1)');
+  gradient.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.needsUpdate = true;
+  return tex;
+})();
+
 /**
  * Swept-sphere test: checks if a moving point (segment from prev to curr)
  * passes within `radius` of a stationary target point.
@@ -126,8 +145,13 @@ export class PowerUpManager {
     this.obstacleBodies = null;
     this.obstacleGroups = null;
 
+    // Out-of-bounds limit for projectiles (half-extent of playable area)
+    this._oobLimit = ARENA.diameter * 0.7;
+
     // Audio context (lazy)
     this._audioCtx = null;
+    this._explosionNoiseBuffer = null;  // cached noise buffer
+    this._launchNoiseBuffer = null;     // cached noise buffer
 
     // Pedestals
     this._pedestals = [];
@@ -402,18 +426,32 @@ export class PowerUpManager {
     const missileGroup = this._createMissileMesh(isHoming);
     missileGroup.position.set(spawnX, spawnY, spawnZ);
     missileGroup.rotation.y = yaw;
+    // Missiles don't need to cast or receive shadows
+    missileGroup.traverse((child) => {
+      if (child.isMesh) { child.castShadow = false; child.receiveShadow = false; }
+    });
     this.scene.add(missileGroup);
 
-    // Single point light per missile
-    const missileLight = new THREE.PointLight(
-      isHoming ? 0xff00ff : 0xff4400, 2, 10
-    );
-    missileLight.position.set(spawnX, spawnY, spawnZ);
-    this.scene.add(missileLight);
+    // Emissive glow sprite (replaces PointLight — zero shader cost, bloom provides glow)
+    // Glow color shifted lighter than missile body for contrast
+    const glowColor = isHoming ? 0xff66cc : 0xffaa44;
+    const missileGlowMat = new THREE.SpriteMaterial({
+      map: _glowTexture,
+      color: glowColor,
+      transparent: true,
+      opacity: 0.5,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const missileGlow = new THREE.Sprite(missileGlowMat);
+    missileGlow.scale.setScalar(1.6);
+    missileGlow.renderOrder = 999;
+    missileGlow.position.set(spawnX, spawnY, spawnZ);
+    this.scene.add(missileGlow);
 
     const projectile = {
       isHoming, owner: car, config,
-      group: missileGroup, light: missileLight,
+      group: missileGroup, glow: missileGlow, glowMat: missileGlowMat,
       x: spawnX, y: spawnY, z: spawnZ,
       prevX: spawnX, prevZ: spawnZ, // previous position for swept collision
       vx: fwdX * speed, vz: fwdZ * speed, speed, yaw,
@@ -529,7 +567,7 @@ export class PowerUpManager {
       // Sync mesh
       p.group.position.set(p.x, p.y, p.z);
       p.group.rotation.y = p.yaw;
-      p.light.position.set(p.x, p.y, p.z);
+      p.glow.position.set(p.x, p.y, p.z);
 
       // Exhaust flicker
       const exhaust = p.group.userData.exhaust;
@@ -587,8 +625,9 @@ export class PowerUpManager {
       }
       if (hit) { this._removeProjectile(i); continue; }
 
-      // Out of bounds
-      if (p.x * p.x + p.z * p.z > (ARENA.diameter * 0.7) ** 2) {
+      // Out of bounds (square check — works for both arena and sandbox maps)
+      const oobLimit = this._oobLimit;
+      if (Math.abs(p.x) > oobLimit || Math.abs(p.z) > oobLimit) {
         p.alive = false;
         this._removeProjectile(i);
       }
@@ -690,29 +729,35 @@ export class PowerUpManager {
     const isHoming = p.isHoming;
     const color = isHoming ? 0xff00ff : 0xff4400;
 
-    // Flash sphere (MeshBasicMaterial — no PBR)
+    // Flash sphere (MeshBasicMaterial — no PBR, bright enough for bloom to catch)
     const flashMat = new THREE.MeshBasicMaterial({
       color, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false,
     });
     const flash = new THREE.Mesh(_sharedGeo.explosionFlash, flashMat);
     flash.position.set(p.x, p.y, p.z);
-    this.scene.add(flash);
 
-    // Explosion light
-    const explLight = new THREE.PointLight(color, 4, 12);
-    explLight.position.set(p.x, p.y + 0.5, p.z);
-    this.scene.add(explLight);
+    // Emissive glow sprite (replaces PointLight — zero shader cost, bloom provides glow)
+    const glowMat = new THREE.SpriteMaterial({
+      map: _glowTexture,
+      color, transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const glow = new THREE.Sprite(glowMat);
+    glow.scale.setScalar(6);
+    glow.position.set(p.x, p.y, p.z);
 
-    // Debris (6 chunks — down from 12, using shared geo+mat)
+    // Debris group (single scene.add instead of 6 individual adds)
     const debrisMat = isHoming ? _sharedMat.debrisPink : _sharedMat.debrisOrange;
+    const debrisGroup = new THREE.Group();
+    debrisGroup.position.set(p.x, p.y, p.z);
     const debrisList = [];
     for (let i = 0; i < 6; i++) {
       const mesh = new THREE.Mesh(_sharedGeo.debrisBox, debrisMat);
-      mesh.position.set(p.x, p.y, p.z);
-      this.scene.add(mesh);
+      debrisGroup.add(mesh);
       const angle = Math.random() * Math.PI * 2;
       debrisList.push({
         mesh,
+        // Store offsets relative to group origin (starts at 0,0,0)
         vx: Math.cos(angle) * (3 + Math.random() * 4),
         vy: 2 + Math.random() * 3,
         vz: Math.sin(angle) * (3 + Math.random() * 4),
@@ -720,13 +765,19 @@ export class PowerUpManager {
       });
     }
 
+    // Single scene.add for all explosion objects (3 adds instead of 8)
+    this.scene.add(flash);
+    this.scene.add(glow);
+    this.scene.add(debrisGroup);
+
     this._playExplosionSFX();
 
     // Push into VFX tick list (animated in update, not separate rAF)
     this._vfxObjects.push({
       type: 'explosion',
       flash, flashMat,
-      light: explLight,
+      glow, glowMat,
+      debrisGroup,
       debris: debrisList,
       age: 0,
       duration: 0.7,
@@ -736,7 +787,8 @@ export class PowerUpManager {
   _removeProjectile(index) {
     const p = this._projectiles[index];
     this.scene.remove(p.group);
-    this.scene.remove(p.light);
+    this.scene.remove(p.glow);
+    p.glowMat.dispose();
     // Dispose unique materials
     if (p.group.userData.bodyMat) p.group.userData.bodyMat.dispose();
     if (p.group.userData.exhaustMat) p.group.userData.exhaustMat.dispose();
@@ -844,12 +896,15 @@ export class PowerUpManager {
         const t = vfx.age / 0.4;
         vfx.flash.scale.setScalar(1 + t * 2);
         vfx.flashMat.opacity = Math.max(0, 0.85 * (1 - t));
-        vfx.light.intensity = Math.max(0, 4 * (1 - vfx.age / 0.3));
+        // Glow sprite: bright initially, expands and fades fast
+        const glowFade = Math.max(0, 1 - vfx.age / 0.3);
+        vfx.glow.scale.setScalar(4 + vfx.age * 8);
+        vfx.glowMat.opacity = 0.8 * glowFade;
 
         for (const d of vfx.debris) {
           d.life -= dt;
-          if (d.life <= 0 && d.mesh.parent) {
-            this.scene.remove(d.mesh);
+          if (d.life <= 0 && d.mesh.visible) {
+            d.mesh.visible = false;
             continue;
           }
           d.mesh.position.x += d.vx * dt;
@@ -887,11 +942,10 @@ export class PowerUpManager {
   _cleanupVFX(vfx) {
     if (vfx.type === 'explosion') {
       this.scene.remove(vfx.flash);
-      this.scene.remove(vfx.light);
+      this.scene.remove(vfx.glow);
+      this.scene.remove(vfx.debrisGroup);
       vfx.flashMat.dispose();
-      for (const d of vfx.debris) {
-        if (d.mesh.parent) this.scene.remove(d.mesh);
-      }
+      vfx.glowMat.dispose();
     }
     if (vfx.type === 'shatter') {
       for (const c of vfx.chunks) {
@@ -1015,6 +1069,7 @@ export class PowerUpManager {
   _removeShield(index) {
     const s = this._activeShields[index];
     this.scene.remove(s.group);
+    s.light.dispose();
     s.innerMat.dispose();
     s.wireMat.dispose();
     for (const r of s.rings) r.mat.dispose();
@@ -1057,13 +1112,16 @@ export class PowerUpManager {
       osc.start(now);
       osc.stop(now + 0.5);
 
-      // Noise burst
+      // Noise burst (reuse cached buffer)
       const noiseLen = 0.3;
-      const buf = ctx.createBuffer(1, ctx.sampleRate * noiseLen, ctx.sampleRate);
-      const data = buf.getChannelData(0);
-      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * 0.5;
+      if (!this._launchNoiseBuffer) {
+        const buf = ctx.createBuffer(1, ctx.sampleRate * noiseLen, ctx.sampleRate);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * 0.5;
+        this._launchNoiseBuffer = buf;
+      }
       const noise = ctx.createBufferSource();
-      noise.buffer = buf;
+      noise.buffer = this._launchNoiseBuffer;
       const nGain = ctx.createGain();
       const nFilter = ctx.createBiquadFilter();
       nFilter.type = 'bandpass';
@@ -1092,12 +1150,16 @@ export class PowerUpManager {
       osc.start(now);
       osc.stop(now + 0.5);
 
+      // Reuse cached noise buffer (avoids 19K-sample allocation per explosion)
       const noiseLen = 0.4;
-      const buf = ctx.createBuffer(1, ctx.sampleRate * noiseLen, ctx.sampleRate);
-      const data = buf.getChannelData(0);
-      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1);
+      if (!this._explosionNoiseBuffer) {
+        const buf = ctx.createBuffer(1, ctx.sampleRate * noiseLen, ctx.sampleRate);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1);
+        this._explosionNoiseBuffer = buf;
+      }
       const noise = ctx.createBufferSource();
-      noise.buffer = buf;
+      noise.buffer = this._explosionNoiseBuffer;
       const nGain = ctx.createGain();
       const nFilter = ctx.createBiquadFilter();
       nFilter.type = 'lowpass';

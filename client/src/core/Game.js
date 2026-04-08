@@ -15,6 +15,7 @@ import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN } from './Config.j
 import { HealthBars } from '../ui/HealthBars.js';
 import { StunFX } from '../rendering/StunFX.js';
 import { engineAudio } from '../audio/EngineAudio.js';
+import { DebugMode } from '../debug/DebugMode.js';
 
 const MAX_DT = 1 / 30; // cap delta to avoid spiral of death
 const FIXED_DT = 1 / 60; // fixed timestep for deterministic game logic
@@ -145,6 +146,9 @@ export class Game {
     this.collisionHandler.on('fell', (e) => this._onPlayerFell(e));
     this.collisionHandler.on('trail-hit', (e) => this._emit('trail-hit', e));
     this.collisionHandler.on('obstacle-hit', (e) => this._onObstacleHit(e));
+
+    // ── Debug mode ──
+    this.debug = new DebugMode(this);
 
     // ── Wire hazard damage/elimination events ──
     this.dynamicHazards.on('damage', (e) => this._onDamage(e));
@@ -341,6 +345,9 @@ export class Game {
     // Update bot brains (produces input + calls applyControls internally)
     this.botManager.update(dt);
 
+    // Debug: apply player input to sync cars (multi-vehicle comparison)
+    this.debug.fixedUpdate(dt);
+
     // Update all abilities
     for (const [, ability] of this.abilities) {
       ability.update(dt);
@@ -350,20 +357,36 @@ export class Game {
     this.physicsWorld.step(dt);
 
     // Floor safety net (runs at fixed rate — no dt scaling needed)
+    // Use octagonal distance (perpendicular to nearest edge) instead of circular
+    // to match the actual arena shape and prevent bouncing at edge midpoints.
+    const _octRadius = ARENA.diameter / 2;
+    const _octSides = 8;
     for (const cb of this.carBodies) {
       if (cb.isEliminated && !cb.mesh.visible) continue;
       const pos = cb.body.position;
-      const dist = Math.sqrt(pos.x * pos.x + pos.z * pos.z);
 
-      if (dist < ARENA.diameter / 2 - 1 && pos.y < 0 && pos.y > RESPAWN.fallOffY) {
+      // Octagonal distance: project onto each edge normal, take the max
+      let maxProj = -Infinity;
+      for (let i = 0; i < _octSides; i++) {
+        const a = (i / _octSides) * Math.PI * 2 - Math.PI / 8;
+        const nx = Math.cos(a);
+        const nz = Math.sin(a);
+        const proj = pos.x * nx + pos.z * nz;
+        if (proj > maxProj) maxProj = proj;
+      }
+      const onArena = maxProj < _octRadius - 1;
+
+      if (onArena && pos.y < 0 && pos.y > RESPAWN.fallOffY) {
         pos.y += (0.6 - pos.y) * 0.3;
         if (pos.y > 0.55) pos.y = 0.6;
         cb.body.velocity.y = Math.max(cb.body.velocity.y, 0);
       }
     }
 
-    // Dynamic hazards (lava pool, eruptions, geysers)
-    this.dynamicHazards.update(dt, this.carBodies);
+    // Dynamic hazards (lava pool, eruptions, geysers) — skip in sandbox
+    if (!this.debug._sandboxActive) {
+      this.dynamicHazards.update(dt, this.carBodies);
+    }
 
     // Collision detection (after physics step)
     this.collisionHandler.update();
@@ -416,8 +439,12 @@ export class Game {
     }
     engineAudio.update(frameDt);
 
-    // Camera always follows
-    this._updateCamera(frameDt);
+    // Camera — debug sync override or normal follow
+    if (this.debug._syncActive) {
+      this.debug.updateSyncCamera(frameDt);
+    } else {
+      this._updateCamera(frameDt);
+    }
 
     // Update name tag and health bar positions
     this.nameTags.update(
@@ -430,6 +457,9 @@ export class Game {
       window.innerWidth,
       window.innerHeight,
     );
+
+    // Debug overlay
+    this.debug.update();
 
     // Render
     this.sceneManager.update();

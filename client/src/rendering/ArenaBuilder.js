@@ -214,8 +214,9 @@ export class ArenaBuilder {
     edgeMesh.receiveShadow = true;
     this.arenaGroup.add(edgeMesh);
 
-    // ── Magma underlay (subtle glow visible at edges and through lava veins) ──
-    const underGeo = new THREE.CircleGeometry(radius, 8);
+    // ── Magma underlay (subtle glow beneath lava pool only) ──
+    const lavaUnderlayR = ARENA.lava.radius + 1;
+    const underGeo = new THREE.CircleGeometry(lavaUnderlayR, 16);
     underGeo.rotateX(-Math.PI / 2);
     const magmaTex = createMagmaUnderlayTexture(256);
     this._underlavaMat = new THREE.MeshStandardMaterial({
@@ -279,36 +280,37 @@ export class ArenaBuilder {
       transparent: true, opacity: 0.7,
     });
 
+    // Merge all edge tubes into a single draw call
+    const edgeTubeGeos = [];
     for (let i = 0; i < sides; i++) {
       const a0 = (i / sides) * Math.PI * 2 - Math.PI / 8;
       const a1 = ((i + 1) / sides) * Math.PI * 2 - Math.PI / 8;
       const p1 = new THREE.Vector3(Math.cos(a0) * radius, 0.05, Math.sin(a0) * radius);
       const p2 = new THREE.Vector3(Math.cos(a1) * radius, 0.05, Math.sin(a1) * radius);
-      const path = new THREE.LineCurve3(p1, p2);
-      this.scene.add(new THREE.Mesh(new THREE.TubeGeometry(path, 1, 0.18, 8, false), tubeMat));
+      edgeTubeGeos.push(new THREE.TubeGeometry(new THREE.LineCurve3(p1, p2), 1, 0.18, 8, false));
     }
+    const mergedEdgeTubes = mergeGeometries(edgeTubeGeos);
+    this.scene.add(new THREE.Mesh(mergedEdgeTubes, tubeMat));
+    for (const g of edgeTubeGeos) g.dispose();
 
-    // Lava pool inner ring (red glow)
+    // Lava pool inner ring (red glow) — merged into single draw call
     const lavaTubeMat = new THREE.MeshStandardMaterial({
       color: 0xcc3300, emissive: 0x882200, emissiveIntensity: 1.5, transparent: true, opacity: 0.8,
     });
     const lavaR = ARENA.lava.radius + 0.3;
+    const lavaRingGeos = [];
     for (let i = 0; i < 16; i++) {
       const a0 = (i / 16) * Math.PI * 2;
       const a1 = ((i + 1) / 16) * Math.PI * 2;
       const p1 = new THREE.Vector3(Math.cos(a0) * lavaR, 0.08, Math.sin(a0) * lavaR);
       const p2 = new THREE.Vector3(Math.cos(a1) * lavaR, 0.08, Math.sin(a1) * lavaR);
-      this.scene.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.LineCurve3(p1, p2), 1, 0.12, 8, false), lavaTubeMat));
+      lavaRingGeos.push(new THREE.TubeGeometry(new THREE.LineCurve3(p1, p2), 1, 0.12, 8, false));
     }
+    const mergedLavaRing = mergeGeometries(lavaRingGeos);
+    this.scene.add(new THREE.Mesh(mergedLavaRing, lavaTubeMat));
+    for (const g of lavaRingGeos) g.dispose();
 
-    // Edge point lights (8 total)
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2 - Math.PI / 8;
-      const light = new THREE.PointLight(THEME.edgeTube, 0.4, 25);
-      light.position.set(Math.cos(a) * radius, 1, Math.sin(a) * radius);
-      this.scene.add(light);
-      this.edgeLights.push(light);
-    }
+    // Edge glow handled by emissive tubes + bloom — no point lights needed
   }
 
   // ── Lava Fire Effect (animated texture on lava pool) ──────────────────
@@ -347,13 +349,40 @@ export class ArenaBuilder {
     const { pillars, boulders } = ARENA.rockObstacles;
     const texLoader = new THREE.TextureLoader();
 
-    // Load volcano floor texture for all rocky elements
+    // Load volcano floor texture — shared across ALL rocky elements (no clones)
     const rockTex = texLoader.load('/assets/textures/volcano_floor.png');
     rockTex.wrapS = rockTex.wrapT = THREE.RepeatWrapping;
     rockTex.colorSpace = THREE.SRGBColorSpace;
 
     const rockNormal = texLoader.load('/assets/textures/lava_normal.png');
     rockNormal.wrapS = rockNormal.wrapT = THREE.RepeatWrapping;
+
+    // Shared materials (2 instead of ~17 cloned per-obstacle)
+    const pillarMat = new THREE.MeshStandardMaterial({
+      map: rockTex,
+      normalMap: rockNormal,
+      normalScale: new THREE.Vector2(2.0, 2.0),
+      roughness: 0.9,
+      metalness: 0.05,
+      emissive: 0x331100,
+      emissiveIntensity: 0.15,
+    });
+    const boulderMat = new THREE.MeshStandardMaterial({
+      map: rockTex,
+      normalMap: rockNormal,
+      normalScale: new THREE.Vector2(2.0, 2.0),
+      roughness: 0.92,
+      metalness: 0.05,
+      emissive: 0x221000,
+      emissiveIntensity: 0.1,
+    });
+    const baseCrackMat = new THREE.MeshStandardMaterial({
+      color: 0x661100,
+      emissive: 0xff4400,
+      emissiveIntensity: 1.5,
+      transparent: true,
+      opacity: 0.6,
+    });
 
     // ── Pillars — tapered, rough-hewn rock columns ──
     for (const p of pillars) {
@@ -369,6 +398,14 @@ export class ArenaBuilder {
         7,                    // radial segments (odd = more natural)
         4,                    // height segments for vertex displacement
       );
+
+      // Scale UVs in geometry instead of cloning texture with different repeat
+      const uvScale = p.height / 3;
+      const uvAttr = pillarGeo.attributes.uv;
+      for (let i = 0; i < uvAttr.count; i++) {
+        uvAttr.setY(i, uvAttr.getY(i) * uvScale);
+      }
+      uvAttr.needsUpdate = true;
 
       // Displace vertices for a rugged, natural rock shape
       const posAttr = pillarGeo.attributes.position;
@@ -388,22 +425,6 @@ export class ArenaBuilder {
         posAttr.setZ(i, vz * factor);
       }
       pillarGeo.computeVertexNormals();
-
-      const pillarTexClone = rockTex.clone();
-      pillarTexClone.repeat.set(1, p.height / 3);
-      pillarTexClone.needsUpdate = true;
-
-      const pillarMat = new THREE.MeshStandardMaterial({
-        map: pillarTexClone,
-        normalMap: rockNormal.clone(),
-        normalScale: new THREE.Vector2(2.0, 2.0),
-        roughness: 0.9,
-        metalness: 0.05,
-        emissive: 0x331100,
-        emissiveIntensity: 0.15,
-      });
-      pillarMat.normalMap.repeat.set(1, p.height / 3);
-      pillarMat.normalMap.needsUpdate = true;
 
       const pillarMesh = new THREE.Mesh(pillarGeo, pillarMat);
       pillarMesh.castShadow = true;
@@ -448,14 +469,7 @@ export class ArenaBuilder {
 
       // Small emissive crack at base (lava seeping through)
       const crackGeo = new THREE.TorusGeometry(p.baseRadius + 0.1, 0.08, 4, 12);
-      const crackMat = new THREE.MeshStandardMaterial({
-        color: 0x661100,
-        emissive: 0xff4400,
-        emissiveIntensity: 1.5,
-        transparent: true,
-        opacity: 0.6,
-      });
-      const crack = new THREE.Mesh(crackGeo, crackMat);
+      const crack = new THREE.Mesh(crackGeo, baseCrackMat);
       crack.rotation.x = Math.PI / 2;
       crack.position.y = -p.height / 2 + 0.05;
       group.add(crack);
@@ -466,7 +480,7 @@ export class ArenaBuilder {
       this.obstacleGroups.push({ group, type: 'pillar', config: p });
     }
 
-    // ── Boulders — irregular rounded rocks ──
+    // ── Boulders — irregular rounded rocks (shared material) ──
     for (const b of boulders) {
       const x = Math.cos(b.angle) * b.dist;
       const z = Math.sin(b.angle) * b.dist;
@@ -490,20 +504,6 @@ export class ArenaBuilder {
         posAttr.setZ(i, vz * (1 + noise));
       }
       boulderGeo.computeVertexNormals();
-
-      const boulderTexClone = rockTex.clone();
-      boulderTexClone.repeat.set(1, 1);
-      boulderTexClone.needsUpdate = true;
-
-      const boulderMat = new THREE.MeshStandardMaterial({
-        map: boulderTexClone,
-        normalMap: rockNormal.clone(),
-        normalScale: new THREE.Vector2(2.0, 2.0),
-        roughness: 0.92,
-        metalness: 0.05,
-        emissive: 0x221000,
-        emissiveIntensity: 0.1,
-      });
 
       const boulderMesh = new THREE.Mesh(boulderGeo, boulderMat);
       boulderMesh.castShadow = true;
@@ -808,49 +808,51 @@ export class ArenaBuilder {
   // ── Surface Details ──────────────────────────────────────────────────
   _buildSurfaceDetails() {
     const radius = ARENA.diameter / 2;
-    const crackMat = new THREE.MeshStandardMaterial({ color: 0x1a0e05, roughness: 0.9 });
     const patchMat = new THREE.MeshStandardMaterial({ color: 0x3d2b1a, roughness: 0.95 });
 
-    // Cracks — flat recessed lines (no castShadow for perf, height is purely visual)
-    for (let i = 0; i < 50; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const d = ARENA.lava.radius + 3 + Math.random() * (radius - ARENA.lava.radius - 6);
-      const len = 3 + Math.random() * 5;
-      const crack = new THREE.Mesh(new THREE.BoxGeometry(len, 0.02, 0.12), crackMat);
-      crack.position.set(Math.cos(a) * d, 0.01, Math.sin(a) * d);
-      crack.rotation.y = Math.random() * Math.PI;
-      crack.receiveShadow = true;
-      this.scene.add(crack);
-    }
-
-    // Rock patches — low bumps, only these cast shadows (few enough for perf)
+    // Rock patches — merged into single draw call
+    const patchGeos = [];
     for (let i = 0; i < 14; i++) {
       const a = Math.random() * Math.PI * 2;
       const d = ARENA.lava.radius + 4 + Math.random() * (radius - ARENA.lava.radius - 8);
       const r = 1.5 + Math.random() * 1.5;
-      const patch = new THREE.Mesh(new THREE.CylinderGeometry(r, r * 1.1, 0.1, 6), patchMat);
-      patch.position.set(Math.cos(a) * d, 0.05, Math.sin(a) * d);
-      patch.castShadow = true;
-      patch.receiveShadow = true;
-      this.scene.add(patch);
+      const g = new THREE.CylinderGeometry(r, r * 1.1, 0.1, 6);
+      g.translate(Math.cos(a) * d, 0.05, Math.sin(a) * d);
+      patchGeos.push(g);
     }
+    const mergedPatches = mergeGeometries(patchGeos);
+    const patchMesh = new THREE.Mesh(mergedPatches, patchMat);
+    patchMesh.castShadow = true;
+    patchMesh.receiveShadow = true;
+    this.scene.add(patchMesh);
+    for (const g of patchGeos) g.dispose();
 
-    // Magma veins (subtle emissive cracks — not fluorescent)
-    const veinMat = new THREE.MeshStandardMaterial({
+    // Magma veins — merged into single draw call with shared material
+    this._veinMat = new THREE.MeshStandardMaterial({
       color: 0x661100, emissive: 0x441100, emissiveIntensity: 0.8,
       transparent: true, opacity: 0.5,
     });
+    const veinGeos = [];
     for (let i = 0; i < 10; i++) {
       const a = Math.random() * Math.PI * 2;
       const d = ARENA.lava.radius + 3 + Math.random() * (radius - ARENA.lava.radius - 6);
       const len = 4 + Math.random() * 6;
-      const mat = veinMat.clone();
-      const vein = new THREE.Mesh(new THREE.BoxGeometry(len, 0.02, 0.2), mat);
-      vein.position.set(Math.cos(a) * d, 0.03, Math.sin(a) * d);
-      vein.rotation.y = Math.random() * Math.PI;
-      this.scene.add(vein);
-      this._emberVeins.push({ material: mat, offset: Math.random() * Math.PI * 2 });
+      const g = new THREE.BoxGeometry(len, 0.02, 0.2);
+      // Apply rotation before merging (can't rotate after merge)
+      const rotY = Math.random() * Math.PI;
+      const cos = Math.cos(rotY), sin = Math.sin(rotY);
+      const posArr = g.attributes.position;
+      for (let v = 0; v < posArr.count; v++) {
+        const vx = posArr.getX(v), vz = posArr.getZ(v);
+        posArr.setX(v, vx * cos - vz * sin);
+        posArr.setZ(v, vx * sin + vz * cos);
+      }
+      g.translate(Math.cos(a) * d, 0.03, Math.sin(a) * d);
+      veinGeos.push(g);
     }
+    const mergedVeins = mergeGeometries(veinGeos);
+    this.scene.add(new THREE.Mesh(mergedVeins, this._veinMat));
+    for (const g of veinGeos) g.dispose();
   }
 
   // ── Skybox ───────────────────────────────────────────────────────────
@@ -974,8 +976,8 @@ export class ArenaBuilder {
     const dirLight = new THREE.DirectionalLight(0xffdcb0, 1.4);
     dirLight.position.set(20, 40, 15);
     dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 2048;
-    dirLight.shadow.mapSize.height = 2048;
+    dirLight.shadow.mapSize.width = 1024;
+    dirLight.shadow.mapSize.height = 1024;
     dirLight.shadow.camera.near = 1;
     dirLight.shadow.camera.far = 80;
     dirLight.shadow.camera.left = -45;
@@ -1041,14 +1043,9 @@ export class ArenaBuilder {
         pad.material.emissiveIntensity = 0.8 + Math.sin(elapsed * 4 + pad.angle * 2) * 0.7;
       }
 
-      // Edge light pulse
-      for (let i = 0; i < this.edgeLights.length; i++) {
-        this.edgeLights[i].intensity = 0.3 + Math.sin(elapsed * 3 + i * 0.8) * 0.15;
-      }
-
-      // Magma veins — subtle glow pulse
-      for (const v of this._emberVeins) {
-        v.material.emissiveIntensity = 0.5 + Math.sin(elapsed * 1.2 + v.offset) * 0.3;
+      // Magma veins — subtle glow pulse (single shared material)
+      if (this._veinMat) {
+        this._veinMat.emissiveIntensity = 0.5 + Math.sin(elapsed * 1.2) * 0.3;
       }
 
       // Underlava subtle pulse
@@ -1085,7 +1082,6 @@ export class ArenaBuilder {
         this._lavaFireFrameTimer -= frameDuration;
         this._lavaFireFrameIndex = (this._lavaFireFrameIndex + 1) % this._lavaFireFrames.length;
         this._lavaFireMesh.material.map = this._lavaFireFrames[this._lavaFireFrameIndex];
-        this._lavaFireMesh.material.needsUpdate = true;
       }
     }
 
