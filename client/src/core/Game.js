@@ -11,7 +11,7 @@ import { BotManager } from '../ai/BotManager.js';
 import { NameTags } from '../ui/NameTags.js';
 import { DynamicHazards } from '../physics/DynamicHazards.js';
 import { TireSmokeFX } from '../rendering/TireSmokeFX.js';
-import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN } from './Config.js';
+import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, getSpawnPosition } from './Config.js';
 import { HealthBars } from '../ui/HealthBars.js';
 import { StunFX } from '../rendering/StunFX.js';
 import { engineAudio } from '../audio/EngineAudio.js';
@@ -213,6 +213,13 @@ export class Game {
     this.botManager.removeAll();
     this.nameTags.clear();
     await this.botManager.fillSlots();
+
+    // Wire elimination callback on every car (catches ALL damage sources)
+    const onElim = (e) => this._onEliminated(e);
+    carBody.onEliminated = onElim;
+    for (const bot of this.botManager.bots) {
+      bot.carBody.onEliminated = onElim;
+    }
 
     // Register name tags and health bars for all cars
     this.nameTags.add(carBody, true); // local player
@@ -555,7 +562,7 @@ export class Game {
 
   // ── Spawn helpers ─────────────────────────────────────────────────────
 
-  async _spawnCar(carType, nickname, playerId) {
+  async _spawnCar(carType, nickname, playerId, spawnSlot = 0) {
     const mesh = await buildCar(carType);
     this.sceneManager.scene.add(mesh);
 
@@ -565,11 +572,9 @@ export class Game {
     carBody.playerId = playerId;
     carBody.nickname = nickname;
 
-    // Random spawn position on flat arena (avoid lava center)
-    const angle = Math.random() * Math.PI * 2;
-    const r = ARENA.lava.radius + 5 + Math.random() * (ARENA.diameter / 2 - ARENA.lava.radius - 10);
-    carBody.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r);
-    carBody._yaw = angle + Math.PI; // face center
+    // Spawn at octagon vertex (slot 0-7), facing center
+    const sp = getSpawnPosition(spawnSlot);
+    carBody.setPosition(sp.x, sp.y, sp.z, sp.yaw);
 
     this.carBodies.push(carBody);
 
@@ -697,6 +702,10 @@ export class Game {
   }
 
   _onEliminated({ victim, killer, wasAbility }) {
+    // Guard: may be called from multiple paths (CarBody.onEliminated + event listeners)
+    if (victim._eliminationHandled) return;
+    victim._eliminationHandled = true;
+
     const isLocal = victim === this.localPlayer;
 
     // Disable controls for local player
@@ -770,10 +779,7 @@ export class Game {
       const ability = this.abilities.get(victim);
       if (ability) ability.forceReset();
 
-      victim.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r);
-      victim._yaw = angle + Math.PI;
-      victim.body.velocity.set(0, 0, 0);
-      victim.body.angularVelocity.set(0, 0, 0);
+      victim.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r, angle + Math.PI);
       victim.syncMesh();
 
       // Respawn flash (local player only)
@@ -851,6 +857,7 @@ export class Game {
     for (const cb of this.carBodies) {
       cb.resetHP();
       cb._eliminationEmitted = false;
+      cb._eliminationHandled = false;
       cb.resetState();
       cb.mesh.visible = true;
       const ability = this.abilities.get(cb);
@@ -864,7 +871,12 @@ export class Game {
       engineAudio.addCar(cb, cb === this.localPlayer);
     }
 
-    // Reposition bots for new round
+    // Reposition all cars at octagon spawn points for new round
+    // Local player always gets slot 0
+    if (this.localPlayer) {
+      const sp = getSpawnPosition(0);
+      this.localPlayer.setPosition(sp.x, sp.y, sp.z, sp.yaw);
+    }
     this.botManager.resetForNewRound();
 
     if (this._countdownEl) this._countdownEl.style.display = 'flex';

@@ -441,7 +441,7 @@ export const ROUND = {
   lobbyMin: 5,        // seconds
   lobbyMax: 30,
   countdown: 3,
-  playTime: 90,
+  playTime: 180,
   resultsTime: 8,
   noRespawnLastSeconds: 10,
 };
@@ -802,9 +802,26 @@ export const PLAYERS = {
   nicknameDefault: 'PLAYER',
 };
 
+/**
+ * Get spawn position for car at a given slot index (0-7).
+ * Places 8 cars at the 8 octagon vertices, facing center.
+ * @param {number} index — slot 0-7
+ * @returns {{ x: number, y: number, z: number, yaw: number }}
+ */
+export function getSpawnPosition(index) {
+  const SPAWN_RADIUS = ARENA.diameter / 2 * 0.72; // 72% of arena radius
+  const angle = (index / PLAYERS.maxPerRoom) * Math.PI * 2;
+  const x = Math.cos(angle) * SPAWN_RADIUS;
+  const z = Math.sin(angle) * SPAWN_RADIUS;
+  // Face toward center: forward is (-sin(yaw), -cos(yaw)), we need it to point at (0,0)
+  // Direction to center = (-x, -z), so: -sin(yaw) = -x → sin(yaw) = x, -cos(yaw) = -z → cos(yaw) = z
+  const yaw = Math.atan2(x, z);
+  return { x, y: 0.6, z, yaw };
+}
+
 export const BOTS = {
   names: ['TURBO', 'BLAZE', 'NITRO', 'CRASH', 'FURY', 'BOLT', 'HAVOC', 'STORM'],
-  personalities: ['Aggressive', 'Defensive', 'Kamikaze', 'Hunter'],
+  personalities: ['Aggressive', 'Defensive', 'Kamikaze', 'Hunter', 'Brawler', 'Trickster', 'Survivor', 'Hothead'],
 };
 
 // ── Game States ──────────────────────────────────────────────────────

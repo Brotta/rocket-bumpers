@@ -1,4 +1,4 @@
-import { BOTS, CARS, PLAYERS, ARENA } from '../core/Config.js';
+import { BOTS, CARS, PLAYERS, ARENA, getSpawnPosition } from '../core/Config.js';
 import { buildCar } from '../rendering/CarFactory.js';
 import { CarBody } from '../physics/CarBody.js';
 import { AbilitySystem } from '../physics/AbilitySystem.js';
@@ -51,10 +51,12 @@ export class BotManager {
     }
 
     const promises = [];
+    // Slot 0 is reserved for local player; bots fill slots 1..7
+    const startSlot = this.carBodies.length; // typically 1 (after local player)
     for (let i = 0; i < slotsToFill; i++) {
       const name = availableNames[i % availableNames.length];
       const carType = CAR_KEYS[Math.floor(Math.random() * CAR_KEYS.length)];
-      promises.push(this._spawnBot(name, carType));
+      promises.push(this._spawnBot(name, carType, startSlot + i));
     }
     await Promise.all(promises);
   }
@@ -99,12 +101,12 @@ export class BotManager {
 
   /** Reset all bots for a new round (reposition, reset scores). */
   resetForNewRound() {
-    for (const bot of this.bots) {
+    for (let i = 0; i < this.bots.length; i++) {
+      const bot = this.bots[i];
       const cb = bot.carBody;
-      const angle = Math.random() * Math.PI * 2;
-      const r = ARENA.lava.radius + 5 + Math.random() * (ARENA.diameter / 2 - ARENA.lava.radius - 10);
-      cb.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r);
-      cb._yaw = angle + Math.PI;
+      // Bots occupy slots 1..7 (slot 0 is local player)
+      const sp = getSpawnPosition(i + 1);
+      cb.setPosition(sp.x, sp.y, sp.z, sp.yaw);
       cb.mesh.visible = true;
       cb.resetHP();
       cb.isInvincible = false;
@@ -119,7 +121,7 @@ export class BotManager {
 
   // ── Internal ───────────────────────────────────────────────────────────
 
-  async _spawnBot(name, carType) {
+  async _spawnBot(name, carType, slotIndex = 1) {
     const mesh = await buildCar(carType);
     this.scene.add(mesh);
 
@@ -129,17 +131,9 @@ export class BotManager {
     carBody.playerId = `bot_${name}`;
     carBody.nickname = name;
 
-    // Random spawn position — 70% lower ring, 30% upper ring
-    const angle = Math.random() * Math.PI * 2;
-    const spawnUpper = Math.random() < 0.3;
-    if (spawnUpper) {
-      const r = 9 + Math.random() * 7;
-      carBody.setPosition(Math.cos(angle) * r, 5.6, Math.sin(angle) * r);
-    } else {
-      const r = 25 + Math.random() * 12;
-      carBody.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r);
-    }
-    carBody._yaw = angle + Math.PI;
+    // Spawn at octagon vertex (slot-based), facing center
+    const sp = getSpawnPosition(slotIndex);
+    carBody.setPosition(sp.x, sp.y, sp.z, sp.yaw);
 
     this.carBodies.push(carBody);
 
@@ -163,5 +157,16 @@ export class BotManager {
     );
 
     this.bots.push({ carBody, ability, brain, personalityName });
+
+    // Share brain references so bots can coordinate (anti-gangup on humans)
+    this._syncBrainReferences();
+  }
+
+  /** Let each bot brain see all other brains for coordination (e.g. anti-gangup). */
+  _syncBrainReferences() {
+    const allBrains = this.bots.map(b => b.brain);
+    for (const bot of this.bots) {
+      bot.brain._otherBrains = allBrains;
+    }
   }
 }

@@ -66,6 +66,10 @@ export class CarBody {
     this.hp = DAMAGE.MAX_HP;
     this.maxHp = DAMAGE.MAX_HP;
     this.isEliminated = false;
+    this._eliminationEmitted = false;
+
+    /** @type {((info: {victim:CarBody, killer:CarBody|null, wasAbility:boolean}) => void)|null} */
+    this.onEliminated = null;
 
     // KO attribution — updated by CollisionHandler & AbilitySystem
     this.lastHitBy = null; // { source: CarBody, wasAbility: bool, time: number }
@@ -183,6 +187,7 @@ export class CarBody {
   resetHP() {
     this.hp = this.maxHp;
     this.isEliminated = false;
+    this._eliminationEmitted = false;
   }
 
   /**
@@ -206,6 +211,16 @@ export class CarBody {
     if (this.hp <= 0) {
       this.hp = 0;
       this.isEliminated = true;
+
+      // Emit elimination exactly once — works for ALL damage sources
+      if (!this._eliminationEmitted) {
+        this._eliminationEmitted = true;
+        const killer = source || (this.lastHitBy ? this.lastHitBy.source : null);
+        const killerAbility = wasAbility || (this.lastHitBy ? this.lastHitBy.wasAbility : false);
+        if (this.onEliminated) {
+          this.onEliminated({ victim: this, killer, wasAbility: killerAbility });
+        }
+      }
     }
     return actual;
   }
@@ -586,13 +601,13 @@ export class CarBody {
   }
 
   // ── Setters ────────────────────────────────────────────────────────
-  setPosition(x, y, z) {
+  setPosition(x, y, z, yaw) {
     this.body.position.set(x, y, z);
     this.body.velocity.set(0, 0, 0);
     this.body.angularVelocity.set(0, 0, 0);
     this._currentSpeed = 0;
     this._steerAngle = 0;
-    this._yaw = 0;
+    if (yaw !== undefined) this._yaw = yaw;
     this._internalVelX = 0;
     this._internalVelZ = 0;
     this._lastSetVelX = 0;
@@ -603,6 +618,11 @@ export class CarBody {
     this._prevPosX = x;
     this._prevPosY = y;
     this._prevPosZ = z;
-    this._prevYaw = 0;
+    this._prevYaw = this._yaw;
+
+    // Sync mesh immediately so car is never visible at origin
+    this.mesh.position.set(x, y - 0.55, z);
+    this.body.quaternion.setFromEuler(0, this._yaw, 0);
+    this.mesh.quaternion.copy(this.body.quaternion);
   }
 }
