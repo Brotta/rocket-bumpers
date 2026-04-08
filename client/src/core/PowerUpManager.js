@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { ARENA, POWERUPS, COLLISION_GROUPS } from './Config.js';
+import { ARENA, POWERUPS, POWERUP_WEIGHTS, COLLISION_GROUPS } from './Config.js';
 import { loadModel } from '../rendering/AssetLoader.js';
 
 const PEDESTAL_COUNT = ARENA.powerupPedestalCount; // 6
@@ -20,6 +20,26 @@ const RAINBOW_COLORS = [
 ];
 
 const POWERUP_TYPES = Object.keys(POWERUPS);
+
+// Pre-build weighted spawn table from POWERUP_WEIGHTS
+const _weightedSpawnTable = (() => {
+  const entries = [];
+  let total = 0;
+  for (const type of POWERUP_TYPES) {
+    const w = POWERUP_WEIGHTS[type] || 1;
+    total += w;
+    entries.push({ type, cumulative: total });
+  }
+  return { entries, total };
+})();
+
+function _pickWeightedType() {
+  const r = Math.random() * _weightedSpawnTable.total;
+  for (const e of _weightedSpawnTable.entries) {
+    if (r < e.cumulative) return e.type;
+  }
+  return _weightedSpawnTable.entries[_weightedSpawnTable.entries.length - 1].type;
+}
 
 // Procedural radial glow texture (generated once, shared by all glow sprites)
 const _glowTexture = (() => {
@@ -91,6 +111,16 @@ const _sharedGeo = {
   missileBody: new THREE.CylinderGeometry(0.15, 0.18, 0.8, 6),
   missileFin: new THREE.BoxGeometry(0.02, 0.25, 0.3),
   missileExhaust: new THREE.SphereGeometry(0.12, 6, 4),
+  // Repair kit VFX
+  repairParticle: new THREE.SphereGeometry(0.12, 4, 4),
+  repairCross: new THREE.BoxGeometry(0.3, 0.06, 0.06),
+  // Turret parts
+  turretBase: new THREE.CylinderGeometry(0.35, 0.4, 0.15, 12),
+  turretBaseRing: new THREE.TorusGeometry(0.38, 0.03, 6, 16),
+  turretBody: new THREE.SphereGeometry(0.28, 8, 6),
+  turretBarrel: new THREE.CylinderGeometry(0.06, 0.06, 0.5, 6),
+  turretMuzzle: new THREE.SphereGeometry(0.08, 4, 4),
+  turretBullet: new THREE.SphereGeometry(0.1, 4, 4),
   // Shield parts
   shieldSphere: new THREE.IcosahedronGeometry(2.2, 2),
   shieldWire: new THREE.IcosahedronGeometry(2.2 * 1.01, 2),
@@ -137,6 +167,17 @@ export class PowerUpManager {
 
     // Active shields
     this._activeShields = [];
+
+    // Active holo-evade decoys
+    this._holoDecoys = [];
+
+    // Active auto-turrets
+    this._activeTurrets = [];
+    // Active turret bullets
+    this._turretBullets = [];
+
+    // Active repair-kit VFX
+    this._repairVFX = [];
 
     // Transient VFX (explosions, shatter chunks, dust clouds) — ticked in update()
     this._vfxObjects = [];
@@ -251,6 +292,16 @@ export class PowerUpManager {
     // ── Update active shields ──
     this._updateShields(dt);
 
+    // ── Update holo-evade decoys ──
+    this._updateHoloDecoys(dt);
+
+    // ── Update auto-turrets + bullets ──
+    this._updateTurrets(dt, carBodies);
+    this._updateTurretBullets(dt, carBodies);
+
+    // ── Update repair-kit VFX ──
+    this._updateRepairVFX(dt);
+
     // ── Tick transient VFX (explosions, debris, dust) ──
     this._updateVFX(dt);
   }
@@ -316,7 +367,7 @@ export class PowerUpManager {
   // ── Spawn pickup ──────────────────────────────────────────────────────
 
   _spawnPickup(pedestal) {
-    const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
+    const type = _pickWeightedType();
     const group = new THREE.Group();
     group.position.set(pedestal.x, (pedestal.y || 0) + FLOAT_HEIGHT, pedestal.z);
 
@@ -391,9 +442,12 @@ export class PowerUpManager {
 
   _applyEffect(type, car) {
     switch (type) {
-      case 'MISSILE':        this._fireMissile(car, false); break;
-      case 'HOMING_MISSILE': this._fireMissile(car, true);  break;
-      case 'SHIELD':         this._applyShield(car);         break;
+      case 'MISSILE':        this._fireMissile(car, false);  break;
+      case 'HOMING_MISSILE': this._fireMissile(car, true);   break;
+      case 'SHIELD':         this._applyShield(car);          break;
+      case 'REPAIR_KIT':     this._applyRepairKit(car);       break;
+      case 'HOLO_EVADE':     this._activateHoloEvade(car);    break;
+      case 'AUTO_TURRET':    this._deployTurret(car);          break;
     }
   }
 
@@ -464,6 +518,9 @@ export class PowerUpManager {
       trailPoolIdx: 0,
       trailSpawnTimer: 0,
       alive: true,
+      // HoloEvade confusion state (homing only)
+      _holoConfuseRolled: false,
+      _holoDecoyTarget: null,
     };
 
     // Pre-allocate trail particle pool (max ~14 visible at once at 0.05s interval × 0.4s life)
@@ -639,17 +696,52 @@ export class PowerUpManager {
   _updateHomingGuidance(p, dt, _carBodies) {
     const cfg = p.config;
 
+    // ── HoloEvade confusion check ──
+    // If our target has holoEvade active and we haven't rolled yet, roll once
+    if (p.target && p.target.holoEvadeActive && !p._holoConfuseRolled) {
+      p._holoConfuseRolled = true;
+      const decoys = this.getHoloDecoys(p.target);
+      if (decoys && Math.random() < POWERUPS.HOLO_EVADE.missileConfuseChance) {
+        // Missile gets confused — pick a random decoy as virtual target
+        const chosen = decoys[Math.floor(Math.random() * decoys.length)];
+        p._holoDecoyTarget = chosen; // virtual target with {x, z, y}
+        p.target = null; // drop real lock
+      }
+    }
+
+    // ── Tracking a holo decoy? ──
+    if (p._holoDecoyTarget) {
+      const d = p._holoDecoyTarget;
+      // Decoy disappeared (cleanup) — lose lock entirely
+      if (!d.group || !d.group.parent) {
+        p._holoDecoyTarget = null;
+        p.target = null;
+        p.lostLockTimer = 0;
+        return;
+      }
+      // Steer toward decoy position
+      this._steerToward(p, d.x, d.z, dt);
+      return;
+    }
+
     if (!p.target || p.target.isEliminated || p.target.isInvincible) {
       p.lostLockTimer += dt;
       if (p.lostLockTimer >= cfg.reacquireDelay) {
         p.target = this._findHomingTarget(p);
         p.lostLockTimer = 0;
+        p._holoConfuseRolled = false; // allow re-roll on new target
       }
     }
     if (!p.target) return;
 
-    const tx = p.target.body.position.x - p.x;
-    const tz = p.target.body.position.z - p.z;
+    this._steerToward(p, p.target.body.position.x, p.target.body.position.z, dt);
+  }
+
+  /** Shared proportional-navigation steering (used for both real targets and decoys). */
+  _steerToward(p, targetX, targetZ, dt) {
+    const cfg = p.config;
+    const tx = targetX - p.x;
+    const tz = targetZ - p.z;
     const tDist = Math.sqrt(tx * tx + tz * tz);
     if (tDist < 0.5) return;
 
@@ -660,6 +752,7 @@ export class PowerUpManager {
 
     if (angleToTarget > cfg.losAngle) {
       p.target = null;
+      p._holoDecoyTarget = null;
       p.lostLockTimer = 0;
       return;
     }
@@ -936,6 +1029,12 @@ export class PowerUpManager {
           vfx.dustMat.opacity = 0.4 * Math.max(0, 1 - vfx.age / 1.0);
         }
       }
+
+      if (vfx.type === 'turret_flash') {
+        const t = vfx.age / vfx.duration;
+        vfx.flash.scale.setScalar(1.2 + t * 1.5);
+        vfx.flashMat.opacity = 0.9 * (1 - t);
+      }
     }
   }
 
@@ -954,6 +1053,150 @@ export class PowerUpManager {
       if (vfx.dust && vfx.dust.parent) this.scene.remove(vfx.dust);
       vfx.dustMat.dispose();
     }
+    if (vfx.type === 'turret_flash') {
+      this.scene.remove(vfx.flash);
+      vfx.flashMat.dispose();
+    }
+  }
+
+  // =====================================================================
+  //  REPAIR KIT
+  // =====================================================================
+
+  _applyRepairKit(car) {
+    const config = POWERUPS.REPAIR_KIT;
+    const healed = Math.min(config.heal, car.maxHp - car.hp);
+    car.hp = Math.min(car.hp + config.heal, car.maxHp);
+
+    // Spawn rising green particles + cross symbols around car
+    const px = car.body.position.x;
+    const py = car.body.position.y;
+    const pz = car.body.position.z;
+
+    const particles = [];
+    const PARTICLE_COUNT = 12;
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const isCross = i < 4; // first 4 are cross symbols
+      const geo = isCross ? _sharedGeo.repairCross : _sharedGeo.repairParticle;
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x44ff44, transparent: true, opacity: 0.9, depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      const angle = (i / PARTICLE_COUNT) * Math.PI * 2;
+      const radius = 0.8 + Math.random() * 0.6;
+      mesh.position.set(
+        px + Math.cos(angle) * radius,
+        py + Math.random() * 0.4,
+        pz + Math.sin(angle) * radius,
+      );
+      if (isCross) {
+        // Add a second cross bar to make a + shape
+        const bar2 = new THREE.Mesh(
+          new THREE.BoxGeometry(0.06, 0.06, 0.3),
+          mat,
+        );
+        mesh.add(bar2);
+        mesh.scale.setScalar(1.5);
+      }
+      this.scene.add(mesh);
+      particles.push({
+        mesh, mat,
+        vy: 2.0 + Math.random() * 1.5, // rise speed (u/s)
+        vx: (Math.random() - 0.5) * 0.5,
+        vz: (Math.random() - 0.5) * 0.5,
+        life: 0.6 + Math.random() * 0.3,
+        maxLife: 0.6 + Math.random() * 0.3,
+      });
+    }
+
+    // Green flash glow at car center
+    const glowMat = new THREE.SpriteMaterial({
+      map: _glowTexture, color: 0x44ff44,
+      transparent: true, opacity: 0.7,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const glow = new THREE.Sprite(glowMat);
+    glow.scale.setScalar(5);
+    glow.position.set(px, py + 0.5, pz);
+    this.scene.add(glow);
+
+    this._repairVFX.push({
+      car, particles, glow, glowMat,
+      age: 0, duration: 1.0,
+    });
+
+    this._playRepairSFX();
+    this._emit('repair', { car, healed });
+  }
+
+  _updateRepairVFX(dt) {
+    for (let i = this._repairVFX.length - 1; i >= 0; i--) {
+      const r = this._repairVFX[i];
+      r.age += dt;
+
+      if (r.age >= r.duration) {
+        // Cleanup
+        for (const p of r.particles) {
+          this.scene.remove(p.mesh);
+          p.mat.dispose();
+        }
+        this.scene.remove(r.glow);
+        r.glowMat.dispose();
+        this._repairVFX.splice(i, 1);
+        continue;
+      }
+
+      // Glow fade
+      const glowFade = Math.max(0, 1 - r.age / 0.5);
+      r.glow.scale.setScalar(5 + r.age * 4);
+      r.glowMat.opacity = 0.7 * glowFade;
+
+      // Particles rise and fade
+      for (const p of r.particles) {
+        p.life -= dt;
+        if (p.life <= 0) {
+          p.mesh.visible = false;
+          continue;
+        }
+        p.mesh.position.x += p.vx * dt;
+        p.mesh.position.y += p.vy * dt;
+        p.mesh.position.z += p.vz * dt;
+        const t = p.life / p.maxLife;
+        p.mat.opacity = 0.9 * t;
+        p.mesh.scale.setScalar(1 + (1 - t) * 0.5);
+      }
+    }
+  }
+
+  _playRepairSFX() {
+    try {
+      const ctx = this._getAudioCtx();
+      const now = ctx.currentTime;
+
+      // Ascending positive chime
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc1.type = 'sine';
+      osc1.frequency.setValueAtTime(523, now);       // C5
+      osc1.frequency.setValueAtTime(659, now + 0.1);  // E5
+      osc1.frequency.setValueAtTime(784, now + 0.2);  // G5
+
+      osc2.type = 'sine';
+      osc2.frequency.setValueAtTime(784, now);
+      osc2.frequency.setValueAtTime(988, now + 0.1);
+      osc2.frequency.setValueAtTime(1047, now + 0.2); // C6
+
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.linearRampToValueAtTime(0.15, now + 0.15);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+
+      osc1.connect(gain).connect(ctx.destination);
+      osc2.connect(gain);
+      osc1.start(now); osc1.stop(now + 0.5);
+      osc2.start(now); osc2.stop(now + 0.5);
+    } catch (_) { /* audio not available */ }
   }
 
   // =====================================================================
@@ -1074,6 +1317,691 @@ export class PowerUpManager {
     s.wireMat.dispose();
     for (const r of s.rings) r.mat.dispose();
     this._activeShields.splice(index, 1);
+  }
+
+  // =====================================================================
+  //  HOLO EVADE (Decoy System)
+  // =====================================================================
+
+  _activateHoloEvade(car) {
+    const config = POWERUPS.HOLO_EVADE;
+    const gen = car._generation;
+
+    car.holoEvadeActive = true;
+    car.setCarOpacity(config.carOpacity);
+
+    const yaw = car._yaw;
+    const px = car.body.position.x;
+    const py = car.body.position.y;
+    const pz = car.body.position.z;
+
+    // Get car speed for decoy movement
+    const carSpeedX = car.body.velocity.x;
+    const carSpeedZ = car.body.velocity.z;
+    const carSpeed = Math.sqrt(carSpeedX * carSpeedX + carSpeedZ * carSpeedZ);
+    const decoySpeed = Math.max(carSpeed * config.decoySpeedFactor, 12); // min 12 u/s
+
+    const decoys = [];
+    for (let i = 0; i < config.decoyCount; i++) {
+      // Diverging angles: one left, one right of car direction
+      const sign = i === 0 ? -1 : 1;
+      const spreadAngle = (0.4 + Math.random() * 0.4) * config.decoySpreadAngle * sign;
+      const decoyYaw = yaw + spreadAngle;
+      const vx = -Math.sin(decoyYaw) * decoySpeed;
+      const vz = -Math.cos(decoyYaw) * decoySpeed;
+
+      // Clone car mesh (simplified — shallow traverse for performance)
+      const decoyGroup = car.mesh.clone(true);
+      decoyGroup.position.set(px, py - 0.55, pz);
+      decoyGroup.quaternion.copy(car.mesh.quaternion);
+
+      // Make decoy semi-transparent with cyan tint
+      decoyGroup.traverse((child) => {
+        if (child.isMesh && child.material) {
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          child.material = mats.map((m) => {
+            const clone = m.clone();
+            clone.transparent = true;
+            clone.opacity = config.carOpacity;
+            if (clone.emissive) clone.emissive.setHex(0x00ccff);
+            if ('emissiveIntensity' in clone) clone.emissiveIntensity = 0.3;
+            clone.depthWrite = false;
+            clone.needsUpdate = true;
+            return clone;
+          });
+          if (!Array.isArray(child.material) || child.material.length === 1) {
+            child.material = child.material[0] || child.material;
+          }
+        }
+      });
+
+      this.scene.add(decoyGroup);
+
+      // Cyan glow sprite on decoy
+      const glowMat = new THREE.SpriteMaterial({
+        map: _glowTexture, color: 0x00ccff,
+        transparent: true, opacity: 0.4,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const glow = new THREE.Sprite(glowMat);
+      glow.scale.setScalar(3);
+      glow.position.set(px, py - 0.55, pz);
+      this.scene.add(glow);
+
+      decoys.push({
+        group: decoyGroup, glow, glowMat,
+        x: px, z: pz,
+        vx, vz,
+        yaw: decoyYaw,
+      });
+    }
+
+    // Activation flash
+    const flashMat = new THREE.SpriteMaterial({
+      map: _glowTexture, color: 0x00ccff,
+      transparent: true, opacity: 0.8,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const flash = new THREE.Sprite(flashMat);
+    flash.scale.setScalar(6);
+    flash.position.set(px, py + 0.5, pz);
+    this.scene.add(flash);
+
+    this._holoDecoys.push({
+      car, gen, config, decoys,
+      flash, flashMat,
+      age: 0,
+      phase: 'active', // 'active' → 'fadeout' → removed
+    });
+
+    this._playHoloEvadeSFX();
+  }
+
+  _updateHoloDecoys(dt) {
+    for (let i = this._holoDecoys.length - 1; i >= 0; i--) {
+      const h = this._holoDecoys[i];
+
+      // Car died/respawned — clean up
+      if (h.car._generation !== h.gen) {
+        this._cleanupHoloDecoy(h);
+        this._holoDecoys.splice(i, 1);
+        continue;
+      }
+
+      h.age += dt;
+      const cfg = h.config;
+      const totalDuration = cfg.duration + cfg.fadeOutTime;
+
+      if (h.age >= totalDuration) {
+        h.car.holoEvadeActive = false;
+        h.car._restoreCarOpacity();
+        this._cleanupHoloDecoy(h);
+        this._holoDecoys.splice(i, 1);
+        continue;
+      }
+
+      // Transition to fadeout phase
+      if (h.phase === 'active' && h.age >= cfg.duration) {
+        h.phase = 'fadeout';
+      }
+
+      // Activation flash fade (first 0.3s)
+      if (h.flash && h.flash.parent) {
+        const flashFade = Math.max(0, 1 - h.age / 0.3);
+        h.flashMat.opacity = 0.8 * flashFade;
+        h.flash.scale.setScalar(6 + h.age * 10);
+        if (flashFade <= 0) {
+          this.scene.remove(h.flash);
+          h.flashMat.dispose();
+          h.flash = null;
+        }
+      }
+
+      // Move decoys and update visuals
+      for (const d of h.decoys) {
+        // Move in straight line (dt-based)
+        d.x += d.vx * dt;
+        d.z += d.vz * dt;
+
+        const decoyY = h.car.body.position.y - 0.55;
+
+        d.group.position.x = d.x;
+        d.group.position.z = d.z;
+        d.group.position.y = decoyY;
+
+        d.glow.position.set(d.x, decoyY, d.z);
+
+        // Glitch flicker effect (random opacity variation)
+        const flicker = 0.8 + Math.sin(h.age * 30 + d.yaw * 10) * 0.2;
+
+        if (h.phase === 'fadeout') {
+          const fadeT = (h.age - cfg.duration) / cfg.fadeOutTime;
+          const fadeOpacity = cfg.carOpacity * (1 - fadeT) * flicker;
+          d.group.traverse((child) => {
+            if (child.isMesh && child.material) {
+              const mats = Array.isArray(child.material) ? child.material : [child.material];
+              for (const m of mats) { m.opacity = fadeOpacity; }
+            }
+          });
+          d.glowMat.opacity = 0.4 * (1 - fadeT);
+        } else {
+          // Active phase — glitch flicker
+          d.group.traverse((child) => {
+            if (child.isMesh && child.material) {
+              const mats = Array.isArray(child.material) ? child.material : [child.material];
+              for (const m of mats) { m.opacity = cfg.carOpacity * flicker; }
+            }
+          });
+          d.glowMat.opacity = 0.4 * flicker;
+        }
+      }
+
+      // Restore real car opacity at end of active phase
+      if (h.phase === 'fadeout') {
+        const fadeT = (h.age - cfg.duration) / cfg.fadeOutTime;
+        const restoreOpacity = cfg.carOpacity + (1 - cfg.carOpacity) * fadeT;
+        h.car.setCarOpacity(restoreOpacity);
+      }
+    }
+  }
+
+  /** Check if a given car has active holo decoys (used by homing guidance). */
+  getHoloDecoys(car) {
+    for (const h of this._holoDecoys) {
+      if (h.car === car && h.phase === 'active') return h.decoys;
+    }
+    return null;
+  }
+
+  _cleanupHoloDecoy(h) {
+    for (const d of h.decoys) {
+      // Dispose cloned materials
+      d.group.traverse((child) => {
+        if (child.isMesh && child.material) {
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          for (const m of mats) m.dispose();
+        }
+      });
+      this.scene.remove(d.group);
+      this.scene.remove(d.glow);
+      d.glowMat.dispose();
+    }
+    if (h.flash && h.flash.parent) {
+      this.scene.remove(h.flash);
+      h.flashMat.dispose();
+    }
+  }
+
+  _playHoloEvadeSFX() {
+    try {
+      const ctx = this._getAudioCtx();
+      const now = ctx.currentTime;
+
+      // Digital glitch sound — rapid frequency sweep + noise burst
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const filter = ctx.createBiquadFilter();
+
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(1200, now);
+      osc.frequency.exponentialRampToValueAtTime(200, now + 0.08);
+      osc.frequency.exponentialRampToValueAtTime(2400, now + 0.15);
+      osc.frequency.exponentialRampToValueAtTime(400, now + 0.25);
+
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(1500, now);
+      filter.Q.value = 2;
+
+      gain.gain.setValueAtTime(0.1, now);
+      gain.gain.linearRampToValueAtTime(0.12, now + 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+
+      osc.connect(filter).connect(gain).connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.35);
+
+      // Short noise burst for "teleport" feel
+      const noiseLen = 0.15;
+      const buf = ctx.createBuffer(1, ctx.sampleRate * noiseLen, ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let j = 0; j < data.length; j++) data[j] = (Math.random() * 2 - 1) * 0.3;
+      const noise = ctx.createBufferSource();
+      noise.buffer = buf;
+      const nGain = ctx.createGain();
+      nGain.gain.setValueAtTime(0.08, now);
+      nGain.gain.exponentialRampToValueAtTime(0.001, now + noiseLen);
+      noise.connect(nGain).connect(ctx.destination);
+      noise.start(now);
+    } catch (_) { /* audio not available */ }
+  }
+
+  // =====================================================================
+  //  AUTO TURRET
+  // =====================================================================
+
+  _deployTurret(car) {
+    const config = POWERUPS.AUTO_TURRET;
+    const gen = car._generation;
+
+    // Mount Y: use per-car roofY computed by CarFactory, fallback to 1.2
+    const roofY = car.mesh.userData.roofY ?? 1.2;
+
+    // Build turret mesh group (local space — attached to car mesh)
+    const turretGroup = new THREE.Group();
+    turretGroup.position.set(0, roofY, 0);
+
+    // Base disc (flat cylinder)
+    const baseMat = new THREE.MeshStandardMaterial({
+      color: 0x555555, metalness: 0.7, roughness: 0.3,
+    });
+    const base = new THREE.Mesh(_sharedGeo.turretBase, baseMat);
+    turretGroup.add(base);
+
+    // Base ring (orange emissive accent)
+    const ringMat = new THREE.MeshStandardMaterial({
+      color: 0xffaa00, emissive: 0xffaa00, emissiveIntensity: 1.5,
+      metalness: 0.5, roughness: 0.3,
+    });
+    const ring = new THREE.Mesh(_sharedGeo.turretBaseRing, ringMat);
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = 0.02;
+    turretGroup.add(ring);
+
+    // Rotating head (body + barrel) — this sub-group rotates to aim
+    const head = new THREE.Group();
+    head.position.y = 0.15;
+
+    // Body (squashed sphere)
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color: 0x777777, metalness: 0.6, roughness: 0.3,
+    });
+    const body = new THREE.Mesh(_sharedGeo.turretBody, bodyMat);
+    body.scale.set(1, 0.8, 1);
+    head.add(body);
+
+    // Amber sight on top
+    const sightMat = new THREE.MeshStandardMaterial({
+      color: 0xffcc00, emissive: 0xffaa00, emissiveIntensity: 2.0,
+    });
+    const sight = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.1, 0.15),
+      sightMat,
+    );
+    sight.position.set(0, 0.18, -0.05);
+    head.add(sight);
+
+    // Barrel (points toward -Z in local space, matching car forward)
+    const barrelMat = new THREE.MeshStandardMaterial({
+      color: 0x444444, metalness: 0.8, roughness: 0.2,
+    });
+    const barrel = new THREE.Mesh(_sharedGeo.turretBarrel, barrelMat);
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(0, 0.05, -0.45);
+    head.add(barrel);
+
+    // Muzzle tip
+    const muzzleMat = new THREE.MeshBasicMaterial({
+      color: 0x333333,
+    });
+    const muzzle = new THREE.Mesh(_sharedGeo.turretMuzzle, muzzleMat);
+    muzzle.position.set(0, 0.05, -0.72);
+    head.add(muzzle);
+
+    turretGroup.add(head);
+
+    // Add turret to car mesh (follows car position/rotation automatically)
+    car.mesh.add(turretGroup);
+
+    // Deploy glow
+    const glowMat = new THREE.SpriteMaterial({
+      map: _glowTexture, color: 0xffaa00,
+      transparent: true, opacity: 0.6,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const glow = new THREE.Sprite(glowMat);
+    glow.scale.setScalar(2.5);
+    glow.position.set(0, roofY + 0.2, 0);
+    car.mesh.add(glow);
+
+    this._activeTurrets.push({
+      car, gen, config,
+      group: turretGroup, head, glow, glowMat,
+      ringMat, sightMat, baseMat, bodyMat, barrelMat, muzzleMat,
+      headYaw: 0,          // local yaw of the head (relative to car)
+      fireTimer: 0.3,      // first shot after a small delay
+      age: 0,
+      target: null,
+    });
+
+    this._playTurretDeploySFX();
+  }
+
+  _updateTurrets(dt, carBodies) {
+    for (let i = this._activeTurrets.length - 1; i >= 0; i--) {
+      const t = this._activeTurrets[i];
+
+      // Car died/respawned or fell — remove turret
+      if (t.car._generation !== t.gen || t.car._isFalling) {
+        this._removeTurret(i);
+        continue;
+      }
+
+      t.age += dt;
+      const cfg = t.config;
+
+      // Duration expired
+      if (t.age >= cfg.duration) {
+        this._removeTurret(i);
+        continue;
+      }
+
+      // ── Target acquisition ──
+      t.target = this._findTurretTarget(t, carBodies);
+
+      // ── Head rotation toward target ──
+      if (t.target) {
+        // Compute angle to target in car's local space
+        const carWorldPos = t.car.body.position;
+        const dx = t.target.body.position.x - carWorldPos.x;
+        const dz = t.target.body.position.z - carWorldPos.z;
+        const worldAngle = Math.atan2(-dx, -dz); // angle in world space
+        const localAngle = worldAngle - t.car._yaw;  // relative to car facing
+
+        // Smooth rotation toward target (dt-based)
+        let diff = localAngle - t.headYaw;
+        // Normalize to [-PI, PI]
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        const maxTurn = cfg.turnRate * dt;
+        if (Math.abs(diff) < maxTurn) {
+          t.headYaw = localAngle;
+        } else {
+          t.headYaw += Math.sign(diff) * maxTurn;
+        }
+      }
+      // Normalize headYaw
+      while (t.headYaw > Math.PI) t.headYaw -= Math.PI * 2;
+      while (t.headYaw < -Math.PI) t.headYaw += Math.PI * 2;
+
+      t.head.rotation.y = t.headYaw;
+
+      // ── Firing ──
+      t.fireTimer -= dt;
+      if (t.fireTimer <= 0 && t.target) {
+        t.fireTimer = cfg.fireRate;
+        this._fireTurretBullet(t);
+      }
+
+      // ── Visual pulse ──
+      const pulse = 0.5 + Math.sin(t.age * 6) * 0.3;
+      t.ringMat.emissiveIntensity = 1.0 + pulse;
+      t.sightMat.emissiveIntensity = 1.5 + pulse;
+
+      // Glow fades in last 1.5s
+      if (t.age > cfg.duration - 1.5) {
+        const fade = (cfg.duration - t.age) / 1.5;
+        t.glowMat.opacity = 0.6 * fade;
+        t.ringMat.emissiveIntensity *= fade;
+      }
+    }
+  }
+
+  _findTurretTarget(turret, carBodies) {
+    const cfg = turret.config;
+    const range2 = cfg.range * cfg.range;
+    const pos = turret.car.body.position;
+    let bestDist2 = range2;
+    let bestTarget = null;
+
+    for (const car of carBodies) {
+      if (car === turret.car || car.isEliminated || car.isInvincible) continue;
+      const dx = car.body.position.x - pos.x;
+      const dz = car.body.position.z - pos.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < bestDist2) {
+        bestDist2 = d2;
+        bestTarget = car;
+      }
+    }
+
+    // HoloEvade interaction: if target has holoEvade active, 50% chance to aim at decoy
+    if (bestTarget && bestTarget.holoEvadeActive) {
+      const decoys = this.getHoloDecoys(bestTarget);
+      if (decoys && Math.random() < POWERUPS.HOLO_EVADE.missileConfuseChance) {
+        const chosen = decoys[Math.floor(Math.random() * decoys.length)];
+        // Return a fake target-like object with position
+        return { body: { position: { x: chosen.x, y: chosen.group.position.y + 0.55, z: chosen.z } }, isEliminated: false, isInvincible: false, _isFake: true };
+      }
+    }
+
+    return bestTarget;
+  }
+
+  _fireTurretBullet(turret) {
+    const cfg = turret.config;
+    const car = turret.car;
+
+    // Compute barrel tip in world space
+    const worldYaw = car._yaw + turret.headYaw;
+    const fwdX = -Math.sin(worldYaw);
+    const fwdZ = -Math.cos(worldYaw);
+
+    const roofY = car.mesh.userData.roofY ?? 1.2;
+    const spawnX = car.body.position.x + fwdX * 0.9;
+    const spawnZ = car.body.position.z + fwdZ * 0.9;
+    const spawnY = car.body.position.y - 0.55 + roofY + 0.2;
+
+    // Bullet mesh
+    const bulletMat = new THREE.MeshBasicMaterial({
+      color: 0xffcc00, transparent: true, opacity: 0.9,
+    });
+    const bullet = new THREE.Mesh(_sharedGeo.turretBullet, bulletMat);
+    bullet.position.set(spawnX, spawnY, spawnZ);
+    this.scene.add(bullet);
+
+    // Bullet glow
+    const glowMat = new THREE.SpriteMaterial({
+      map: _glowTexture, color: 0xffaa00,
+      transparent: true, opacity: 0.5,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const glow = new THREE.Sprite(glowMat);
+    glow.scale.setScalar(0.8);
+    glow.position.set(spawnX, spawnY, spawnZ);
+    this.scene.add(glow);
+
+    this._turretBullets.push({
+      owner: car, config: cfg,
+      mesh: bullet, mat: bulletMat,
+      glow, glowMat,
+      x: spawnX, y: spawnY, z: spawnZ,
+      prevX: spawnX, prevZ: spawnZ,
+      vx: fwdX * cfg.bulletSpeed,
+      vz: fwdZ * cfg.bulletSpeed,
+      age: 0,
+    });
+
+    // Muzzle flash (brief sprite at barrel tip)
+    const flashMat = new THREE.SpriteMaterial({
+      map: _glowTexture, color: 0xffdd44,
+      transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const flash = new THREE.Sprite(flashMat);
+    flash.scale.setScalar(1.2);
+    flash.position.set(spawnX, spawnY, spawnZ);
+    this.scene.add(flash);
+    this._vfxObjects.push({
+      type: 'turret_flash',
+      flash, flashMat,
+      age: 0, duration: 0.12,
+    });
+
+    this._playTurretFireSFX();
+  }
+
+  _updateTurretBullets(dt, carBodies) {
+    for (let i = this._turretBullets.length - 1; i >= 0; i--) {
+      const b = this._turretBullets[i];
+      b.age += dt;
+
+      if (b.age >= b.config.bulletLifetime) {
+        this._removeTurretBullet(i);
+        continue;
+      }
+
+      // Save previous position for swept collision
+      b.prevX = b.x;
+      b.prevZ = b.z;
+
+      // Move
+      b.x += b.vx * dt;
+      b.z += b.vz * dt;
+
+      // Sync mesh
+      b.mesh.position.set(b.x, b.y, b.z);
+      b.glow.position.set(b.x, b.y, b.z);
+
+      // Fade glow over lifetime
+      b.glowMat.opacity = 0.5 * (1 - b.age / b.config.bulletLifetime);
+
+      // Collision: cars (swept sphere)
+      let hit = false;
+      for (const car of carBodies) {
+        if (car === b.owner || car.isEliminated || car.isInvincible) continue;
+        if (sweptSphereHit(
+          b.prevX, b.prevZ, b.x, b.z,
+          car.body.position.x, car.body.position.y, car.body.position.z,
+          b.y, b.config.bulletRadius + 1.0,
+        )) {
+          car.takeDamage(b.config.damage, b.owner, false);
+          // Light knockback in bullet direction
+          const speed = Math.sqrt(b.vx * b.vx + b.vz * b.vz);
+          if (speed > 0.1) {
+            car.body.velocity.x += (b.vx / speed) * b.config.knockback;
+            car.body.velocity.z += (b.vz / speed) * b.config.knockback;
+          }
+          car.lastHitBy = { source: b.owner, wasAbility: false, time: performance.now() };
+          this._emit('powerup-hit', { attacker: b.owner, victim: car, type: 'AUTO_TURRET' });
+
+          // Small hit spark
+          this._spawnBulletHitVFX(b.x, b.y, b.z);
+          hit = true;
+          break;
+        }
+      }
+      if (hit) { this._removeTurretBullet(i); continue; }
+
+      // Out of bounds
+      const oobLimit = this._oobLimit;
+      if (Math.abs(b.x) > oobLimit || Math.abs(b.z) > oobLimit) {
+        this._removeTurretBullet(i);
+      }
+    }
+  }
+
+  _spawnBulletHitVFX(x, y, z) {
+    const flashMat = new THREE.SpriteMaterial({
+      map: _glowTexture, color: 0xffaa00,
+      transparent: true, opacity: 0.7,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const flash = new THREE.Sprite(flashMat);
+    flash.scale.setScalar(2);
+    flash.position.set(x, y, z);
+    this.scene.add(flash);
+    this._vfxObjects.push({
+      type: 'turret_flash',
+      flash, flashMat,
+      age: 0, duration: 0.2,
+    });
+  }
+
+  _removeTurret(index) {
+    const t = this._activeTurrets[index];
+    t.car.mesh.remove(t.group);
+    t.car.mesh.remove(t.glow);
+    t.baseMat.dispose();
+    t.bodyMat.dispose();
+    t.barrelMat.dispose();
+    t.muzzleMat.dispose();
+    t.ringMat.dispose();
+    t.sightMat.dispose();
+    t.glowMat.dispose();
+    this._activeTurrets.splice(index, 1);
+  }
+
+  _removeTurretBullet(index) {
+    const b = this._turretBullets[index];
+    this.scene.remove(b.mesh);
+    this.scene.remove(b.glow);
+    b.mat.dispose();
+    b.glowMat.dispose();
+    this._turretBullets.splice(index, 1);
+  }
+
+  _playTurretDeploySFX() {
+    try {
+      const ctx = this._getAudioCtx();
+      const now = ctx.currentTime;
+
+      // Mechanical deployment sound — metallic ramp up
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(150, now);
+      osc.frequency.exponentialRampToValueAtTime(400, now + 0.15);
+      osc.frequency.setValueAtTime(350, now + 0.2);
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 1200;
+
+      gain.gain.setValueAtTime(0.1, now);
+      gain.gain.linearRampToValueAtTime(0.12, now + 0.1);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+
+      osc.connect(filter).connect(gain).connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.4);
+
+      // Metallic click
+      const click = ctx.createOscillator();
+      const clickGain = ctx.createGain();
+      click.type = 'square';
+      click.frequency.setValueAtTime(2000, now + 0.15);
+      clickGain.gain.setValueAtTime(0.06, now + 0.15);
+      clickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+      click.connect(clickGain).connect(ctx.destination);
+      click.start(now + 0.15);
+      click.stop(now + 0.22);
+    } catch (_) { /* audio not available */ }
+  }
+
+  _playTurretFireSFX() {
+    try {
+      const ctx = this._getAudioCtx();
+      const now = ctx.currentTime;
+
+      // Short punchy shot — high-freq burst
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(800, now);
+      osc.frequency.exponentialRampToValueAtTime(200, now + 0.08);
+
+      gain.gain.setValueAtTime(0.08, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 1000;
+      filter.Q.value = 1;
+
+      osc.connect(filter).connect(gain).connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.12);
+    } catch (_) { /* audio not available */ }
   }
 
   // =====================================================================
@@ -1218,6 +2146,22 @@ export class PowerUpManager {
       s.car._shieldDamageReduction = 0;
       this._removeShield(i);
     }
+    // Clean up holo decoys
+    for (const h of this._holoDecoys) {
+      h.car.holoEvadeActive = false;
+      h.car._restoreCarOpacity();
+      this._cleanupHoloDecoy(h);
+    }
+    this._holoDecoys.length = 0;
+    // Clean up turrets + bullets
+    for (let i = this._activeTurrets.length - 1; i >= 0; i--) this._removeTurret(i);
+    for (let i = this._turretBullets.length - 1; i >= 0; i--) this._removeTurretBullet(i);
+    // Clean up repair VFX
+    for (const r of this._repairVFX) {
+      for (const p of r.particles) { this.scene.remove(p.mesh); p.mat.dispose(); }
+      this.scene.remove(r.glow); r.glowMat.dispose();
+    }
+    this._repairVFX.length = 0;
     // Clean up any running VFX
     for (const vfx of this._vfxObjects) {
       this._cleanupVFX(vfx);
@@ -1247,6 +2191,15 @@ export class PowerUpManager {
 
     for (let i = this._projectiles.length - 1; i >= 0; i--) this._removeProjectile(i);
     for (let i = this._activeShields.length - 1; i >= 0; i--) this._removeShield(i);
+    for (const h of this._holoDecoys) this._cleanupHoloDecoy(h);
+    this._holoDecoys.length = 0;
+    for (let i = this._activeTurrets.length - 1; i >= 0; i--) this._removeTurret(i);
+    for (let i = this._turretBullets.length - 1; i >= 0; i--) this._removeTurretBullet(i);
+    for (const r of this._repairVFX) {
+      for (const p of r.particles) { this.scene.remove(p.mesh); p.mat.dispose(); }
+      this.scene.remove(r.glow); r.glowMat.dispose();
+    }
+    this._repairVFX.length = 0;
     for (const vfx of this._vfxObjects) this._cleanupVFX(vfx);
     this._vfxObjects.length = 0;
   }

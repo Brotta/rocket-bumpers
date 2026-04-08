@@ -56,9 +56,10 @@ export class PhysicsWorld {
     const faces = [];
     faces.push([0, 1, 2, 3, 4, 5, 6, 7]);
     faces.push([15, 14, 13, 12, 11, 10, 9, 8]);
+    // Side faces — outward-pointing normals (CCW winding viewed from outside)
     for (let i = 0; i < sides; i++) {
       const next = (i + 1) % sides;
-      faces.push([i, next, next + sides, i + sides]);
+      faces.push([i, i + sides, next + sides, next]);
     }
 
     const shape = new CANNON.ConvexPolyhedron({ vertices: verts, faces });
@@ -93,9 +94,10 @@ export class PhysicsWorld {
     const faces = [];
     faces.push(Array.from({ length: sides }, (_, i) => i));
     faces.push(Array.from({ length: sides }, (_, i) => sides * 2 - 1 - i));
+    // Side faces — outward-pointing normals (CCW winding viewed from outside)
     for (let i = 0; i < sides; i++) {
       const next = (i + 1) % sides;
-      faces.push([i, next, next + sides, i + sides]);
+      faces.push([i, i + sides, next + sides, next]);
     }
 
     const shape = new CANNON.ConvexPolyhedron({ vertices: verts, faces });
@@ -139,9 +141,10 @@ export class PhysicsWorld {
       const faces = [];
       faces.push(Array.from({ length: sides }, (_, i) => i));
       faces.push(Array.from({ length: sides }, (_, i) => sides * 2 - 1 - i));
+      // Side faces — outward-pointing normals
       for (let i = 0; i < sides; i++) {
         const next = (i + 1) % sides;
-        faces.push([i, next, next + sides, i + sides]);
+        faces.push([i, i + sides, next + sides, next]);
       }
 
       const shape = new CANNON.ConvexPolyhedron({ vertices: verts, faces });

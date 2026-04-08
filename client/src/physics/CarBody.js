@@ -75,6 +75,8 @@ export class CarBody {
     this._shieldDamageReduction = 0; // 0..1 fraction of damage absorbed
     this.isInvincible = false;  // respawn invincibility
     this.hasRam = false;        // RAM ability active
+    this.holoEvadeActive = false; // HoloEvade decoys are live
+    this._holoOriginalMaterials = null; // cached originals for opacity restore
 
     // Fall guard — prevents multiple _handleFall calls for the same fall
     this._isFalling = false;
@@ -156,6 +158,8 @@ export class CarBody {
     this.hasShield = false;
     this._shieldDamageReduction = 0;
     this.hasRam = false;
+    this.holoEvadeActive = false;
+    this._restoreCarOpacity();
     this.lastHitBy = null;
     this._isStunned = false;
     this._stunTimer = 0;
@@ -204,6 +208,58 @@ export class CarBody {
       this.isEliminated = true;
     }
     return actual;
+  }
+
+  // ── HoloEvade opacity helpers ──────────────────────────────────────
+
+  /** Make car semi-transparent + cyan-tinted (called by PowerUpManager when HoloEvade activates). */
+  setCarOpacity(opacity) {
+    if (!this._holoOriginalMaterials) {
+      this._holoOriginalMaterials = [];
+      this.mesh.traverse((child) => {
+        if (child.isMesh && child.material) {
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          for (const mat of mats) {
+            this._holoOriginalMaterials.push({
+              mat,
+              transparent: mat.transparent,
+              opacity: mat.opacity,
+              depthWrite: mat.depthWrite,
+              emissiveHex: mat.emissive ? mat.emissive.getHex() : null,
+              emissiveIntensity: mat.emissiveIntensity ?? 0,
+            });
+          }
+        }
+      });
+    }
+    for (const entry of this._holoOriginalMaterials) {
+      entry.mat.transparent = true;
+      entry.mat.opacity = opacity;
+      entry.mat.depthWrite = opacity > 0.9;
+      // Cyan tint to match decoys — stronger at low opacity (active), fades as opacity restores
+      if (entry.mat.emissive) {
+        const tint = Math.max(0, 1 - opacity); // 1.0 at opacity=0, 0 at opacity=1
+        entry.mat.emissive.setHex(0x00ccff);
+        entry.mat.emissiveIntensity = 0.4 * tint;
+      }
+      entry.mat.needsUpdate = true;
+    }
+  }
+
+  /** Restore car to full opacity and original emissive. */
+  _restoreCarOpacity() {
+    if (!this._holoOriginalMaterials) return;
+    for (const entry of this._holoOriginalMaterials) {
+      entry.mat.transparent = entry.transparent;
+      entry.mat.opacity = entry.opacity;
+      entry.mat.depthWrite = entry.depthWrite;
+      if (entry.mat.emissive && entry.emissiveHex !== null) {
+        entry.mat.emissive.setHex(entry.emissiveHex);
+        entry.mat.emissiveIntensity = entry.emissiveIntensity;
+      }
+      entry.mat.needsUpdate = true;
+    }
+    this._holoOriginalMaterials = null;
   }
 
   // ── Controls (Drift-style kinematic model) ──────────────────────────

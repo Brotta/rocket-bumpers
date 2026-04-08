@@ -136,6 +136,9 @@ const PU_DISPLAY = {
   MISSILE:        { icon: '/assets/icons/Missile.png',       label: 'MISSILE' },
   HOMING_MISSILE: { icon: '/assets/icons/HomingMissile.png', label: 'HOMING' },
   SHIELD:         { icon: '/assets/icons/Shield.png',        label: 'SHIELD' },
+  REPAIR_KIT:     { icon: '/assets/icons/RepairKit.png',     label: 'REPAIR' },
+  HOLO_EVADE:     { icon: '/assets/icons/HoloEvade.png',     label: 'HOLO' },
+  AUTO_TURRET:    { icon: '/assets/icons/Turret.png',        label: 'TURRET' },
 };
 
 function setPowerUpHud(type) {

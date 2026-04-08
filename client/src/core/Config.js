@@ -746,6 +746,48 @@ export const POWERUPS = {
     damageReduction: 0.5,   // halves incoming damage
     duration: 5,            // seconds
   },
+  REPAIR_KIT: {
+    name: 'Repair Kit',
+    color: 0x44ff44,        // Bright green
+    icon: '/assets/icons/RepairKit.png',
+    heal: 30,               // instant HP restored (capped at maxHp)
+  },
+  HOLO_EVADE: {
+    name: 'Holo Evade',
+    color: 0x00ccff,        // Cyan
+    icon: '/assets/icons/HoloEvade.png',
+    duration: 1.0,          // seconds decoys are active
+    fadeOutTime: 0.3,        // seconds for decoys to fade after duration
+    decoyCount: 2,           // number of holographic copies
+    decoySpeedFactor: 1.0,   // decoys move at same speed as car
+    decoySpreadAngle: Math.PI / 2, // ±90° max spread from car forward
+    missileConfuseChance: 0.5, // 50% chance homing re-targets a decoy
+    carOpacity: 0.35,        // car transparency while active
+  },
+  AUTO_TURRET: {
+    name: 'Auto Turret',
+    color: 0xffaa00,        // Warm orange
+    icon: '/assets/icons/Turret.png',
+    duration: 6,            // seconds turret is active
+    fireRate: 0.8,          // seconds between shots
+    damage: 8,              // per bullet (low but sustained)
+    range: 25,              // target acquisition radius (u)
+    bulletSpeed: 35,        // projectile speed (u/s)
+    bulletLifetime: 1.5,    // seconds before bullet self-destructs
+    bulletRadius: 0.4,      // collision radius
+    knockback: 1.5,         // impulse on hit (very low)
+    turnRate: 4.0,          // turret yaw rotation speed (rad/s)
+  },
+};
+
+// ── Power-up spawn weights (higher = more common) ────────────────────
+export const POWERUP_WEIGHTS = {
+  MISSILE: 22,
+  HOMING_MISSILE: 18,
+  SHIELD: 18,
+  REPAIR_KIT: 18,
+  HOLO_EVADE: 12,
+  AUTO_TURRET: 12,
 };
 
 // ── Shield vs RAM ────────────────────────────────────────────────────

@@ -118,6 +118,10 @@ export async function buildCar(carType, playerColor) {
   // Normalize to target bounding box (includes 180° rotation to face -Z)
   _normalizeScale(group);
 
+  // Compute actual roof height for turret mounting (varies per car shape)
+  const _roofBox = new THREE.Box3().setFromObject(group);
+  group.userData.roofY = _roofBox.max.y;
+
   // Enable shadows — cars cast but do NOT receive directional shadows
   // (receiveShadow on car meshes causes self-shadowing artifacts: black triangles)
   group.traverse((child) => {

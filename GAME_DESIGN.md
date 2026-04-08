@@ -378,10 +378,12 @@ Spawn on 6 fixed pedestals. Respawn 8s after pickup. Max 1 held at a time.
 
 | Power-up | Color | Effect | Duration |
 |----------|-------|--------|----------|
-| **Rocket Boost** | Orange | 2× speed, fire trail damages others | 2s |
-| **Shockwave** | Blue | Radial pushback (15 units radius) | Instant |
-| **Shield** | Green | Immune to knockback, double mass | 4s |
-| **Magnet** | Purple | Pull nearby cars (8 unit radius) then release | 3s |
+| **Missile** | Orange | Fires a straight projectile (30 dmg, accelerates) | 4s lifetime |
+| **Homing Missile** | Pink | Fires a tracking missile (30 dmg, 2.8 rad/s turn) | 5s lifetime |
+| **Shield** | Green | 50% damage reduction | 5s |
+| **Repair Kit** | Bright Green | Heals 30 HP instantly (capped at max) | Instant |
+| **Holo Evade** | Cyan | Semi-transparent + 2 decoy copies in random directions. 50% chance to confuse homing missiles | 1s + 0.3s fade |
+| **Auto Turret** | Orange | Mounts a turret on car roof that auto-targets nearest enemy (8 dmg/shot, 0.8s fire rate, 25u range) | 6s |
 
 ### Round Structure
 1. **LOBBY** (5-30s): Players join, pick car, bots fill to 8

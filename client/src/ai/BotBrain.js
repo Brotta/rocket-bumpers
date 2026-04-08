@@ -448,6 +448,18 @@ export class BotBrain {
         // Activate defensively when under threat or low HP
         if (this._enemyChargingUs() || this._edgeDanger || this.carBody.hp < 40) this.powerUpManager.use(this.carBody);
         break;
+      case 'REPAIR_KIT':
+        // Use when damaged enough to benefit (don't waste at full HP)
+        if (this.carBody.hp <= this.carBody.maxHp - 20) this.powerUpManager.use(this.carBody);
+        break;
+      case 'HOLO_EVADE':
+        // Use when being chased by enemy or homing missile, or low HP under threat
+        if (this._enemyChargingUs() || this.carBody.hp < 50) this.powerUpManager.use(this.carBody);
+        break;
+      case 'AUTO_TURRET':
+        // Always beneficial — deploy ASAP (small human-like delay already in _powerupUseDelay)
+        this.powerUpManager.use(this.carBody);
+        break;
       default:
         if (this._powerupUseDelay > 3.0) this.powerUpManager.use(this.carBody);
     }
