@@ -348,6 +348,21 @@ export class DebugMode {
     panel.appendChild(puRow);
     this._addButton(panel, 'Spawn Power-up Box at Click', () => this._setSpawnerMode('powerup'));
 
+    // ── Glitch Bomb Tester ──
+    this._addSection(panel, 'GLITCH BOMB TESTER');
+    this._addButton(panel, 'Simulate Glitch on Self', () => {
+      const pm = this.game.powerUpManager;
+      if (pm) pm.applyGlitchToSelf();
+    });
+    this._addButton(panel, 'Give Glitch Bomb to Player', () => {
+      const lp = this.game.localPlayer;
+      const pm = this.game.powerUpManager;
+      if (lp && pm) {
+        pm._held.set(lp, 'GLITCH_BOMB');
+        pm._emit('pickup', { car: lp, type: 'GLITCH_BOMB', pedestalIndex: -1 });
+      }
+    });
+
     // ── Instant Elimination / Respawn ──
     this._addSection(panel, 'ELIMINATION / RESPAWN');
     this._addButton(panel, 'Eliminate Player', () => {

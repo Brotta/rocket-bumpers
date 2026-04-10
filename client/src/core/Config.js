@@ -778,6 +778,18 @@ export const POWERUPS = {
     knockback: 1.5,         // impulse on hit (very low)
     turnRate: 4.0,          // turret yaw rotation speed (rad/s)
   },
+  GLITCH_BOMB: {
+    name: 'Glitch Bomb',
+    color: 0x00ff41,        // Matrix green
+    icon: '/assets/icons/RetroBomb.png',
+    duration: 5,            // seconds glitch effect lasts on victims
+    blastRadius: 18,        // area of effect around detonation (u)
+    damage: 10,             // light damage on detonation
+    scanlineIntensity: 0.7, // CRT scanline opacity
+    rgbShiftAmount: 8,      // pixel offset for chromatic aberration
+    noiseIntensity: 0.4,    // static noise overlay opacity
+    tearFrequency: 3,       // screen tears per second
+  },
 };
 
 // ── Power-up spawn weights (higher = more common) ────────────────────
@@ -788,6 +800,7 @@ export const POWERUP_WEIGHTS = {
   REPAIR_KIT: 18,
   HOLO_EVADE: 12,
   AUTO_TURRET: 12,
+  GLITCH_BOMB: 6,           // Rare — powerful area denial
 };
 
 // ── Shield vs RAM ────────────────────────────────────────────────────

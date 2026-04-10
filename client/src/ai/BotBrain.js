@@ -181,6 +181,11 @@ export class BotBrain {
     this._applyThrottle(dt);
     this._tryUsePowerUp(dt);
 
+    // ── Glitch Bomb disruption — scrambles controls when affected ──
+    if (this.carBody.glitchBombActive) {
+      this._applyGlitchDisruption(dt);
+    }
+
     // NEVER be idle — if neither forward nor backward, drive forward
     if (!this.input.forward && !this.input.backward) {
       this.input.forward = true;
@@ -804,6 +809,43 @@ export class BotBrain {
     }
   }
 
+  // ── Glitch Bomb disruption ─────────────────────────────────────────
+
+  _applyGlitchDisruption(dt) {
+    // Simulate "corrupted controls" — the bot's input gets scrambled
+    // like a player struggling with a glitched screen
+
+    // Random steering flips (frequent — ~40% of frames)
+    if (Math.random() < 0.4) {
+      this.input.left = !this.input.left;
+      this.input.right = !this.input.right;
+    }
+
+    // Occasional full input freeze (brief moments of confusion)
+    if (Math.random() < 0.12) {
+      this.input.forward = false;
+      this.input.backward = false;
+      this.input.left = false;
+      this.input.right = false;
+    }
+
+    // Random backward bursts (panic)
+    if (Math.random() < 0.08) {
+      this.input.forward = false;
+      this.input.backward = true;
+    }
+
+    // Can't use abilities or power-ups while glitched
+    // (handled by not calling _tryUsePowerUp — but let's also block it here)
+    this._powerupUseDelay = 0;
+
+    // Reduced target acquisition — lose track of enemies
+    if (Math.random() < 0.15 && this._target) {
+      this._target = null;
+      this._enterState('ROAM');
+    }
+  }
+
   // ── Power-up usage ─────────────────────────────────────────────────
 
   _tryUsePowerUp(dt) {
@@ -842,6 +884,12 @@ export class BotBrain {
         break;
       case 'AUTO_TURRET':
         if (this._countNearby(25) >= 1) this.powerUpManager.use(this.carBody);
+        break;
+      case 'GLITCH_BOMB':
+        // Best value when multiple enemies are alive — chaos weapon
+        if (this._countNearby(20) >= 2 || (this._countNearby(30) >= 3 && this._threatLevel > 0.4)) {
+          this.powerUpManager.use(this.carBody);
+        }
         break;
       default:
         if (this._powerupUseDelay > 4.0) this.powerUpManager.use(this.carBody);

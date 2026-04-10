@@ -56,6 +56,7 @@ export class Game {
       this.sceneManager.scene,
       this.physicsWorld.world,
       () => this.carBodies,
+      () => this.localPlayer,
     );
     // Wire obstacle references for missile destruction
     this.powerUpManager.obstacleBodies = this.physicsWorld.obstacleBodies;

@@ -154,10 +154,11 @@ const _sharedMat = {
  * all VFX animated in the main update loop (no separate rAF chains).
  */
 export class PowerUpManager {
-  constructor(scene, world, getCarBodies) {
+  constructor(scene, world, getCarBodies, getLocalPlayer) {
     this.scene = scene;
     this.world = world;
     this.getCarBodies = getCarBodies;
+    this.getLocalPlayer = getLocalPlayer || (() => null);
 
     this._listeners = {};
     this._held = new Map();
@@ -178,6 +179,13 @@ export class PowerUpManager {
 
     // Active repair-kit VFX
     this._repairVFX = [];
+
+    // Active glitch effects (on cars hit by Glitch Bomb)
+    this._activeGlitchEffects = [];
+    // DOM overlay for local player glitch screen effect
+    this._glitchOverlay = null;
+    this._glitchNoiseCanvas = null;
+    this._glitchNoiseCtx = null;
 
     // Transient VFX (explosions, shatter chunks, dust clouds) — ticked in update()
     this._vfxObjects = [];
@@ -301,6 +309,9 @@ export class PowerUpManager {
 
     // ── Update repair-kit VFX ──
     this._updateRepairVFX(dt);
+
+    // ── Update glitch effects ──
+    this._updateGlitchEffects(dt);
 
     // ── Tick transient VFX (explosions, debris, dust) ──
     this._updateVFX(dt);
@@ -448,6 +459,7 @@ export class PowerUpManager {
       case 'REPAIR_KIT':     this._applyRepairKit(car);       break;
       case 'HOLO_EVADE':     this._activateHoloEvade(car);    break;
       case 'AUTO_TURRET':    this._deployTurret(car);          break;
+      case 'GLITCH_BOMB':    this._detonateGlitchBomb(car);    break;
     }
   }
 
@@ -1035,6 +1047,42 @@ export class PowerUpManager {
         vfx.flash.scale.setScalar(1.2 + t * 1.5);
         vfx.flashMat.opacity = 0.9 * (1 - t);
       }
+
+      if (vfx.type === 'glitch_pulse') {
+        const t = vfx.age / vfx.duration;
+        const blastR = POWERUPS.GLITCH_BOMB.blastRadius;
+
+        // Expanding rings
+        const ringScale = 1 + t * blastR;
+        vfx.ring.scale.setScalar(ringScale);
+        vfx.ringMat.opacity = Math.max(0, 0.9 * (1 - t));
+        vfx.ring2.scale.setScalar(ringScale * 0.7);
+        vfx.ring2Mat.opacity = Math.max(0, 0.7 * (1 - t * 1.3));
+
+        // Vertical oscillation on rings
+        vfx.ring.position.y = vfx.cy + Math.sin(vfx.age * 20) * 0.2;
+        vfx.ring2.position.y = vfx.cy + Math.sin(vfx.age * 25 + 1) * 0.15;
+
+        // Central flash
+        vfx.flash.scale.setScalar(3 + t * 6);
+        vfx.flashMat.opacity = Math.max(0, 1 - t * 2);
+
+        // Debris particles
+        for (const d of vfx.debrisItems) {
+          d.life -= dt;
+          if (d.life <= 0 && d.mesh.visible) {
+            d.mesh.visible = false;
+            continue;
+          }
+          d.mesh.position.x += d.vx * dt;
+          d.mesh.position.y += d.vy * dt;
+          d.mesh.position.z += d.vz * dt;
+          d.vy -= 8 * dt;
+          d.mesh.rotation.x += 12 * dt;
+          d.mesh.rotation.z += 8 * dt;
+          d.mat.opacity = Math.max(0, d.life / 0.8);
+        }
+      }
     }
   }
 
@@ -1056,6 +1104,16 @@ export class PowerUpManager {
     if (vfx.type === 'turret_flash') {
       this.scene.remove(vfx.flash);
       vfx.flashMat.dispose();
+    }
+    if (vfx.type === 'glitch_pulse') {
+      this.scene.remove(vfx.ring);
+      this.scene.remove(vfx.ring2);
+      this.scene.remove(vfx.flash);
+      this.scene.remove(vfx.debrisGroup);
+      vfx.ringMat.dispose();
+      vfx.ring2Mat.dispose();
+      vfx.flashMat.dispose();
+      for (const d of vfx.debrisItems) d.mat.dispose();
     }
   }
 
@@ -2005,6 +2063,578 @@ export class PowerUpManager {
   }
 
   // =====================================================================
+  //  GLITCH BOMB
+  // =====================================================================
+
+  /**
+   * Detonate Glitch Bomb — like Mario Kart's Blooper: an EMP pulse goes out
+   * and ALL other cars in the arena get a nasty CRT/glitch screen effect.
+   * The local player sees a full-screen overlay; bots get behavioral disruption.
+   */
+  _detonateGlitchBomb(car) {
+    const config = POWERUPS.GLITCH_BOMB;
+    const carBodies = this.getCarBodies();
+    const localPlayer = this.getLocalPlayer();
+
+    // ── VFX: expanding pulse wave from the caster ──
+    this._spawnGlitchPulseVFX(car);
+
+    // ── Apply glitch to all OTHER cars in blast radius ──
+    for (const target of carBodies) {
+      if (target === car || target.isEliminated) continue;
+      const dx = target.body.position.x - car.body.position.x;
+      const dz = target.body.position.z - car.body.position.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist > config.blastRadius) continue;
+
+      // Light damage
+      target.takeDamage(config.damage, car, false);
+      target.lastHitBy = { source: car, wasAbility: false, time: performance.now() };
+
+      // Apply glitch effect to this car
+      this._applyGlitchToTarget(target, car, config);
+    }
+
+    this._playGlitchBombSFX();
+    this._emit('used', { car, type: 'GLITCH_BOMB' });
+  }
+
+  _applyGlitchToTarget(target, attacker, config) {
+    // Remove existing glitch on this car if any
+    this._removeGlitchFromCar(target);
+
+    const localPlayer = this.getLocalPlayer();
+    const isLocal = target === localPlayer;
+
+    // Flag on the car for bot AI to read
+    target.glitchBombActive = true;
+    target._glitchBombTimer = config.duration;
+
+    // Store original materials for restoration
+    const origMaterials = [];
+    target.mesh.traverse((child) => {
+      if (child.isMesh && child.material) {
+        origMaterials.push({
+          mesh: child,
+          emissive: child.material.emissive ? child.material.emissive.clone() : null,
+          emissiveIntensity: child.material.emissiveIntensity || 0,
+        });
+      }
+    });
+
+    const entry = {
+      car: target,
+      attacker,
+      age: 0,
+      duration: config.duration,
+      origMaterials,
+      isLocal,
+      // Per-car jitter state
+      jitterTimer: 0,
+      jitterOffsetX: 0,
+      jitterOffsetZ: 0,
+    };
+
+    this._activeGlitchEffects.push(entry);
+
+    // If local player, show the CRT screen overlay
+    if (isLocal) {
+      this._showGlitchOverlay(config);
+    }
+
+    this._emit('powerup-hit', { attacker, victim: target, type: 'GLITCH_BOMB' });
+  }
+
+  /** Apply glitch directly to local player (for debug testing) */
+  applyGlitchToSelf() {
+    const localPlayer = this.getLocalPlayer();
+    if (!localPlayer) return;
+    const config = POWERUPS.GLITCH_BOMB;
+    this._applyGlitchToTarget(localPlayer, localPlayer, config);
+    this._playGlitchBombSFX();
+  }
+
+  _updateGlitchEffects(dt) {
+    for (let i = this._activeGlitchEffects.length - 1; i >= 0; i--) {
+      const g = this._activeGlitchEffects[i];
+      g.age += dt;
+
+      if (g.age >= g.duration || g.car.isEliminated) {
+        this._cleanupGlitchEffect(g);
+        this._activeGlitchEffects.splice(i, 1);
+        continue;
+      }
+
+      const t = g.age / g.duration; // 0→1 progress
+      const fadeOut = t > 0.7 ? 1 - (t - 0.7) / 0.3 : 1; // fade last 30%
+
+      // ── 3D car mesh: RGB color cycling + emissive flicker ──
+      g.jitterTimer += dt;
+      const glitchFreq = 8 + Math.sin(g.age * 3) * 4; // variable frequency
+      const glitchPhase = g.age * glitchFreq;
+
+      for (const om of g.origMaterials) {
+        if (!om.mesh.material || !om.mesh.material.emissive) continue;
+        // Cycle through glitch colors: green→magenta→cyan→white
+        const colorT = (glitchPhase * 2) % 4;
+        let r, gr, b;
+        if (colorT < 1) { r = 0; gr = 1; b = 0.25; }       // green
+        else if (colorT < 2) { r = 1; gr = 0; b = 1; }      // magenta
+        else if (colorT < 3) { r = 0; gr = 0.8; b = 1; }    // cyan
+        else { r = 1; gr = 1; b = 1; }                        // white flash
+
+        const intensity = (0.3 + Math.random() * 0.4) * fadeOut;
+        om.mesh.material.emissive.setRGB(r * intensity, gr * intensity, b * intensity);
+        om.mesh.material.emissiveIntensity = 0.5 + Math.random() * 1.5 * fadeOut;
+      }
+
+      // ── Positional jitter (subtle mesh vibration) ──
+      if (g.jitterTimer > 0.05 + Math.random() * 0.05) {
+        g.jitterTimer = 0;
+        const jitterStrength = 0.15 * fadeOut;
+        g.jitterOffsetX = (Math.random() - 0.5) * jitterStrength;
+        g.jitterOffsetZ = (Math.random() - 0.5) * jitterStrength;
+      }
+      // Apply jitter offset to visual mesh only (not physics)
+      if (g.car.mesh) {
+        g.car.mesh.position.x += g.jitterOffsetX;
+        g.car.mesh.position.z += g.jitterOffsetZ;
+      }
+
+      // ── Update DOM overlay for local player ──
+      if (g.isLocal && this._glitchOverlay) {
+        this._updateGlitchOverlay(g.age, g.duration, fadeOut);
+      }
+    }
+  }
+
+  _cleanupGlitchEffect(g) {
+    g.car.glitchBombActive = false;
+    g.car._glitchBombTimer = 0;
+
+    // Restore original materials
+    for (const om of g.origMaterials) {
+      if (!om.mesh.material || !om.mesh.material.emissive) continue;
+      if (om.emissive) om.mesh.material.emissive.copy(om.emissive);
+      else om.mesh.material.emissive.setRGB(0, 0, 0);
+      om.mesh.material.emissiveIntensity = om.emissiveIntensity;
+    }
+
+    // Remove jitter
+    // (mesh position is re-synced from physics every frame, so no manual reset needed)
+
+    // Remove DOM overlay if local
+    if (g.isLocal) {
+      this._hideGlitchOverlay();
+    }
+  }
+
+  _removeGlitchFromCar(car) {
+    for (let i = this._activeGlitchEffects.length - 1; i >= 0; i--) {
+      if (this._activeGlitchEffects[i].car === car) {
+        this._cleanupGlitchEffect(this._activeGlitchEffects[i]);
+        this._activeGlitchEffects.splice(i, 1);
+      }
+    }
+  }
+
+  /** Check if a car is currently glitched (used by BotBrain) */
+  isGlitched(car) {
+    return !!car.glitchBombActive;
+  }
+
+  // ── Glitch Bomb: Full-screen CRT overlay ──────────────────────────────
+
+  _showGlitchOverlay(config) {
+    if (this._glitchOverlay) this._hideGlitchOverlay();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'glitch-bomb-overlay';
+    overlay.style.cssText = `
+      position:fixed;top:0;left:0;width:100vw;height:100vh;
+      pointer-events:none;z-index:500;overflow:hidden;
+    `;
+
+    // ── Layer 1: CRT scanlines ──
+    const scanlines = document.createElement('div');
+    scanlines.className = 'glitch-scanlines';
+    scanlines.style.cssText = `
+      position:absolute;top:0;left:0;width:100%;height:100%;
+      background:repeating-linear-gradient(
+        0deg,
+        rgba(0,0,0,0.15) 0px,
+        rgba(0,0,0,0.15) 1px,
+        transparent 1px,
+        transparent 3px
+      );
+      opacity:${config.scanlineIntensity};
+      animation:glitch-scanline-scroll 0.1s linear infinite;
+    `;
+    overlay.appendChild(scanlines);
+
+    // ── Layer 2: RGB chromatic aberration (three offset colored layers) ──
+    const rgbShift = document.createElement('div');
+    rgbShift.className = 'glitch-rgb';
+    rgbShift.style.cssText = `
+      position:absolute;top:0;left:0;width:100%;height:100%;
+      pointer-events:none;
+    `;
+    // Red channel
+    const redLayer = document.createElement('div');
+    redLayer.style.cssText = `
+      position:absolute;top:0;left:-${config.rgbShiftAmount}px;width:100%;height:100%;
+      background:rgba(255,0,0,0.06);
+      mix-blend-mode:screen;
+      animation:glitch-rgb-red 0.15s ease-in-out infinite alternate;
+    `;
+    // Blue channel
+    const blueLayer = document.createElement('div');
+    blueLayer.style.cssText = `
+      position:absolute;top:0;left:${config.rgbShiftAmount}px;width:100%;height:100%;
+      background:rgba(0,0,255,0.06);
+      mix-blend-mode:screen;
+      animation:glitch-rgb-blue 0.12s ease-in-out infinite alternate;
+    `;
+    rgbShift.appendChild(redLayer);
+    rgbShift.appendChild(blueLayer);
+    overlay.appendChild(rgbShift);
+
+    // ── Layer 3: Static noise canvas ──
+    const noiseCanvas = document.createElement('canvas');
+    noiseCanvas.width = 256;
+    noiseCanvas.height = 256;
+    noiseCanvas.style.cssText = `
+      position:absolute;top:0;left:0;width:100%;height:100%;
+      opacity:${config.noiseIntensity};
+      mix-blend-mode:overlay;
+      image-rendering:pixelated;
+    `;
+    overlay.appendChild(noiseCanvas);
+    this._glitchNoiseCanvas = noiseCanvas;
+    this._glitchNoiseCtx = noiseCanvas.getContext('2d');
+
+    // ── Layer 4: Screen tear strips ──
+    const tearContainer = document.createElement('div');
+    tearContainer.className = 'glitch-tears';
+    tearContainer.style.cssText = `
+      position:absolute;top:0;left:0;width:100%;height:100%;
+      overflow:hidden;
+    `;
+    overlay.appendChild(tearContainer);
+    this._glitchTearContainer = tearContainer;
+
+    // ── Layer 5: VHS tracking line ──
+    const vhsLine = document.createElement('div');
+    vhsLine.className = 'glitch-vhs-line';
+    vhsLine.style.cssText = `
+      position:absolute;left:0;width:100%;height:3px;
+      background:linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.5) 30%, rgba(255,255,255,0.8) 50%, rgba(255,255,255,0.5) 70%, transparent 100%);
+      opacity:0.6;
+      animation:glitch-vhs-scan 2s linear infinite;
+      box-shadow:0 0 10px 2px rgba(0,255,65,0.3);
+    `;
+    overlay.appendChild(vhsLine);
+
+    // ── Layer 6: CRT vignette (curved edges) ──
+    const vignette = document.createElement('div');
+    vignette.style.cssText = `
+      position:absolute;top:0;left:0;width:100%;height:100%;
+      background:radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.5) 100%);
+      pointer-events:none;
+    `;
+    overlay.appendChild(vignette);
+
+    // ── Layer 7: Color inversion flash container ──
+    const flashLayer = document.createElement('div');
+    flashLayer.className = 'glitch-flash';
+    flashLayer.style.cssText = `
+      position:absolute;top:0;left:0;width:100%;height:100%;
+      background:rgba(0,255,65,0.12);
+      opacity:0;
+      mix-blend-mode:exclusion;
+    `;
+    overlay.appendChild(flashLayer);
+    this._glitchFlashLayer = flashLayer;
+
+    // ── Inject CSS animations ──
+    if (!document.getElementById('glitch-bomb-styles')) {
+      const style = document.createElement('style');
+      style.id = 'glitch-bomb-styles';
+      style.textContent = `
+        @keyframes glitch-scanline-scroll {
+          0% { transform: translateY(0); }
+          100% { transform: translateY(3px); }
+        }
+        @keyframes glitch-rgb-red {
+          0% { transform: translate(-6px, 1px); }
+          25% { transform: translate(-10px, -1px); }
+          50% { transform: translate(-4px, 2px); }
+          75% { transform: translate(-8px, 0px); }
+          100% { transform: translate(-5px, -1px); }
+        }
+        @keyframes glitch-rgb-blue {
+          0% { transform: translate(6px, -1px); }
+          25% { transform: translate(8px, 1px); }
+          50% { transform: translate(4px, -2px); }
+          75% { transform: translate(10px, 0px); }
+          100% { transform: translate(5px, 1px); }
+        }
+        @keyframes glitch-vhs-scan {
+          0% { top: -3px; }
+          100% { top: 100%; }
+        }
+        @keyframes glitch-tear-slide {
+          0% { transform: translateX(0); }
+          20% { transform: translateX(15px); }
+          40% { transform: translateX(-10px); }
+          60% { transform: translateX(8px); }
+          80% { transform: translateX(-5px); }
+          100% { transform: translateX(0); }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    document.body.appendChild(overlay);
+    this._glitchOverlay = overlay;
+    this._glitchTearTimer = 0;
+    this._glitchFlashTimer = 0;
+  }
+
+  _updateGlitchOverlay(age, duration, fadeOut) {
+    if (!this._glitchOverlay) return;
+
+    // ── Update noise canvas (random static) ──
+    const ctx = this._glitchNoiseCtx;
+    if (ctx) {
+      const w = 256, h = 256;
+      const imageData = ctx.createImageData(w, h);
+      const data = imageData.data;
+      // Sparse noise — only fill ~30% of pixels for performance
+      for (let i = 0; i < data.length; i += 4) {
+        if (Math.random() < 0.3) {
+          const v = Math.random() * 255;
+          data[i] = v;
+          data[i + 1] = v * (0.8 + Math.random() * 0.4);
+          data[i + 2] = v * (0.6 + Math.random() * 0.6);
+          data[i + 3] = Math.random() * 180;
+        }
+      }
+      ctx.putImageData(imageData, 0, 0);
+      this._glitchNoiseCanvas.style.opacity = (0.15 + Math.random() * 0.25) * fadeOut;
+    }
+
+    // ── Screen tear strips (random horizontal displacement bands) ──
+    this._glitchTearTimer += 1 / 60;
+    if (this._glitchTearTimer > 0.08 + Math.random() * 0.15) {
+      this._glitchTearTimer = 0;
+      const container = this._glitchTearContainer;
+      if (container) {
+        container.innerHTML = '';
+        const tearCount = Math.floor(1 + Math.random() * 3);
+        for (let t = 0; t < tearCount; t++) {
+          const strip = document.createElement('div');
+          const topPct = Math.random() * 100;
+          const heightPx = 2 + Math.random() * 20;
+          const shift = (Math.random() - 0.5) * 30 * fadeOut;
+          strip.style.cssText = `
+            position:absolute;top:${topPct}%;left:0;width:100%;height:${heightPx}px;
+            background:linear-gradient(90deg,
+              transparent ${Math.random()*10}%,
+              rgba(0,255,65,${0.08*fadeOut}) ${20+Math.random()*20}%,
+              rgba(255,0,255,${0.05*fadeOut}) ${60+Math.random()*20}%,
+              transparent ${90+Math.random()*10}%
+            );
+            transform:translateX(${shift}px) skewX(${(Math.random()-0.5)*5}deg);
+            animation:glitch-tear-slide ${0.05+Math.random()*0.1}s ease-in-out;
+          `;
+          container.appendChild(strip);
+        }
+      }
+    }
+
+    // ── Color inversion flash (random bursts) ──
+    this._glitchFlashTimer += 1 / 60;
+    if (this._glitchFlashTimer > 0.3 + Math.random() * 0.5) {
+      this._glitchFlashTimer = 0;
+      if (this._glitchFlashLayer && Math.random() < 0.4) {
+        const colors = ['rgba(0,255,65,0.15)', 'rgba(255,0,255,0.12)', 'rgba(0,200,255,0.1)', 'rgba(255,255,255,0.18)'];
+        this._glitchFlashLayer.style.background = colors[Math.floor(Math.random() * colors.length)];
+        this._glitchFlashLayer.style.opacity = fadeOut;
+        setTimeout(() => {
+          if (this._glitchFlashLayer) this._glitchFlashLayer.style.opacity = 0;
+        }, 50 + Math.random() * 80);
+      }
+    }
+
+    // ── Overall overlay fade-out in last 30% ──
+    if (this._glitchOverlay) {
+      this._glitchOverlay.style.opacity = fadeOut;
+    }
+  }
+
+  _hideGlitchOverlay() {
+    if (this._glitchOverlay && this._glitchOverlay.parentNode) {
+      this._glitchOverlay.parentNode.removeChild(this._glitchOverlay);
+    }
+    this._glitchOverlay = null;
+    this._glitchNoiseCanvas = null;
+    this._glitchNoiseCtx = null;
+    this._glitchTearContainer = null;
+    this._glitchFlashLayer = null;
+  }
+
+  // ── Glitch Bomb: detonation VFX (3D pulse wave) ───────────────────────
+
+  _spawnGlitchPulseVFX(car) {
+    const cx = car.body.position.x;
+    const cy = car.body.position.y + 0.5;
+    const cz = car.body.position.z;
+
+    // Expanding ring (torus)
+    const ringGeo = new THREE.TorusGeometry(1, 0.15, 6, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x00ff41, transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.position.set(cx, cy, cz);
+    ring.rotation.x = Math.PI / 2;
+    this.scene.add(ring);
+
+    // Second ring (magenta, slightly delayed feel)
+    const ring2Mat = new THREE.MeshBasicMaterial({
+      color: 0xff00ff, transparent: true, opacity: 0.7,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const ring2 = new THREE.Mesh(ringGeo, ring2Mat);
+    ring2.position.set(cx, cy, cz);
+    ring2.rotation.x = Math.PI / 2;
+    this.scene.add(ring2);
+
+    // Central flash
+    const flashMat = new THREE.SpriteMaterial({
+      map: _glowTexture, color: 0x00ff41,
+      transparent: true, opacity: 1,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const flash = new THREE.Sprite(flashMat);
+    flash.scale.setScalar(3);
+    flash.position.set(cx, cy, cz);
+    this.scene.add(flash);
+
+    // Glitch debris particles (small cubes flying outward)
+    const debrisGroup = new THREE.Group();
+    debrisGroup.position.set(cx, cy, cz);
+    const debrisItems = [];
+    const debrisGeo = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+    for (let d = 0; d < 16; d++) {
+      const angle = (d / 16) * Math.PI * 2 + Math.random() * 0.3;
+      const speed = 8 + Math.random() * 12;
+      const color = [0x00ff41, 0xff00ff, 0x00ccff, 0xffffff][d % 4];
+      const mat = new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(debrisGeo, mat);
+      mesh.position.set(0, 0, 0);
+      debrisGroup.add(mesh);
+      debrisItems.push({
+        mesh, mat,
+        vx: Math.cos(angle) * speed,
+        vy: 2 + Math.random() * 4,
+        vz: Math.sin(angle) * speed,
+        life: 0.4 + Math.random() * 0.4,
+      });
+    }
+    this.scene.add(debrisGroup);
+
+    this._vfxObjects.push({
+      type: 'glitch_pulse',
+      ring, ringMat, ring2, ring2Mat,
+      flash, flashMat,
+      debrisGroup, debrisItems,
+      cx, cy, cz,
+      age: 0,
+      duration: 1.2,
+    });
+  }
+
+  // ── Glitch Bomb: SFX ──────────────────────────────────────────────────
+
+  _playGlitchBombSFX() {
+    try {
+      const ctx = this._getAudioCtx();
+      const now = ctx.currentTime;
+
+      // ── Layer 1: Digital glitch sweep (descending saw) ──
+      const osc1 = ctx.createOscillator();
+      const gain1 = ctx.createGain();
+      const filter1 = ctx.createBiquadFilter();
+      osc1.type = 'sawtooth';
+      osc1.frequency.setValueAtTime(2000, now);
+      osc1.frequency.exponentialRampToValueAtTime(80, now + 0.4);
+      osc1.frequency.setValueAtTime(1500, now + 0.45);
+      osc1.frequency.exponentialRampToValueAtTime(60, now + 0.8);
+      filter1.type = 'bandpass';
+      filter1.frequency.value = 800;
+      filter1.Q.value = 2;
+      gain1.gain.setValueAtTime(0.15, now);
+      gain1.gain.linearRampToValueAtTime(0.2, now + 0.1);
+      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+      osc1.connect(filter1).connect(gain1).connect(ctx.destination);
+      osc1.start(now);
+      osc1.stop(now + 0.9);
+
+      // ── Layer 2: Bit-crush noise burst ──
+      const noiseLen = 0.6;
+      const noiseBuf = ctx.createBuffer(1, ctx.sampleRate * noiseLen | 0, ctx.sampleRate);
+      const noiseData = noiseBuf.getChannelData(0);
+      // Stepped noise (bit-crushed feel)
+      let held = 0;
+      for (let i = 0; i < noiseData.length; i++) {
+        if (i % 40 === 0) held = (Math.random() * 2 - 1);
+        noiseData[i] = held;
+      }
+      const noise = ctx.createBufferSource();
+      noise.buffer = noiseBuf;
+      const nGain = ctx.createGain();
+      const nFilter = ctx.createBiquadFilter();
+      nFilter.type = 'lowpass';
+      nFilter.frequency.setValueAtTime(3000, now);
+      nFilter.frequency.exponentialRampToValueAtTime(500, now + noiseLen);
+      nGain.gain.setValueAtTime(0.12, now);
+      nGain.gain.exponentialRampToValueAtTime(0.001, now + noiseLen);
+      noise.connect(nFilter).connect(nGain).connect(ctx.destination);
+      noise.start(now);
+
+      // ── Layer 3: Sub bass thud ──
+      const sub = ctx.createOscillator();
+      const subGain = ctx.createGain();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(60, now);
+      sub.frequency.exponentialRampToValueAtTime(25, now + 0.3);
+      subGain.gain.setValueAtTime(0.25, now);
+      subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+      sub.connect(subGain).connect(ctx.destination);
+      sub.start(now);
+      sub.stop(now + 0.4);
+
+      // ── Layer 4: EMP zap (high freq square burst) ──
+      const zap = ctx.createOscillator();
+      const zapGain = ctx.createGain();
+      zap.type = 'square';
+      zap.frequency.setValueAtTime(4000, now);
+      zap.frequency.exponentialRampToValueAtTime(200, now + 0.15);
+      zapGain.gain.setValueAtTime(0.06, now);
+      zapGain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      zap.connect(zapGain).connect(ctx.destination);
+      zap.start(now);
+      zap.stop(now + 0.2);
+    } catch (_) { /* audio not available */ }
+  }
+
+  // =====================================================================
   //  AUDIO (Web Audio API — procedural)
   // =====================================================================
 
@@ -2156,6 +2786,10 @@ export class PowerUpManager {
     // Clean up turrets + bullets
     for (let i = this._activeTurrets.length - 1; i >= 0; i--) this._removeTurret(i);
     for (let i = this._turretBullets.length - 1; i >= 0; i--) this._removeTurretBullet(i);
+    // Clean up glitch effects
+    for (const g of this._activeGlitchEffects) this._cleanupGlitchEffect(g);
+    this._activeGlitchEffects.length = 0;
+    this._hideGlitchOverlay();
     // Clean up repair VFX
     for (const r of this._repairVFX) {
       for (const p of r.particles) { this.scene.remove(p.mesh); p.mat.dispose(); }
@@ -2195,6 +2829,9 @@ export class PowerUpManager {
     this._holoDecoys.length = 0;
     for (let i = this._activeTurrets.length - 1; i >= 0; i--) this._removeTurret(i);
     for (let i = this._turretBullets.length - 1; i >= 0; i--) this._removeTurretBullet(i);
+    for (const g of this._activeGlitchEffects) this._cleanupGlitchEffect(g);
+    this._activeGlitchEffects.length = 0;
+    this._hideGlitchOverlay();
     for (const r of this._repairVFX) {
       for (const p of r.particles) { this.scene.remove(p.mesh); p.mat.dispose(); }
       this.scene.remove(r.glow); r.glowMat.dispose();
