@@ -46,14 +46,15 @@ export class DynamicHazards {
     if (this._callbacks[event]) this._callbacks[event].push(cb);
   }
 
-  /** Initialize audio — call after first user interaction (click/key) */
+  /** Initialize audio — no-op, AudioManager handles context creation globally */
   initAudio() {
-    this._audio.init();
+    // GeyserAudio now uses the centralized AudioManager.
+    // No per-system init needed.
   }
 
-  /** Resume audio context (browser autoplay policy) */
+  /** Resume audio context — no-op, AudioManager handles this globally */
   resumeAudio() {
-    this._audio.resume();
+    // Handled by AudioManager's visibility listener and gesture handler.
   }
 
   reset() {
@@ -73,11 +74,8 @@ export class DynamicHazards {
     this._updateEruptions(dt, carBodies);
     this._updateGeysers(dt, carBodies);
 
-    // Update audio listener position to local player (first car body)
-    if (carBodies.length > 0) {
-      const pos = carBodies[0].body.position;
-      this._audio.setListenerPosition(pos.x, pos.z);
-    }
+    // Listener position is now updated centrally by Game.js → audioManager.setListenerPosition()
+    // No per-system listener update needed here.
   }
 
   // ── Lava Pool (DPS damage) ────────────────────────────────────────────

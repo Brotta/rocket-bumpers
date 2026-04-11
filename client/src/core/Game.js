@@ -14,7 +14,9 @@ import { TireSmokeFX } from '../rendering/TireSmokeFX.js';
 import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, getSpawnPosition } from './Config.js';
 import { HealthBars } from '../ui/HealthBars.js';
 import { StunFX } from '../rendering/StunFX.js';
-import { engineAudio } from '../audio/EngineAudio.js';
+import { audioManager } from '../audio/AudioManager.js';
+import { sampleEngineAudio } from '../audio/SampleEngineAudio.js';
+import { getAllEngineSampleURLs } from '../audio/AudioConfig.js';
 import { DebugMode } from '../debug/DebugMode.js';
 
 const MAX_DT = 1 / 30; // cap delta to avoid spiral of death
@@ -218,6 +220,12 @@ export class Game {
 
     this._emit('playerSpawned', { carBody, carType });
 
+    // Pre-load engine audio samples while bots are spawning.
+    // Done here (not in start()) because setPlayer is already async and awaited
+    // by the caller — keeping start() synchronous avoids clock/timing issues.
+    audioManager.init();
+    await audioManager.preloadAll(getAllEngineSampleURLs());
+
     // Fill remaining slots with bots
     this.botManager.removeAll();
     this.nameTags.clear();
@@ -248,14 +256,10 @@ export class Game {
     this._clock.start();
     this._animate();
 
-    // Initialize audio (user has interacted by this point — safe for autoplay)
-    this.dynamicHazards.initAudio();
-    this.dynamicHazards.resumeAudio();
-    engineAudio.init();
-
-    // Add engine sounds for all existing cars
+    // Audio samples are already preloaded in setPlayer() (which is async and awaited).
+    // Add engine sounds for all existing cars now that samples are cached.
     for (const cb of this.carBodies) {
-      engineAudio.addCar(cb, cb === this.localPlayer);
+      sampleEngineAudio.addCar(cb, cb === this.localPlayer);
     }
 
     // Auto-start round after a short lobby
@@ -331,16 +335,17 @@ export class Game {
 
     // ── Fixed-timestep game logic ──
     if (this.gameState.isPlaying) {
-      // Save previous positions for render interpolation
-      for (const cb of this.carBodies) {
-        cb._prevPosX = cb.body.position.x;
-        cb._prevPosY = cb.body.position.y;
-        cb._prevPosZ = cb.body.position.z;
-        cb._prevYaw = cb._yaw;
-      }
-
       this._accumulator += frameDt;
       while (this._accumulator >= FIXED_DT) {
+        // Save previous positions INSIDE the loop so _prevPos is always
+        // exactly 1 step behind current — required for correct interpolation
+        // when 2+ steps run in a single frame.
+        for (const cb of this.carBodies) {
+          cb._prevPosX = cb.body.position.x;
+          cb._prevPosY = cb.body.position.y;
+          cb._prevPosZ = cb.body.position.z;
+          cb._prevYaw = cb._yaw;
+        }
         this._fixedUpdate(FIXED_DT);
         this._accumulator -= FIXED_DT;
       }
@@ -451,12 +456,12 @@ export class Game {
       }
     }
 
-    // Update engine audio (pitch follows speed, spatial attenuation for bots)
-    if (this.localPlayer) {
-      const lp = this.localPlayer.body.position;
-      engineAudio.setListenerPosition(lp.x, lp.z);
-    }
-    engineAudio.update(frameDt);
+    // Update audio systems (listener position = camera, engine crossfade, voice priorities)
+    // Use camera position as the audio listener — this way, free camera mode,
+    // spectator view, and any camera distance changes affect spatial audio correctly.
+    const cam = this.sceneManager.camera;
+    audioManager.setListenerPosition(cam.position.x, cam.position.z);
+    sampleEngineAudio.update(frameDt);
 
     // Camera — debug free cam / sync override / normal follow
     if (this.debug._freeCamActive) {
@@ -592,15 +597,15 @@ export class Game {
 
     this.carBodies.push(carBody);
 
-    // Start engine sound (if audio initialized)
-    engineAudio.addCar(carBody, playerId === 'local');
+    // Start engine sound (if audio initialized and samples loaded)
+    sampleEngineAudio.addCar(carBody, playerId === 'local');
 
     return carBody;
   }
 
   _removeCarBody(carBody) {
     // Stop engine sound
-    engineAudio.removeCar(carBody);
+    sampleEngineAudio.removeCar(carBody);
 
     this.sceneManager.scene.remove(carBody.mesh);
     this.physicsWorld.world.removeBody(carBody.body);
@@ -732,7 +737,7 @@ export class Game {
     setTimeout(() => {
       victim.mesh.visible = false;
       // Stop engine sound
-      engineAudio.removeCar(victim);
+      sampleEngineAudio.removeCar(victim);
     }, RESPAWN.deathCamDuration * 1000);
 
     this._emit('eliminated', { victim, killer, wasAbility });
@@ -790,6 +795,7 @@ export class Game {
 
       // Invalidate any pending power-up/ability timeouts and reset mass/speed
       victim.resetState();
+      sampleEngineAudio.resetCar(victim);
       const ability = this.abilities.get(victim);
       if (ability) ability.forceReset();
 
@@ -881,8 +887,10 @@ export class Game {
     this.dynamicHazards.reset();
 
     // Re-add engine sounds for all cars (some may have been removed on elimination)
+    // Also reset gear simulators so RPM starts from idle
     for (const cb of this.carBodies) {
-      engineAudio.addCar(cb, cb === this.localPlayer);
+      sampleEngineAudio.resetCar(cb);
+      sampleEngineAudio.addCar(cb, cb === this.localPlayer);
     }
 
     // Reposition all cars at octagon spawn points for new round

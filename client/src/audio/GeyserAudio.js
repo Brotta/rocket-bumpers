@@ -10,41 +10,22 @@
  *   • Active hiss: sustained steam/lava hiss with modulation
  *   • Cooldown sizzle: decaying crackle
  *
- * Spatialized: volume attenuates with distance from the listener (local player).
+ * Migrated to use the centralized AudioManager:
+ *  - Uses audioManager.ctx instead of creating its own AudioContext
+ *  - Connects to the SFX bus instead of its own master gain
+ *  - Uses audioManager for listener position and distance calculation
+ *  - Geyser voices near the player are registered as protected
+ *  - Lava eruption is always protected (global event)
  */
+
+import { audioManager } from './AudioManager.js';
+import { AUDIO_BUS, SPATIAL, PRIORITY, GEYSER_PROTECT_DISTANCE } from './AudioConfig.js';
 
 export class GeyserAudio {
   constructor() {
-    this._ctx = null; // lazily created AudioContext
-    this._master = null;
     this._activeNodes = new Map(); // slotIndex → { nodes... }
-    this._listenerPos = { x: 0, z: 0 };
-    this._initialized = false;
     this._maxDistance = 40; // beyond this distance, sound is silent
     this._refDistance = 5;  // distance at which volume is 1.0
-  }
-
-  /**
-   * Initialize AudioContext (must be called from a user gesture).
-   * Safe to call multiple times — only initializes once.
-   */
-  init() {
-    if (this._initialized) return;
-    try {
-      this._ctx = new (window.AudioContext || window.webkitAudioContext)();
-      this._master = this._ctx.createGain();
-      this._master.gain.value = 0.35; // master volume
-      this._master.connect(this._ctx.destination);
-      this._initialized = true;
-    } catch (e) {
-      console.warn('GeyserAudio: Web Audio not available', e);
-    }
-  }
-
-  /** Update listener position (call each frame with local player position) */
-  setListenerPosition(x, z) {
-    this._listenerPos.x = x;
-    this._listenerPos.z = z;
   }
 
   /**
@@ -52,21 +33,22 @@ export class GeyserAudio {
    * Returns 0–1 gain value using inverse-distance model.
    */
   _distanceGain(geyserX, geyserZ) {
-    const dx = geyserX - this._listenerPos.x;
-    const dz = geyserZ - this._listenerPos.z;
-    const dist = Math.sqrt(dx * dx + dz * dz);
-    if (dist >= this._maxDistance) return 0;
-    if (dist <= this._refDistance) return 1;
-    // Inverse distance falloff
-    return this._refDistance / dist;
+    return audioManager.distanceGain(
+      audioManager.distanceToListener(geyserX, geyserZ),
+      this._refDistance,
+      this._maxDistance,
+    );
   }
 
   // ── Warning phase: low rumble building in intensity ────────────────
   startWarning(slotIndex, x, z) {
-    if (!this._initialized) return;
+    if (!audioManager.isInitialized) return;
     this._stopSlot(slotIndex);
 
-    const ctx = this._ctx;
+    const ctx = audioManager.ctx;
+    const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
+    if (!ctx || !sfxBus) return;
+
     const gain = this._distanceGain(x, z);
     if (gain < 0.01) return; // too far, skip
 
@@ -115,14 +97,24 @@ export class GeyserAudio {
     filter.connect(volNode);
     lfo.connect(lfoGain);
     lfoGain.connect(volNode.gain);
-    volNode.connect(this._master);
+    volNode.connect(sfxBus);
 
     subOsc.connect(subGain);
-    subGain.connect(this._master);
+    subGain.connect(sfxBus);
 
     noise.start();
     subOsc.start();
     lfo.start();
+
+    // Register voice — protected if near player
+    const dist = audioManager.distanceToListener(x, z);
+    const isProtected = dist < GEYSER_PROTECT_DISTANCE;
+    const voiceId = audioManager.registerVoice({
+      priority: isProtected ? PRIORITY.GEYSER_NEAR : PRIORITY.GEYSER_MID,
+      category: AUDIO_BUS.SFX,
+      protected: isProtected,
+      gainNode: volNode,
+    });
 
     this._activeNodes.set(slotIndex, {
       phase: 'warning',
@@ -130,15 +122,19 @@ export class GeyserAudio {
       sources: [noise, subOsc, lfo],
       gains: [volNode, subGain, lfoGain],
       filters: [filter],
+      voiceId,
     });
   }
 
   // ── Eruption: explosive burst + sustained hiss ─────────────────────
   startEruption(slotIndex, x, z) {
-    if (!this._initialized) return;
+    if (!audioManager.isInitialized) return;
     this._stopSlot(slotIndex);
 
-    const ctx = this._ctx;
+    const ctx = audioManager.ctx;
+    const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
+    if (!ctx || !sfxBus) return;
+
     const gain = this._distanceGain(x, z);
     if (gain < 0.01) return;
 
@@ -163,7 +159,7 @@ export class GeyserAudio {
 
     burst.connect(burstFilter);
     burstFilter.connect(burstGain);
-    burstGain.connect(this._master);
+    burstGain.connect(sfxBus);
     burst.start();
 
     // ── Sub-bass impact thud ──
@@ -175,7 +171,7 @@ export class GeyserAudio {
     thudGain.gain.value = 0.4 * gain;
     thudGain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
     thud.connect(thudGain);
-    thudGain.connect(this._master);
+    thudGain.connect(sfxBus);
     thud.start();
     thud.stop(ctx.currentTime + 0.5);
 
@@ -210,16 +206,19 @@ export class GeyserAudio {
     hiss.connect(hissHP);
     hissHP.connect(hissLP);
     hissLP.connect(hissGain);
-    hissGain.connect(this._master);
+    hissGain.connect(sfxBus);
     hiss.start();
 
     // ── Crackle: random pops (simulated with short noise grains) ──
     const crackleGain = ctx.createGain();
     crackleGain.gain.value = 0.12 * gain;
-    crackleGain.connect(this._master);
+    crackleGain.connect(sfxBus);
 
     const crackleInterval = setInterval(() => {
-      if (ctx.state === 'closed') { clearInterval(crackleInterval); return; }
+      if (!audioManager.ctx || audioManager.ctx.state === 'closed') {
+        clearInterval(crackleInterval);
+        return;
+      }
       const popLen = 0.02 + Math.random() * 0.03;
       const pop = ctx.createBuffer(1, ctx.sampleRate * popLen, ctx.sampleRate);
       const popData = pop.getChannelData(0);
@@ -237,6 +236,16 @@ export class GeyserAudio {
       popSrc.start();
     }, 60 + Math.random() * 100);
 
+    // Register voice — protected if near player
+    const dist = audioManager.distanceToListener(x, z);
+    const isProtected = dist < GEYSER_PROTECT_DISTANCE;
+    const voiceId = audioManager.registerVoice({
+      priority: isProtected ? PRIORITY.GEYSER_NEAR : PRIORITY.GEYSER_MID,
+      category: AUDIO_BUS.SFX,
+      protected: isProtected,
+      gainNode: hissGain,
+    });
+
     this._activeNodes.set(slotIndex, {
       phase: 'active',
       x, z,
@@ -244,6 +253,7 @@ export class GeyserAudio {
       gains: [burstGain, hissGain, thudGain, crackleGain],
       filters: [burstFilter, hissHP, hissLP],
       intervals: [crackleInterval],
+      voiceId,
     });
 
     // Auto-cleanup after hiss ends
@@ -254,10 +264,13 @@ export class GeyserAudio {
 
   // ── Cooldown: sizzle/crackle decay ─────────────────────────────────
   startCooldown(slotIndex, x, z) {
-    if (!this._initialized) return;
+    if (!audioManager.isInitialized) return;
     this._stopSlot(slotIndex);
 
-    const ctx = this._ctx;
+    const ctx = audioManager.ctx;
+    const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
+    if (!ctx || !sfxBus) return;
+
     const gain = this._distanceGain(x, z);
     if (gain < 0.01) return;
 
@@ -281,7 +294,7 @@ export class GeyserAudio {
 
     sizzle.connect(sizzleHP);
     sizzleHP.connect(sizzleGain);
-    sizzleGain.connect(this._master);
+    sizzleGain.connect(sfxBus);
     sizzle.start();
 
     this._activeNodes.set(slotIndex, {
@@ -290,6 +303,7 @@ export class GeyserAudio {
       sources: [sizzle],
       gains: [sizzleGain],
       filters: [sizzleHP],
+      voiceId: null,
     });
 
     // Auto-cleanup
@@ -304,10 +318,12 @@ export class GeyserAudio {
 
   // ── Eruption warning: deep rumble building over 2 seconds ─────────
   playEruptionWarning() {
-    if (!this._initialized) return;
+    if (!audioManager.isInitialized) return;
     this._stopSlot('eruption-warning');
 
-    const ctx = this._ctx;
+    const ctx = audioManager.ctx;
+    const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
+    if (!ctx || !sfxBus) return;
 
     // Deep rumble noise
     const bufferSize = ctx.sampleRate * 2.5;
@@ -363,32 +379,43 @@ export class GeyserAudio {
     filter.connect(volNode);
     lfo.connect(lfoGain);
     lfoGain.connect(volNode.gain);
-    volNode.connect(this._master);
+    volNode.connect(sfxBus);
     subOsc.connect(subGain);
-    subGain.connect(this._master);
+    subGain.connect(sfxBus);
     subOsc2.connect(subGain2);
-    subGain2.connect(this._master);
+    subGain2.connect(sfxBus);
 
     noise.start();
     subOsc.start();
     subOsc2.start();
     lfo.start();
 
+    // Lava eruption warning is ALWAYS protected (global event)
+    const voiceId = audioManager.registerVoice({
+      priority: PRIORITY.LAVA_ERUPTION,
+      category: AUDIO_BUS.SFX,
+      protected: true,
+      gainNode: volNode,
+    });
+
     this._activeNodes.set('eruption-warning', {
       phase: 'eruption-warning',
       sources: [noise, subOsc, subOsc2, lfo],
       gains: [volNode, subGain, subGain2, lfoGain],
       filters: [filter],
+      voiceId,
     });
   }
 
   // ── Eruption blast: massive explosion + aftermath ──────────────────
   playEruptionBlast() {
-    if (!this._initialized) return;
+    if (!audioManager.isInitialized) return;
     this._stopSlot('eruption-warning');
     this._stopSlot('eruption-blast');
 
-    const ctx = this._ctx;
+    const ctx = audioManager.ctx;
+    const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
+    if (!ctx || !sfxBus) return;
 
     // ── Layer 1: massive impact thud ──
     const thud = ctx.createOscillator();
@@ -399,7 +426,7 @@ export class GeyserAudio {
     thudGain.gain.value = 0.65;
     thudGain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.8);
     thud.connect(thudGain);
-    thudGain.connect(this._master);
+    thudGain.connect(sfxBus);
     thud.start();
     thud.stop(ctx.currentTime + 1.0);
 
@@ -424,7 +451,7 @@ export class GeyserAudio {
 
     burst.connect(burstBP);
     burstBP.connect(burstGain);
-    burstGain.connect(this._master);
+    burstGain.connect(sfxBus);
     burst.start();
 
     // ── Layer 3: mid rumble tail (fading roar) ──
@@ -449,19 +476,19 @@ export class GeyserAudio {
 
     roar.connect(roarLP);
     roarLP.connect(roarGain);
-    roarGain.connect(this._master);
+    roarGain.connect(sfxBus);
     roar.start();
 
     // ── Layer 4: debris crackle (falling rock sounds) ──
     const crackleGain = ctx.createGain();
     crackleGain.gain.value = 0.18;
-    crackleGain.connect(this._master);
+    crackleGain.connect(sfxBus);
 
     let crackleCount = 0;
     const maxCrackles = 20;
     const crackleInterval = setInterval(() => {
       crackleCount++;
-      if (ctx.state === 'closed' || crackleCount > maxCrackles) {
+      if (!audioManager.ctx || audioManager.ctx.state === 'closed' || crackleCount > maxCrackles) {
         clearInterval(crackleInterval);
         return;
       }
@@ -482,12 +509,21 @@ export class GeyserAudio {
       popSrc.start();
     }, 80 + Math.random() * 120);
 
+    // Lava eruption blast is ALWAYS protected (global event)
+    const voiceId = audioManager.registerVoice({
+      priority: PRIORITY.LAVA_ERUPTION,
+      category: AUDIO_BUS.SFX,
+      protected: true,
+      gainNode: roarGain,
+    });
+
     this._activeNodes.set('eruption-blast', {
       phase: 'eruption-blast',
       sources: [thud, burst, roar],
       gains: [thudGain, burstGain, roarGain, crackleGain],
       filters: [burstBP, roarLP],
       intervals: [crackleInterval],
+      voiceId,
     });
 
     // Auto-cleanup
@@ -515,6 +551,12 @@ export class GeyserAudio {
     for (const iv of entry.intervals || []) {
       clearInterval(iv);
     }
+
+    // Unregister voice
+    if (entry.voiceId != null) {
+      audioManager.unregisterVoice(entry.voiceId);
+    }
+
     this._activeNodes.delete(slotIndex);
   }
 
@@ -525,17 +567,7 @@ export class GeyserAudio {
     }
   }
 
-  /** Resume AudioContext after user gesture (browser autoplay policy) */
-  resume() {
-    if (this._ctx && this._ctx.state === 'suspended') {
-      this._ctx.resume();
-    }
-  }
-
   dispose() {
     this.stopAll();
-    if (this._ctx && this._ctx.state !== 'closed') {
-      this._ctx.close();
-    }
   }
 }

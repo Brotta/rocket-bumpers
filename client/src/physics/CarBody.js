@@ -624,5 +624,9 @@ export class CarBody {
     this.mesh.position.set(x, y - 0.55, z);
     this.body.quaternion.setFromEuler(0, this._yaw, 0);
     this.mesh.quaternion.copy(this.body.quaternion);
+
+    // Initialize _visualQuat to match so syncMesh doesn't snap back to stale rotation
+    this._visualQuat.copy(this.body.quaternion);
+    this._groundNormal.set(0, 1, 0);
   }
 }

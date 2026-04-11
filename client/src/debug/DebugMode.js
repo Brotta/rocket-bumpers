@@ -2,7 +2,12 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { CAR_FEEL, DAMAGE, OBSTACLE_STUN, ARENA, PHYSICS, CAR_ORDER, CARS, POWERUPS, POWERUP_WEIGHTS, GAME_STATES, COLLISION_GROUPS, BOTS, PLAYERS, getSpawnPosition } from '../core/Config.js';
 import { AbilitySystem } from '../physics/AbilitySystem.js';
+import { CarBody } from '../physics/CarBody.js';
+import { buildCar } from '../rendering/CarFactory.js';
 import { PERSONALITIES, randomPersonality } from '../ai/BotPersonalities.js';
+import { sampleEngineAudio } from '../audio/SampleEngineAudio.js';
+import { audioManager } from '../audio/AudioManager.js';
+import { AUDIO_BUS, AUDIO_VOLUMES, SPATIAL, GEAR_DEFAULTS, RPM_CROSSFADE_FRACTIONS, CAR_ENGINE_PROFILES } from '../audio/AudioConfig.js';
 
 /**
  * DebugMode — all-in-one debug overlay for Rocket Bumpers.
@@ -129,6 +134,10 @@ export class DebugMode {
     // ── Power-up spawner ──
     this._selectedPowerupType = 'RANDOM';
 
+    // ── Audio debug ──
+    this._audioDebugActive = false;
+    this._audioDebugHUD = null;
+
     // ── UI ──
     this._panel = null;
     this._buildUI();
@@ -160,7 +169,8 @@ export class DebugMode {
   update() {
     if (!this.enabled && !this._syncActive && !this._sandboxActive
         && !this._freeCamActive && !this._aiVizActive && !this._perfStatsActive
-        && !this._collisionLogActive && !this._physicsOverlayActive) return;
+        && !this._collisionLogActive && !this._physicsOverlayActive
+        && !this._audioDebugActive) return;
 
     // God mode
     if (this._godMode && this.game.localPlayer) {
@@ -203,6 +213,11 @@ export class DebugMode {
     // Free camera
     if (this._freeCamActive) {
       this._updateFreeCamera();
+    }
+
+    // Audio debug HUD
+    if (this._audioDebugActive) {
+      this._updateAudioDebugHUD();
     }
 
     // Info display
@@ -292,7 +307,32 @@ export class DebugMode {
     this._addSection(panel, 'COLLISION LOG');
     this._addToggle(panel, 'Show Collision Log', false, (v) => this._setCollisionLog(v));
 
-    // ── Sandbox Mode ──
+    // ── Swap Car ──
+    this._addSection(panel, 'SWAP CAR');
+    this._swapCarLabel = document.createElement('div');
+    this._swapCarLabel.style.cssText = 'color:#0f0;font-size:11px;margin:2px 0;text-align:center;';
+    this._swapCarLabel.textContent = `Current: ${this.game.localPlayer?.carType || '?'}`;
+    panel.appendChild(this._swapCarLabel);
+    {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:4px;margin:3px 0;';
+      const prevBtn = document.createElement('button');
+      prevBtn.textContent = '◀ Prev';
+      prevBtn.style.cssText = `flex:1;padding:4px;background:#0f02;color:#0f0;border:1px solid #0f04;border-radius:3px;cursor:pointer;font:11px 'Courier New',monospace;`;
+      prevBtn.addEventListener('mouseenter', () => { prevBtn.style.background = '#0f04'; });
+      prevBtn.addEventListener('mouseleave', () => { prevBtn.style.background = '#0f02'; });
+      prevBtn.addEventListener('click', () => this._swapCar(-1));
+      const nextBtn = document.createElement('button');
+      nextBtn.textContent = 'Next ▶';
+      nextBtn.style.cssText = `flex:1;padding:4px;background:#0f02;color:#0f0;border:1px solid #0f04;border-radius:3px;cursor:pointer;font:11px 'Courier New',monospace;`;
+      nextBtn.addEventListener('mouseenter', () => { nextBtn.style.background = '#0f04'; });
+      nextBtn.addEventListener('mouseleave', () => { nextBtn.style.background = '#0f02'; });
+      nextBtn.addEventListener('click', () => this._swapCar(1));
+      row.appendChild(prevBtn);
+      row.appendChild(nextBtn);
+      panel.appendChild(row);
+    }
+
     this._addSection(panel, 'SANDBOX MODE');
     this._addButton(panel, 'Enter Sandbox (flat, no enemies, no timer)', () => this._enterSandbox());
     this._addButton(panel, 'Exit Sandbox', () => this._exitSandbox());
@@ -431,6 +471,54 @@ export class DebugMode {
     this._addButton(panel, 'Apply Forward Impulse (20)', () => this._applyImpulse(20));
     this._addButton(panel, 'Apply Forward Impulse (40)', () => this._applyImpulse(40));
 
+    // ── Audio Debug ──
+    this._addSection(panel, 'AUDIO DEBUG');
+    this._addToggle(panel, 'Audio Debug HUD (on-screen)', false, (v) => this._setAudioDebug(v));
+
+    // Gear simulation sliders (live tweak)
+    this._addSlider(panel, 'shiftDropFrac', 0.2, 0.8, GEAR_DEFAULTS.shiftDropFrac, 0.05,
+      (v) => { GEAR_DEFAULTS.shiftDropFrac = v; });
+    this._addSlider(panel, 'shiftDuration', 0.02, 0.5, GEAR_DEFAULTS.shiftDuration, 0.01,
+      (v) => { GEAR_DEFAULTS.shiftDuration = v; });
+    this._addSlider(panel, 'rpmSmoothingUp', 1, 20, GEAR_DEFAULTS.rpmSmoothingUp, 0.5,
+      (v) => { GEAR_DEFAULTS.rpmSmoothingUp = v; });
+    this._addSlider(panel, 'rpmSmoothingDown', 1, 20, GEAR_DEFAULTS.rpmSmoothingDown, 0.5,
+      (v) => { GEAR_DEFAULTS.rpmSmoothingDown = v; });
+    this._addSlider(panel, 'throttleSmoothUp', 1, 20, GEAR_DEFAULTS.throttleSmoothingUp, 0.5,
+      (v) => { GEAR_DEFAULTS.throttleSmoothingUp = v; });
+    this._addSlider(panel, 'throttleSmoothDown', 1, 20, GEAR_DEFAULTS.throttleSmoothingDown, 0.5,
+      (v) => { GEAR_DEFAULTS.throttleSmoothingDown = v; });
+    this._addSlider(panel, 'downshiftHysteresis', 0, 0.15, GEAR_DEFAULTS.downshiftHysteresis, 0.01,
+      (v) => { GEAR_DEFAULTS.downshiftHysteresis = v; });
+
+    // RPM crossfade fractions
+    this._addSlider(panel, 'rpmCrossfade lowFrac', 0.1, 0.5, RPM_CROSSFADE_FRACTIONS.lowFrac, 0.05,
+      (v) => { RPM_CROSSFADE_FRACTIONS.lowFrac = v; });
+    this._addSlider(panel, 'rpmCrossfade highFrac', 0.4, 0.9, RPM_CROSSFADE_FRACTIONS.highFrac, 0.05,
+      (v) => { RPM_CROSSFADE_FRACTIONS.highFrac = v; });
+
+    // Volume controls
+    this._addSlider(panel, 'ENGINE bus vol', 0, 1, AUDIO_VOLUMES[AUDIO_BUS.ENGINE], 0.05,
+      (v) => { AUDIO_VOLUMES[AUDIO_BUS.ENGINE] = v; audioManager.setBusVolume(AUDIO_BUS.ENGINE, v); });
+    this._addSlider(panel, 'SFX bus vol', 0, 1, AUDIO_VOLUMES[AUDIO_BUS.SFX], 0.05,
+      (v) => { AUDIO_VOLUMES[AUDIO_BUS.SFX] = v; audioManager.setBusVolume(AUDIO_BUS.SFX, v); });
+    this._addSlider(panel, 'MUSIC bus vol', 0, 1, AUDIO_VOLUMES[AUDIO_BUS.MUSIC], 0.05,
+      (v) => { AUDIO_VOLUMES[AUDIO_BUS.MUSIC] = v; audioManager.setBusVolume(AUDIO_BUS.MUSIC, v); });
+    this._addSlider(panel, 'Master vol', 0, 1, AUDIO_VOLUMES.master, 0.05,
+      (v) => { AUDIO_VOLUMES.master = v; audioManager.setMasterVolume(v); });
+    this._addSlider(panel, 'localBoost', 0, 3, SPATIAL.localBoost, 0.1,
+      (v) => { SPATIAL.localBoost = v; });
+
+    // Spatial audio
+    this._addSlider(panel, 'spatial refDist', 1, 20, SPATIAL.refDistance, 1,
+      (v) => { SPATIAL.refDistance = v; });
+    this._addSlider(panel, 'spatial maxDist', 10, 100, SPATIAL.maxDistance, 5,
+      (v) => { SPATIAL.maxDistance = v; });
+    this._addSlider(panel, 'LOD full dist', 5, 40, SPATIAL.lodFull, 5,
+      (v) => { SPATIAL.lodFull = v; });
+    this._addSlider(panel, 'LOD medium dist', 10, 60, SPATIAL.lodMedium, 5,
+      (v) => { SPATIAL.lodMedium = v; });
+
     // ── Info Display ──
     this._addSection(panel, 'PLAYER STATE');
     this._infoDisplay = document.createElement('div');
@@ -505,9 +593,55 @@ export class DebugMode {
 
     document.body.appendChild(panel);
     this._panel = panel;
+    this._makeDraggable(panel);
   }
 
   // ── UI helpers ──
+
+  /**
+   * Make a fixed-position element draggable by clicking and dragging anywhere on it.
+   * Pointer events are re-enabled on the element so interactive children (sliders, checkboxes) still work.
+   */
+  _makeDraggable(el) {
+    let dragging = false;
+    let startX = 0, startY = 0, origLeft = 0, origTop = 0;
+
+    const onPointerDown = (e) => {
+      // Don't drag when interacting with inputs
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'BUTTON') return;
+
+      dragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      const rect = el.getBoundingClientRect();
+      origLeft = rect.left;
+      origTop = rect.top;
+      el.style.cursor = 'grabbing';
+      e.preventDefault();
+    };
+
+    const onPointerMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      // Switch to left/top positioning (clear right/bottom)
+      el.style.left = (origLeft + dx) + 'px';
+      el.style.top = (origTop + dy) + 'px';
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+    };
+
+    const onPointerUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      el.style.cursor = '';
+    };
+
+    el.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+  }
 
   _addSection(parent, title) {
     const el = document.createElement('div');
@@ -601,6 +735,133 @@ export class DebugMode {
       }
     }
     this._infoDisplay.textContent = text;
+  }
+
+  // =====================================================================
+  //  AUDIO DEBUG
+  // =====================================================================
+
+  _setAudioDebug(on) {
+    this._audioDebugActive = on;
+    if (on) {
+      if (!this._audioDebugHUD) {
+        const hud = document.createElement('div');
+        hud.style.cssText = `
+          position:fixed; top:50%; right:16px; transform:translateY(-50%);
+          z-index:1000;
+          background:rgba(0,0,0,0.88); color:#0f0; font-family:'Courier New',monospace;
+          font-size:11px; padding:10px 14px; border-radius:6px;
+          white-space:pre; line-height:1.6;
+          border:1px solid #0f0; min-width:340px;
+          user-select:none; max-height:90vh; overflow-y:auto;
+        `;
+        document.body.appendChild(hud);
+        this._makeDraggable(hud);
+        // After first drag, clear transform so left/top positioning works cleanly
+        hud.addEventListener('pointerdown', () => { hud.style.transform = 'none'; }, { once: true });
+        this._audioDebugHUD = hud;
+      }
+      this._audioDebugHUD.style.display = 'block';
+    } else if (this._audioDebugHUD) {
+      this._audioDebugHUD.style.display = 'none';
+    }
+  }
+
+  _updateAudioDebugHUD() {
+    if (!this._audioDebugHUD) return;
+    const lp = this.game.localPlayer;
+    if (!lp) { this._audioDebugHUD.textContent = 'No local player'; return; }
+
+    // Get engine voice data from sampleEngineAudio
+    const voice = sampleEngineAudio._engines.get(lp);
+    if (!voice) { this._audioDebugHUD.textContent = 'No engine voice for local player'; return; }
+
+    const { gearSim, layers, carGain, profile } = voice;
+    const rpm = gearSim.rpm;
+    const throttle = gearSim.throttle;
+    const gear = gearSim.gear;
+    const totalGears = profile.gears.length;
+
+    // Speed info
+    const absSpeed = Math.abs(lp._currentSpeed);
+    const effectiveMax = Math.max(lp.maxSpeed * lp.speedMultiplier, 1);
+    const speedFrac = Math.min(absSpeed / effectiveMax, 1);
+
+    // RPM bar (visual)
+    const rpmFrac = (rpm - profile.idleRPM) / (profile.redlineRPM - profile.idleRPM);
+    const rpmBarLen = 25;
+    const rpmFilled = Math.round(rpmFrac * rpmBarLen);
+    const rpmBar = '[' + '#'.repeat(rpmFilled) + '-'.repeat(rpmBarLen - rpmFilled) + ']';
+
+    // Throttle bar
+    const thrBarLen = 15;
+    const thrFilled = Math.round(throttle * thrBarLen);
+    const thrBar = '[' + '#'.repeat(thrFilled) + '-'.repeat(thrBarLen - thrFilled) + ']';
+
+    // Per-layer gains and detune
+    const layerKeys = ['on_low', 'off_low', 'on_high', 'off_high'];
+    let layerInfo = '';
+    for (const key of layerKeys) {
+      const layer = layers[key];
+      if (!layer) {
+        layerInfo += `  ${key.padEnd(9)}: [NO SAMPLE]\n`;
+        continue;
+      }
+      const g = layer.gainNode.gain.value;
+      const d = layer.source.detune.value;
+      const active = g > 0.001 ? '\x1b[32m*\x1b[0m' : ' ';
+      // Use simple chars for active indicator
+      const indicator = g > 0.001 ? '>>>' : '   ';
+      layerInfo += `  ${indicator} ${key.padEnd(9)}: gain=${g.toFixed(3)}  detune=${d.toFixed(0)}c  (rec@${layer.sampleRPM}rpm)\n`;
+    }
+
+    // RPM crossfade thresholds for this car
+    const rpmRange = profile.redlineRPM - profile.idleRPM;
+    const crossLow = profile.idleRPM + RPM_CROSSFADE_FRACTIONS.lowFrac * rpmRange;
+    const crossHigh = profile.idleRPM + RPM_CROSSFADE_FRACTIONS.highFrac * rpmRange;
+
+    // Gear boundaries
+    let gearBounds = '';
+    for (let i = 0; i < profile.gears.length; i++) {
+      const topSpeed = (profile.gears[i].maxSpeedFrac * effectiveMax).toFixed(1);
+      const isCurrent = i === gearSim._currentGear;
+      gearBounds += isCurrent ? `[G${i + 1}:${topSpeed}]` : ` G${i + 1}:${topSpeed} `;
+    }
+
+    // Shift state
+    const shiftState = gearSim._shiftTimer > 0
+      ? `SHIFTING (${gearSim._shiftTimer.toFixed(3)}s left, ${gearSim._shiftFromRPM.toFixed(0)}->${gearSim._shiftTargetRPM.toFixed(0)})`
+      : 'idle';
+
+    // Camera/listener distance
+    const camDist = audioManager.distanceToListener(lp.body.position.x, lp.body.position.z);
+
+    // Voice count
+    const totalVoices = audioManager._voices.size;
+
+    const text =
+      `=== AUDIO DEBUG === ${lp.carType} (${profile.sampleSet})\n` +
+      `\n` +
+      `SPEED: ${absSpeed.toFixed(1)}/${effectiveMax.toFixed(1)} u/s (${(speedFrac * 100).toFixed(1)}%)\n` +
+      `GEAR:  ${gear}/${totalGears}   ${gearBounds}\n` +
+      `SHIFT: ${shiftState}\n` +
+      `RPM:   ${rpm.toFixed(0)} ${rpmBar} (${profile.idleRPM}-${profile.redlineRPM})\n` +
+      `THRTL: ${throttle.toFixed(3)} ${thrBar}  accelInput=${lp._accelInput}\n` +
+      `\n` +
+      `RPM CROSSFADE: low=${crossLow.toFixed(0)} high=${crossHigh.toFixed(0)}\n` +
+      `\n` +
+      `LAYERS:\n` +
+      layerInfo +
+      `\n` +
+      `CAR GAIN:  ${carGain.gain.value.toFixed(3)}  (localBoost=${SPATIAL.localBoost})\n` +
+      `CAM DIST:  ${camDist.toFixed(1)}u  (ref=${SPATIAL.refDistance} max=${SPATIAL.maxDistance})\n` +
+      `VOICES:    ${totalVoices} registered\n` +
+      `\n` +
+      `GEAR PARAMS: drop=${GEAR_DEFAULTS.shiftDropFrac} dur=${GEAR_DEFAULTS.shiftDuration}s\n` +
+      `RPM SMOOTH:  up=${GEAR_DEFAULTS.rpmSmoothingUp} dn=${GEAR_DEFAULTS.rpmSmoothingDown}\n` +
+      `THR SMOOTH:  up=${GEAR_DEFAULTS.throttleSmoothingUp} dn=${GEAR_DEFAULTS.throttleSmoothingDown}`;
+
+    this._audioDebugHUD.textContent = text;
   }
 
   // =====================================================================
@@ -804,6 +1065,74 @@ export class DebugMode {
     lp._internalVelZ = lp.body.velocity.z;
     lp._lastSetVelX = lp.body.velocity.x;
     lp._lastSetVelZ = lp.body.velocity.z;
+  }
+
+  // =====================================================================
+  //  SWAP CAR (cycle through car types in-place)
+  // =====================================================================
+
+  async _swapCar(direction) {
+    const lp = this.game.localPlayer;
+    if (!lp) return;
+
+    // Find current index in CAR_ORDER
+    const currentIdx = CAR_ORDER.indexOf(lp.carType);
+    const nextIdx = (currentIdx + direction + CAR_ORDER.length) % CAR_ORDER.length;
+    const newCarType = CAR_ORDER[nextIdx];
+
+    // Save current state
+    const pos = lp.body.position;
+    const savedX = pos.x, savedY = pos.y, savedZ = pos.z;
+    const savedYaw = lp._yaw;
+    const savedNickname = lp.nickname;
+    const wasGodMode = lp.isInvincible && this._godMode;
+
+    // Remove old car (engine audio, mesh, physics, ability)
+    this.game.nameTags.remove(lp);
+    this.game.healthBars.remove(lp);
+    this.game._removeCarBody(lp);
+
+    // Build new car
+    const mesh = await buildCar(newCarType);
+    this.scene.add(mesh);
+
+    const carBody = new CarBody(newCarType, mesh, this.game.physicsWorld.world, {
+      carMaterial: this.game.physicsWorld._carMaterial,
+    });
+    carBody.playerId = 'local';
+    carBody.nickname = savedNickname;
+    carBody.setPosition(savedX, savedY, savedZ, savedYaw);
+    this.game.carBodies.push(carBody);
+
+    // Engine audio
+    sampleEngineAudio.addCar(carBody, true);
+
+    // Ability system
+    const ability = new AbilitySystem(newCarType, carBody, {
+      scene: this.scene,
+      world: this.game.physicsWorld.world,
+      getOtherBodies: () => this.game.carBodies.filter((cb) => cb !== carBody),
+    });
+    this.game.abilities.set(carBody, ability);
+    this.game.localAbility = ability;
+
+    // Update game reference
+    this.game.localPlayer = carBody;
+
+    // Wire elimination callback
+    carBody.onEliminated = (e) => this.game._onEliminated(e);
+
+    // Re-add name tag and health bar
+    this.game.nameTags.add(carBody, true);
+    this.game.healthBars.add(carBody, true);
+
+    // Restore god mode
+    if (wasGodMode) carBody.isInvincible = true;
+
+    // Update label
+    if (this._swapCarLabel) {
+      this._swapCarLabel.textContent = `Current: ${newCarType}`;
+    }
   }
 
   // =====================================================================
@@ -1045,6 +1374,7 @@ export class DebugMode {
       for (const bot of this.game.botManager.bots) {
         this.game.nameTags.add(bot.carBody, false);
         this.game.healthBars.add(bot.carBody, false);
+        sampleEngineAudio.addCar(bot.carBody, false);
       }
     });
   }
@@ -1611,8 +1941,10 @@ export class DebugMode {
           background:rgba(0,0,0,0.85);color:#0f0;
           font:11px 'Courier New',monospace;padding:10px;border-radius:6px;
           border:1px solid #0f0;z-index:1000;white-space:pre;line-height:1.6;
+          user-select:none;
         `;
         document.body.appendChild(this._perfDisplay);
+        this._makeDraggable(this._perfDisplay);
       }
       this._perfDisplay.style.display = 'block';
       this._perfFrameTimes = [];
@@ -1672,9 +2004,10 @@ export class DebugMode {
           background:rgba(0,0,0,0.85);color:#0f0;
           font:10px 'Courier New',monospace;padding:10px;border-radius:6px;
           border:1px solid #0f0;z-index:1000;white-space:pre;line-height:1.5;
-          max-height:200px;overflow-y:auto;
+          max-height:200px;overflow-y:auto;user-select:none;
         `;
         document.body.appendChild(this._collisionLogDisplay);
+        this._makeDraggable(this._collisionLogDisplay);
       }
       this._collisionLogDisplay.style.display = 'block';
       this._collisionLog = [];
