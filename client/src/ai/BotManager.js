@@ -4,6 +4,7 @@ import { CarBody } from '../physics/CarBody.js';
 import { AbilitySystem } from '../physics/AbilitySystem.js';
 import { BotBrain } from './BotBrain.js';
 import { PERSONALITIES, randomPersonality } from './BotPersonalities.js';
+import { sampleEngineAudio } from '../audio/SampleEngineAudio.js';
 
 const CAR_KEYS = Object.keys(CARS);
 
@@ -88,6 +89,7 @@ export class BotManager {
   /** Remove all bots (e.g. on round reset before re-filling). */
   removeAll() {
     for (const bot of this.bots) {
+      sampleEngineAudio.removeCar(bot.carBody);
       this.scene.remove(bot.carBody.mesh);
       this.world.removeBody(bot.carBody.body);
       bot.ability.dispose();

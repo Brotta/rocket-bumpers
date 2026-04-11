@@ -9,7 +9,7 @@
 export const STAT_BASE = {
   maxStat: 10,          // denominator for scaling — never change
   speed: 35,            // u/s at stat 10 → stat 8 = 22.4, stat 3 = 8.4
-  accel: 40,            // u/s² at stat 10 → per-car, proportional to speed stat
+  accel: 20,            // u/s² at stat 10 → per-car, proportional to speed stat
   mass: 10,             // kg at stat 10
   handling: 5.5,        // handling factor at stat 10
 };
@@ -536,8 +536,8 @@ export const CAR_FEEL = {
 
   // ── Acceleration ──
   accelRate: 22,             // u/s² fallback (per-car overrides via CarBody.accelRate)
-  accelFalloffStart: 0.65,   // start tapering at 65% of max speed
-  accelFalloffMin: 0.25,     // at max speed, accel is 25% of base
+  accelFalloffStart: 0.30,   // start tapering at 30% of max speed
+  accelFalloffMin: 0.25,     // at max speed, accel is 15% of base
 
   // ── Braking ──
   brakeDecel: 30,            // u/s² braking force
@@ -546,7 +546,7 @@ export const CAR_FEEL = {
 
   // ── Friction (multiplicative per-frame, like Drift Zero) ──
   // Applied as speed *= pow(factor, dt*60). Values < 1 = friction.
-  drag: 0.993,               // aero drag when accelerating/braking (very light)
+  drag: 0.998,               // aero drag when accelerating/braking (rebalanced for accel=20)
   groundFriction: 0.955,     // rolling friction when coasting (moderate decel)
 
   // ── Lateral friction (drift model) ──
@@ -596,14 +596,10 @@ export const CAR_FEEL = {
   },
 };
 
-// ── Engine Audio ─────────────────────────────────────────────────────
-// Procedural engine sounds — each car type has a unique sonic profile.
-// baseFreq: fundamental oscillator pitch at idle (Hz)
-// maxFreq: pitch at full speed (Hz)
-// oscillators: array of { type, freqRatio, gain } — layered harmonics
-// noiseGain: filtered noise level (mechanical rumble)
-// noiseLPF: low-pass cutoff for noise (Hz)
-// volume: base gain for this car's engine
+// ── Engine Audio (DEPRECATED) ────────────────────────────────────────
+// Legacy oscillator-based engine sounds. Replaced by sample-based system
+// in client/src/audio/SampleEngineAudio.js + AudioConfig.js.
+// Kept for reference only — not imported anywhere.
 export const ENGINE_AUDIO = {
   masterVolume: 0.07,            // overall engine volume (background level)
   localBoost: 2.0,               // local player volume multiplier
