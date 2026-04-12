@@ -262,6 +262,12 @@ export default class RocketBumpersServer implements Party.Server {
       case MSG.OBSTACLE_DAMAGE:
         this._onObstacleDamage(data, sender);
         break;
+      case MSG.POWERUP_DAMAGE:
+        this._onPowerupDamage(data, sender);
+        break;
+      case MSG.ENV_DAMAGE:
+        this._onEnvDamage(data, sender);
+        break;
       case MSG.CHANGE_CAR:
         this._onChangeCar(data, sender);
         break;
@@ -602,6 +608,63 @@ export default class RocketBumpersServer implements Party.Server {
     this.obstacleDamageCooldowns.set(sender.id, now + 500);
 
     const damage = typeof data.damage === 'number' ? Math.min(Math.max(data.damage, 0), GAME.MAX_DAMAGE) : 0;
+    if (damage <= 0) return;
+
+    player.hp = Math.max(0, player.hp - damage);
+
+    this.room.broadcast(JSON.stringify({
+      type: SRV.DAMAGE_DEALT,
+      targetId: sender.id,
+      amount: Math.round(damage * 10) / 10,
+      sourceId: null,
+      wasAbility: false,
+    }));
+
+    if (player.hp <= 0) {
+      this._handleElimination(player, null);
+    }
+  }
+
+  _onPowerupDamage(data: any, sender: Party.Connection) {
+    const attacker = this.players.get(sender.id);
+    if (!attacker || attacker.isEliminated) return;
+
+    const { targetId } = data;
+    if (typeof targetId !== 'string' || targetId.length > 64) return;
+
+    const victim = this.players.get(targetId);
+    if (!victim || victim.isEliminated || victim.isInvincible) return;
+
+    const damage = typeof data.damage === 'number' && isFinite(data.damage)
+      ? Math.min(Math.max(data.damage, 0), GAME.MAX_DAMAGE) : 0;
+    if (damage <= 0) return;
+
+    victim.hp = Math.max(0, victim.hp - damage);
+
+    this.room.broadcast(JSON.stringify({
+      type: SRV.DAMAGE_DEALT,
+      targetId,
+      amount: Math.round(damage * 10) / 10,
+      sourceId: sender.id,
+      wasAbility: false,
+    }));
+
+    attacker.hits++;
+    const hitDelta = damage >= GAME.SCORE_BIG_HIT_THRESHOLD
+      ? GAME.SCORE_BIG_HIT : GAME.SCORE_SMALL_HIT;
+    attacker.score += hitDelta;
+
+    if (victim.hp <= 0) {
+      this._handleElimination(victim, attacker);
+    }
+  }
+
+  _onEnvDamage(data: any, sender: Party.Connection) {
+    const player = this.players.get(sender.id);
+    if (!player || player.isEliminated || player.isInvincible) return;
+
+    const damage = typeof data.damage === 'number' && isFinite(data.damage)
+      ? Math.min(Math.max(data.damage, 0), GAME.MAX_DAMAGE) : 0;
     if (damage <= 0) return;
 
     player.hp = Math.max(0, player.hp - damage);

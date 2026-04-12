@@ -53,6 +53,7 @@ export class NetworkManager {
       this._socket = new PartySocket({
         host,
         room: roomId,
+        maxRetries: 0, // disable auto-reconnect — we handle reconnection manually
       });
 
       this._socket.binaryType = 'arraybuffer';
@@ -211,6 +212,22 @@ export class NetworkManager {
       type: MSG.USE_ABILITY,
       abilityType,
       pos,
+    });
+  }
+
+  sendPowerUpDamage(targetId, damage, powerupType) {
+    this._sendJSON({
+      type: MSG.POWERUP_DAMAGE,
+      targetId,
+      damage,
+      powerupType,
+    });
+  }
+
+  sendEnvDamage(damage) {
+    this._sendJSON({
+      type: MSG.ENV_DAMAGE,
+      damage,
     });
   }
 

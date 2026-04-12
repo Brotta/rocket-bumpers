@@ -794,7 +794,12 @@ export class PowerUpManager {
           car.body.position.x, car.body.position.y, car.body.position.z,
           p.y, 1.5,
         )) {
-          car.takeDamage(p.config.damage, p.owner, false);
+          if (car._isRemote && this._networkManager?.isMultiplayer) {
+            // Remote player — report damage to server
+            this._networkManager.sendPowerUpDamage(car.playerId, p.config.damage, p.isHoming ? 'HOMING_MISSILE' : 'MISSILE');
+          } else {
+            car.takeDamage(p.config.damage, p.owner, false);
+          }
           const knockback = 8;
           car.body.velocity.x -= Math.sin(p.yaw) * knockback;
           car.body.velocity.z -= Math.cos(p.yaw) * knockback;
@@ -2065,7 +2070,11 @@ export class PowerUpManager {
           car.body.position.x, car.body.position.y, car.body.position.z,
           b.y, b.config.bulletRadius + 1.0,
         )) {
-          car.takeDamage(b.config.damage, b.owner, false);
+          if (car._isRemote && this._networkManager?.isMultiplayer) {
+            this._networkManager.sendPowerUpDamage(car.playerId, b.config.damage, 'AUTO_TURRET');
+          } else {
+            car.takeDamage(b.config.damage, b.owner, false);
+          }
           // Light knockback in bullet direction
           const speed = Math.sqrt(b.vx * b.vx + b.vz * b.vz);
           if (speed > 0.1) {
@@ -2221,7 +2230,11 @@ export class PowerUpManager {
       if (dist > config.blastRadius) continue;
 
       // Light damage
-      target.takeDamage(config.damage, car, false);
+      if (target._isRemote && this._networkManager?.isMultiplayer) {
+        this._networkManager.sendPowerUpDamage(target.playerId, config.damage, 'GLITCH_BOMB');
+      } else {
+        target.takeDamage(config.damage, car, false);
+      }
       target.lastHitBy = { source: car, wasAbility: false, time: performance.now() };
 
       // Apply glitch effect to this car

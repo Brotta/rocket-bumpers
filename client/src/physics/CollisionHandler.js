@@ -539,7 +539,13 @@ export class CollisionHandler {
           cb.body.velocity.y += 2;
 
           // Apply trail damage
-          const actual = cb.takeDamage(DAMAGE.TRAIL_DAMAGE, owner, true);
+          let actual = 0;
+          if (cb._isRemote && this._networkManager?.isMultiplayer) {
+            this._networkManager.sendPowerUpDamage(cb.playerId, DAMAGE.TRAIL_DAMAGE, 'TRAIL_FIRE');
+            actual = DAMAGE.TRAIL_DAMAGE; // for VFX
+          } else {
+            actual = cb.takeDamage(DAMAGE.TRAIL_DAMAGE, owner, true);
+          }
 
           // Remove this trail body after hit (one-shot damage)
           worldBody._isTrailFire = false;

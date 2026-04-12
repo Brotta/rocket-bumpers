@@ -366,6 +366,19 @@ game.on('playerSpawned', ({ carBody, carType }) => {
   }
 });
 
+// ── Disconnect notification ──────────────────────────────────────────
+game.on('disconnected', () => {
+  const banner = document.createElement('div');
+  banner.textContent = 'Connection lost — playing offline';
+  banner.style.cssText = `
+    position:fixed;top:16px;left:50%;transform:translateX(-50%);
+    color:#ff4444;font:bold 14px 'Courier New',monospace;
+    background:rgba(0,0,0,0.8);padding:8px 16px;border-radius:4px;
+    z-index:9999;pointer-events:none;`;
+  document.body.appendChild(banner);
+  setTimeout(() => banner.remove(), 5000);
+});
+
 // ── Respawn car select callback ───────────────────────────��─────────────
 
 game._onRespawnCarSelect = (onCarChosen) => {

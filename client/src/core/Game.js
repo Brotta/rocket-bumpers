@@ -94,6 +94,12 @@ export class Game {
     this.dynamicHazards.on('kill', (carBody) => this._onPlayerFell({ victim: carBody }));
     this.dynamicHazards.on('geyserErupt', (e) => this._onGeyserErupt(e));
     this.dynamicHazards.on('eruptionBlast', () => this._onEruptionBlast());
+    this.dynamicHazards.on('damage', (e) => {
+      // In multiplayer, sync environmental damage (lava/geyser) to server for local player
+      if (this.networkManager?.isMultiplayer && e.target === this.localPlayer && e.amount > 0) {
+        this.networkManager.sendEnvDamage(e.amount);
+      }
+    });
 
     // ── Arena group for car tilt raycasting ──
     this._arenaGroup = this.sceneManager.arena.arenaGroup;
@@ -306,6 +312,14 @@ export class Game {
    * and wires all network events.
    */
   async connectMultiplayer(roomId) {
+    // Cleanup previous connection if any (e.g., redirect after ROOM_FULL)
+    if (this.networkManager) {
+      this.networkManager.disconnect();
+    }
+    if (this.remotePlayerManager) {
+      this.remotePlayerManager.removeAll();
+    }
+
     this.networkManager = new NetworkManager(this);
     this.remotePlayerManager = new RemotePlayerManager(this);
 
@@ -397,12 +411,21 @@ export class Game {
 
     // Player left
     _on('playerLeft', ({ id }) => {
-      this.remotePlayerManager.removePlayer(id);
-      this.scoreManager.removePlayer(id);
-      if (this.networkManager.isHost) {
-        const humanCount = this._countHumanPlayers();
-        this.botManager.adjustBotCount(humanCount);
+      // If it's a local bot (host-simulated), remove from botManager directly
+      if (this.networkManager.isHost && id.startsWith('bot_')) {
+        const botIdx = this.botManager.bots.findIndex(b => b.carBody.playerId === id);
+        if (botIdx !== -1) {
+          const bot = this.botManager.bots[botIdx];
+          this.nameTags.remove(bot.carBody);
+          this.healthBars.remove(bot.carBody);
+          const cbIdx = this.carBodies.indexOf(bot.carBody);
+          if (cbIdx !== -1) this.carBodies.splice(cbIdx, 1);
+          this.botManager.bots.splice(botIdx, 1);
+        }
+      } else {
+        this.remotePlayerManager.removePlayer(id);
       }
+      this.scoreManager.removePlayer(id);
     });
 
     // Server-authoritative damage
@@ -518,12 +541,13 @@ export class Game {
       this.scoreManager.syncFromServer(scores);
     });
 
-    // Disconnected — clean up all network event handlers
+    // Disconnected — clean up and notify user
     _on('disconnected', () => {
       if (this.remotePlayerManager) {
         this.remotePlayerManager.removeAll();
       }
       this._cleanupNetworkHandlers();
+      this._emit('disconnected');
     });
   }
 
