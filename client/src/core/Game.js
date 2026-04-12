@@ -11,13 +11,15 @@ import { BotManager } from '../ai/BotManager.js';
 import { NameTags } from '../ui/NameTags.js';
 import { DynamicHazards } from '../physics/DynamicHazards.js';
 import { TireSmokeFX } from '../rendering/TireSmokeFX.js';
-import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, getSpawnPosition } from './Config.js';
+import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, CAR_ORDER, getSpawnPosition } from './Config.js';
 import { HealthBars } from '../ui/HealthBars.js';
 import { StunFX } from '../rendering/StunFX.js';
 import { audioManager } from '../audio/AudioManager.js';
 import { sampleEngineAudio } from '../audio/SampleEngineAudio.js';
 import { getAllEngineSampleURLs } from '../audio/AudioConfig.js';
 import { DebugMode } from '../debug/DebugMode.js';
+import { ScoreManager } from './ScoreManager.js';
+import { PortalSystem } from './PortalSystem.js';
 
 const MAX_DT = 1 / 30; // cap delta to avoid spiral of death
 const FIXED_DT = 1 / 60; // fixed timestep for deterministic game logic
@@ -94,10 +96,20 @@ export class Game {
     this._arenaGroup = this.sceneManager.arena.arenaGroup;
     this._tiltFloorMesh = this.sceneManager.arena.floorMesh || null;
 
+    // ── Score manager ──
+    this.scoreManager = new ScoreManager();
+
+    // ── Portal system (initialized after scene is ready) ──
+    this.portalSystem = null;
+
     // ── Local player ──
     this.localPlayer = null;   // CarBody
     this.localAbility = null;  // AbilitySystem
     this.playerNickname = '';
+    this.playerCarType = '';
+
+    // ── Respawn car select callback (set by main.js) ──
+    this._onRespawnCarSelect = null; // (callback) => show car select overlay
 
     // ── Input ──
     this.input = { forward: false, backward: false, left: false, right: false };
@@ -137,8 +149,6 @@ export class Game {
 
     // ── Wire game state events ──
     this.gameState.on('stateChange', (e) => this._onStateChange(e));
-    this.gameState.on('countdownTick', (e) => this._onCountdownTick(e));
-    this.gameState.on('roundTimeUpdate', (e) => this._onRoundTimeUpdate(e));
 
     // ── Stun visual FX ──
     this.stunFX = new StunFX(this.sceneManager.scene);
@@ -185,6 +195,7 @@ export class Game {
    */
   async setPlayer(nickname, carType) {
     this.playerNickname = nickname;
+    this.playerCarType = carType;
 
     // Remove previous
     if (this.localPlayer) {
@@ -194,6 +205,9 @@ export class Game {
     // Spawn
     const carBody = await this._spawnCar(carType, nickname, 'local');
     this.localPlayer = carBody;
+
+    // Register in score manager
+    this.scoreManager.registerPlayer('local', nickname);
 
     // Initialize camera at correct position behind car to avoid first-frame jump
     this._lookAtSmoothed.copy(carBody.mesh.position);
@@ -231,11 +245,26 @@ export class Game {
     this.nameTags.clear();
     await this.botManager.fillSlots();
 
+    // Register bots in score manager
+    for (const bot of this.botManager.bots) {
+      this.scoreManager.registerPlayer(bot.carBody.playerId, bot.carBody.nickname);
+    }
+
     // Wire elimination callback on every car (catches ALL damage sources)
     const onElim = (e) => this._onEliminated(e);
     carBody.onEliminated = onElim;
     for (const bot of this.botManager.bots) {
       bot.carBody.onEliminated = onElim;
+    }
+
+    // Initialize portal system
+    if (!this.portalSystem) {
+      this.portalSystem = new PortalSystem(this.sceneManager.scene, {
+        getLocalPlayer: () => this.localPlayer,
+        getPlayerNickname: () => this.playerNickname,
+        getPlayerCarType: () => this.playerCarType,
+        getScoreManager: () => this.scoreManager,
+      });
     }
 
     // Register name tags and health bars for all cars
@@ -262,8 +291,8 @@ export class Game {
       sampleEngineAudio.addCar(cb, cb === this.localPlayer);
     }
 
-    // Auto-start round after a short lobby
-    setTimeout(() => this.gameState.startRound(), 500);
+    // Endless mode: start playing immediately
+    setTimeout(() => this.gameState.startPlaying(), 200);
   }
 
   useAbility() {
@@ -423,6 +452,9 @@ export class Game {
 
     // Power-up spawns, pickups, projectile physics, collision
     this.powerUpManager.update(dt);
+
+    // Portal system (ramp launches, trigger checks)
+    if (this.portalSystem) this.portalSystem.update(dt);
   }
 
   // ── Visual update at display refresh rate ────────────────────────────
@@ -447,13 +479,6 @@ export class Game {
 
       // Stun visual FX (debris, stars, wobble, flash)
       this.stunFX.update(frameDt);
-    } else if (this.gameState.isCountdown) {
-      for (const cb of this.carBodies) {
-        cb._arenaGroup = this._arenaGroup;
-        cb._tiltFloorMesh = this._tiltFloorMesh;
-        cb._updateVisualTilt();
-        cb.syncMesh(frameDt);
-      }
     }
 
     // Update audio systems (listener position = camera, engine crossfade, voice priorities)
@@ -717,6 +742,12 @@ export class Game {
   _onDamage(e) {
     // Flash the health bar
     this.healthBars.flashDamage(e.target);
+
+    // Score: credit the attacker
+    if (e.attacker && e.amount > 0) {
+      this.scoreManager.onDamage(e.attacker.playerId, e.amount);
+    }
+
     this._emit('damage', e);
   }
 
@@ -726,6 +757,14 @@ export class Game {
     victim._eliminationHandled = true;
 
     const isLocal = victim === this.localPlayer;
+    const isBot = this.botManager.isBot(victim);
+
+    // Score: credit kill or environmental death
+    if (killer) {
+      this.scoreManager.onKill(killer.playerId, victim.playerId);
+    } else {
+      this.scoreManager.onDeath(victim.playerId);
+    }
 
     // Disable controls for local player
     if (isLocal) this._isDead = true;
@@ -733,94 +772,145 @@ export class Game {
     // Drop held power-up
     this.powerUpManager.drop(victim);
 
-    // Hide mesh after a short death-cam
-    setTimeout(() => {
-      victim.mesh.visible = false;
-      // Stop engine sound
-      sampleEngineAudio.removeCar(victim);
-    }, RESPAWN.deathCamDuration * 1000);
-
     this._emit('eliminated', { victim, killer, wasAbility });
 
-    // If local player died and all remaining players are bots → quick restart
-    if (isLocal && this.gameState.isPlaying) {
-      const otherHumans = this.carBodies.filter(
-        (cb) => cb !== this.localPlayer && !this.botManager.isBot(cb) && !cb.isEliminated,
-      );
-      if (otherHumans.length === 0) {
-        // All-bots lobby — skip to results immediately, which triggers new round
-        setTimeout(() => {
-          if (this.gameState.isPlaying) this.gameState.forceEndRound();
-        }, 1500); // brief pause so player sees they died
-        return;
-      }
-    }
+    // ── Endless respawn flow ──
+    // Hide mesh after death-cam, then respawn
+    setTimeout(() => {
+      victim.mesh.visible = false;
+      sampleEngineAudio.removeCar(victim);
 
-    // Check win condition (last car standing)
-    this._checkWinCondition();
+      if (isBot) {
+        // Bot: auto-assign random car and respawn after a short delay
+        const randomCar = CAR_ORDER[Math.floor(Math.random() * CAR_ORDER.length)];
+        setTimeout(() => {
+          this._respawnCar(victim, randomCar, isBot);
+        }, 500);
+      } else if (isLocal) {
+        // Human player: show car select overlay, then respawn with chosen car
+        if (this._onRespawnCarSelect) {
+          this._onRespawnCarSelect((chosenCarType) => {
+            this._respawnWithNewCar(chosenCarType);
+          });
+        } else {
+          // Fallback: respawn with same car
+          this._respawnCar(victim, this.playerCarType, false);
+        }
+      }
+    }, RESPAWN.deathCamDuration * 1000);
   }
 
-  _checkWinCondition() {
-    if (!this.gameState.isPlaying) return;
-    const alive = this.carBodies.filter((cb) => !cb.isEliminated);
-    if (alive.length <= 1) {
-      // End the round immediately — last car standing wins
-      this.gameState.forceEndRound();
+  /** Respawn the local player with a new car type (after car select). */
+  async _respawnWithNewCar(carType) {
+    const oldCar = this.localPlayer;
+
+    // Remove old car
+    this.nameTags.remove(oldCar);
+    this.healthBars.remove(oldCar);
+    this._removeCarBody(oldCar);
+
+    // Spawn new car
+    this.playerCarType = carType;
+    const angle = Math.random() * Math.PI * 2;
+    const r = ARENA.lava.radius + 5 + Math.random() * (ARENA.diameter / 2 - ARENA.lava.radius - 10);
+    const carBody = await this._spawnCar(carType, this.playerNickname, 'local');
+    this.localPlayer = carBody;
+
+    carBody.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r, angle + Math.PI);
+    carBody.syncMesh();
+
+    // Re-setup ability
+    const ability = new AbilitySystem(carType, carBody, {
+      scene: this.sceneManager.scene,
+      world: this.physicsWorld.world,
+      getOtherBodies: () => this.carBodies.filter((cb) => cb !== carBody),
+    });
+    this.abilities.set(carBody, ability);
+    this.localAbility = ability;
+
+    // Wire elimination callback
+    carBody.onEliminated = (e) => this._onEliminated(e);
+
+    // Re-register name tag and health bar
+    this.nameTags.add(carBody, true);
+    this.healthBars.add(carBody, true);
+
+    // Respawn flash
+    this._showRespawnFlash();
+
+    // Invincibility blink
+    carBody.isInvincible = true;
+    AbilitySystem.setInvincible(carBody, true);
+    this._startInvincibilityBlink(carBody);
+
+    setTimeout(() => {
+      carBody.isInvincible = false;
+      AbilitySystem.setInvincible(carBody, false);
+      carBody.mesh.visible = true;
+      this._isDead = false;
+    }, RESPAWN.invincibilityDuration * 1000);
+
+    this._emit('playerSpawned', { carBody, carType });
+  }
+
+  /** Respawn an existing car (bot or fallback) in place. */
+  _respawnCar(carBody, newCarType, isBot) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = ARENA.lava.radius + 5 + Math.random() * (ARENA.diameter / 2 - ARENA.lava.radius - 10);
+
+    carBody.resetState();
+    carBody.resetHP();
+    carBody._eliminationEmitted = false;
+    carBody._eliminationHandled = false;
+    sampleEngineAudio.resetCar(carBody);
+    const ability = this.abilities.get(carBody);
+    if (ability) ability.forceReset();
+
+    carBody.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r, angle + Math.PI);
+    carBody.syncMesh();
+    carBody.mesh.visible = true;
+
+    // Re-add engine sound
+    sampleEngineAudio.addCar(carBody, !isBot);
+
+    if (isBot) {
+      this.botManager.resetBrain(carBody);
+    } else {
+      this._showRespawnFlash();
+      this._isDead = false;
     }
+
+    // Invincibility blink
+    carBody.isInvincible = true;
+    AbilitySystem.setInvincible(carBody, true);
+    this._startInvincibilityBlink(carBody);
+
+    setTimeout(() => {
+      carBody.isInvincible = false;
+      AbilitySystem.setInvincible(carBody, false);
+      carBody.mesh.visible = true;
+    }, RESPAWN.invincibilityDuration * 1000);
   }
 
   // ── Respawn (fall off edge — NOT eliminated, just damage + respawn) ──
 
   _onPlayerFell({ victim }) {
-    const isLocal = victim === this.localPlayer;
-    const isBot = this.botManager.isBot(victim);
-
-    // If eliminated by fall damage (hp reached 0 in CollisionHandler._handleFall),
-    // handle as elimination — no respawn
+    // In endless mode: if eliminated (HP=0), handle as full elimination (with car select)
     if (victim.isEliminated) {
-      this._onEliminated({ victim, killer: null, wasAbility: false });
+      this._onEliminated({ victim, killer: victim._lastHitBy || null, wasAbility: false });
       return;
     }
 
-    // Mark local player as dead (disables controls, camera keeps following)
-    if (isLocal) this._isDead = true;
+    // Otherwise: quick respawn (same car, no car select needed — just fell off)
+    const isLocal = victim === this.localPlayer;
+    const isBot = this.botManager.isBot(victim);
 
-    // Drop held power-up
+    if (isLocal) this._isDead = true;
     this.powerUpManager.drop(victim);
 
-    // After death-cam delay (2s): teleport and respawn
     setTimeout(() => {
-      const angle = Math.random() * Math.PI * 2;
-      const r = ARENA.lava.radius + 5 + Math.random() * (ARENA.diameter / 2 - ARENA.lava.radius - 10);
-
-      // Invalidate any pending power-up/ability timeouts and reset mass/speed
-      victim.resetState();
-      sampleEngineAudio.resetCar(victim);
-      const ability = this.abilities.get(victim);
-      if (ability) ability.forceReset();
-
-      victim.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r, angle + Math.PI);
-      victim.syncMesh();
-
-      // Respawn flash (local player only)
-      if (isLocal) this._showRespawnFlash();
-
-      // Reset bot brain after respawn
-      if (isBot) this.botManager.resetBrain(victim);
-
-      // Invincibility blink (1.5s)
-      victim.isInvincible = true;
-      victim.mesh.visible = true;
-      AbilitySystem.setInvincible(victim, true);
-      this._startInvincibilityBlink(victim);
-
-      setTimeout(() => {
-        victim.isInvincible = false;
-        AbilitySystem.setInvincible(victim, false);
-        victim.mesh.visible = true;
-        // Restore control
-        if (isLocal) this._isDead = false;
-      }, RESPAWN.invincibilityDuration * 1000);
+      this._respawnCar(victim, victim.carType, isBot);
+      if (isLocal) this._isDead = false;
     }, RESPAWN.deathCamDuration * 1000);
   }
 
@@ -856,108 +946,24 @@ export class Game {
   // ── Round state handlers ──────────────────────────────────────────────
 
   _onStateChange({ from, to }) {
-    if (to === GAME_STATES.COUNTDOWN) {
-      this._onEnterCountdown();
-    } else if (to === GAME_STATES.PLAYING) {
+    if (to === GAME_STATES.PLAYING) {
       this._onEnterPlaying();
-    } else if (to === GAME_STATES.RESULTS) {
-      this._onEnterResults();
     }
     this._emit('stateChange', { from, to });
   }
 
-  _onEnterCountdown() {
-    // Reset death state for new round
-    this._isDead = false;
-
-    // Lock all cars at spawn positions
-    this.disableInput();
-
-    // Reset HP, power-ups, and all mutable state for new round
-    for (const cb of this.carBodies) {
-      cb.resetHP();
-      cb._eliminationEmitted = false;
-      cb._eliminationHandled = false;
-      cb.resetState();
-      cb.mesh.visible = true;
-      const ability = this.abilities.get(cb);
-      if (ability) ability.forceReset();
-    }
-    this.powerUpManager.reset();
-    this.dynamicHazards.reset();
-
-    // Re-add engine sounds for all cars (some may have been removed on elimination)
-    // Also reset gear simulators so RPM starts from idle
-    for (const cb of this.carBodies) {
-      sampleEngineAudio.resetCar(cb);
-      sampleEngineAudio.addCar(cb, cb === this.localPlayer);
-    }
-
-    // Reposition all cars at octagon spawn points for new round
-    // Local player always gets slot 0
-    if (this.localPlayer) {
-      const sp = getSpawnPosition(0);
-      this.localPlayer.setPosition(sp.x, sp.y, sp.z, sp.yaw);
-    }
-    this.botManager.resetForNewRound();
-
-    if (this._countdownEl) this._countdownEl.style.display = 'flex';
-  }
-
   _onEnterPlaying() {
+    this._isDead = false;
     this.enableInput();
+    // Hide legacy overlays
     if (this._countdownEl) this._countdownEl.style.display = 'none';
-    if (this._timerEl) this._timerEl.style.display = 'block';
-  }
-
-  _onEnterResults() {
-    this.disableInput();
     if (this._timerEl) this._timerEl.style.display = 'none';
-
-    // Emit results ranked by survival: alive first (sorted by HP), then eliminated
-    const results = this.carBodies
-      .map((cb) => ({
-        nickname: cb.nickname,
-        carType: cb.carType,
-        hp: cb.hp,
-        maxHp: cb.maxHp,
-        isEliminated: cb.isEliminated,
-      }))
-      .sort((a, b) => {
-        // Alive cars first, then by HP descending
-        if (a.isEliminated !== b.isEliminated) return a.isEliminated ? 1 : -1;
-        return b.hp - a.hp;
-      });
-    this._emit('roundEnd', { results });
-  }
-
-  _onCountdownTick({ seconds }) {
-    if (!this._countdownEl) return;
-    if (seconds > 0) {
-      this._countdownEl.textContent = String(seconds);
-    } else {
-      this._countdownEl.textContent = 'SMASH!';
-      setTimeout(() => {
-        if (this._countdownEl) this._countdownEl.style.display = 'none';
-      }, 600);
-    }
-  }
-
-  _onRoundTimeUpdate({ remaining }) {
-    if (!this._timerEl) return;
-    const sec = Math.ceil(remaining);
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    this._timerEl.textContent = `${m}:${String(s).padStart(2, '0')}`;
-
-    // Urgency color in last 10s
-    this._timerEl.style.color = remaining <= 10 ? '#f44' : '#fff';
   }
 
   // ── Overlay HUD elements ──────────────────────────────────────────────
 
   _buildOverlayElements() {
-    // Countdown text (center screen)
+    // Countdown text (center screen) — kept for potential "SMASH!" style entry
     const cd = document.createElement('div');
     cd.style.cssText = `
       position:fixed;inset:0;z-index:50;
@@ -969,16 +975,8 @@ export class Game {
     document.body.appendChild(cd);
     this._countdownEl = cd;
 
-    // Round timer (top center)
-    const tm = document.createElement('div');
-    tm.style.cssText = `
-      position:fixed;top:16px;left:50%;transform:translateX(-50%);
-      font:bold 28px 'Courier New',monospace;color:#fff;
-      text-shadow:0 0 8px #000;pointer-events:none;z-index:10;
-      display:none;
-    `;
-    document.body.appendChild(tm);
-    this._timerEl = tm;
+    // Timer — hidden in endless mode
+    this._timerEl = null;
   }
 
   // ── Getters ───────────────────────────────────────────────────────────

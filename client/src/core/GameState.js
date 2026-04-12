@@ -1,20 +1,19 @@
-import { GAME_STATES, ROUND } from './Config.js';
+import { GAME_STATES } from './Config.js';
 
 /**
- * GameState — round state machine.
+ * GameState — endless mode state machine.
  *
- * States: LOBBY → COUNTDOWN → PLAYING → RESULTS → COUNTDOWN → …
+ * States: LOADING → PLAYING (forever).
  *
- * Listen to transitions via on('stateChange', { from, to }).
- * Additional events: 'countdownTick' { seconds }, 'roundTimeUpdate' { remaining }.
+ * No rounds, no countdown, no results. The game is always in PLAYING state
+ * once started. Multiplayer-ready: state transitions are driven by explicit
+ * calls, making it easy to synchronize via a server.
  */
 export class GameState {
   constructor() {
-    this.state = GAME_STATES.LOBBY;
+    this.state = GAME_STATES.LOADING;
     this.timer = 0;
     this._listeners = {};
-
-    // Countdown tracking
     this._lastCountdownSecond = -1;
   }
 
@@ -47,91 +46,33 @@ export class GameState {
     this._emit('stateChange', { from, to });
   }
 
-  /** Manually trigger the start of a round (from LOBBY). */
-  startRound() {
-    if (this.state === GAME_STATES.LOBBY) {
-      this._transition(GAME_STATES.COUNTDOWN);
+  /** Start endless play (from LOADING). */
+  startPlaying() {
+    if (this.state === GAME_STATES.LOADING) {
+      this._transition(GAME_STATES.PLAYING);
     }
   }
 
-  /** Force-end the current round (e.g. last car standing). */
-  forceEndRound() {
-    if (this.state === GAME_STATES.PLAYING) {
-      this._transition(GAME_STATES.RESULTS);
-    }
-  }
+  // Legacy compat — called by old code paths
+  startRound() { this.startPlaying(); }
+  forceEndRound() { /* no-op in endless mode */ }
 
   // ── Update (call every frame) ────────────────────────────────────────
 
   update(dt) {
     this.timer += dt;
-
-    switch (this.state) {
-      case GAME_STATES.LOBBY:
-        // Lobby waits for explicit startRound() call
-        break;
-
-      case GAME_STATES.COUNTDOWN:
-        this._updateCountdown();
-        break;
-
-      case GAME_STATES.PLAYING:
-        this._updatePlaying();
-        break;
-
-      case GAME_STATES.RESULTS:
-        this._updateResults();
-        break;
-    }
-  }
-
-  _updateCountdown() {
-    const remaining = ROUND.countdown - this.timer;
-    const sec = Math.ceil(remaining);
-
-    if (sec !== this._lastCountdownSecond && sec > 0) {
-      this._lastCountdownSecond = sec;
-      this._emit('countdownTick', { seconds: sec });
-    }
-
-    if (remaining <= 0) {
-      this._emit('countdownTick', { seconds: 0 }); // "SMASH!"
-      this._transition(GAME_STATES.PLAYING);
-    }
-  }
-
-  _updatePlaying() {
-    const remaining = ROUND.playTime - this.timer;
-    this._emit('roundTimeUpdate', { remaining: Math.max(0, remaining) });
-
-    if (remaining <= 0) {
-      this._transition(GAME_STATES.RESULTS);
-    }
-  }
-
-  _updateResults() {
-    if (this.timer >= ROUND.resultsTime) {
-      this._transition(GAME_STATES.COUNTDOWN);
-    }
+    // No state transitions in endless mode — always PLAYING
   }
 
   // ── Getters ───────────────────────────────────────────────────────────
 
-  /** Seconds remaining in current phase, or -1 if unlimited. */
-  get remainingTime() {
-    switch (this.state) {
-      case GAME_STATES.COUNTDOWN: return Math.max(0, ROUND.countdown - this.timer);
-      case GAME_STATES.PLAYING:   return Math.max(0, ROUND.playTime - this.timer);
-      case GAME_STATES.RESULTS:   return Math.max(0, ROUND.resultsTime - this.timer);
-      default: return -1;
-    }
-  }
+  get remainingTime() { return -1; }
 
   get isPlaying() {
     return this.state === GAME_STATES.PLAYING;
   }
 
   get isCountdown() {
-    return this.state === GAME_STATES.COUNTDOWN;
+    return false;
   }
 }

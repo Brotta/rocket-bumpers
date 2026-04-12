@@ -10,9 +10,16 @@ const MAX_STAT = 8;
  * left/right navigation.
  */
 export class CarSelect {
-  constructor(nickname, onSelect) {
+  /**
+   * @param {string} nickname
+   * @param {Function} onSelect — (carType) => void
+   * @param {object} [options]
+   * @param {boolean} [options.respawnMode=false] — if true, renders as overlay (semi-transparent bg, game continues behind)
+   */
+  constructor(nickname, onSelect, options = {}) {
     this._nickname = nickname;
     this._onSelect = onSelect;
+    this._respawnMode = options.respawnMode || false;
     this._index = 0;
     this._renderer = null;
     this._preview = null;
@@ -40,7 +47,7 @@ export class CarSelect {
 
       <div class="cs-header">
         <div class="cs-player">${this._nickname}</div>
-        <div class="cs-title">CHOOSE YOUR RIDE</div>
+        <div class="cs-title">${this._respawnMode ? 'RESPAWN — CHOOSE YOUR RIDE' : 'CHOOSE YOUR RIDE'}</div>
         <div class="cs-car-name" id="cs-car-name"></div>
       </div>
 
@@ -65,11 +72,14 @@ export class CarSelect {
         position:fixed;inset:0;z-index:1000;
         display:flex;flex-direction:column;align-items:center;
         justify-content:space-between;
-        background:radial-gradient(ellipse at center 60%, #1a0e08 0%, #0d0604 50%, #050202 100%);
+        background:${this._respawnMode
+          ? 'rgba(5, 5, 16, 0.85)'
+          : 'radial-gradient(ellipse at center 60%, #1a0e08 0%, #0d0604 50%, #050202 100%)'};
         font-family:'Courier New',monospace;
         padding:clamp(12px,3vw,24px);
         overflow:hidden;
         user-select:none;-webkit-user-select:none;
+        ${this._respawnMode ? 'backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);' : ''}
       }
 
       /* Animated orange grid background */

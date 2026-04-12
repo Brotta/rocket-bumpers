@@ -69,7 +69,7 @@ export class ArenaBuilder {
     this._buildEdgeLines();
     this._buildRockObstacles();
     this._buildGeyserSlots();
-    this._buildBoostPads();
+    // Boost pads removed — replaced by portal launch ramps in PortalSystem
     this._buildSurfaceDetails();
     this._buildSkybox();
     this._buildLighting();
@@ -1038,10 +1038,7 @@ export class ArenaBuilder {
     if (++this._decorFrameSkip >= 2) {
       this._decorFrameSkip = 0;
 
-      // Boost pad pulse
-      for (const pad of this.boostPads) {
-        pad.material.emissiveIntensity = 0.8 + Math.sin(elapsed * 4 + pad.angle * 2) * 0.7;
-      }
+      // (Boost pads removed)
 
       // Magma veins — subtle glow pulse (single shared material)
       if (this._veinMat) {

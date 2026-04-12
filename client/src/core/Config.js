@@ -438,12 +438,65 @@ export const DAMAGE = {
 
 // ── Round / Timing ───────────────────────────────────────────────────
 export const ROUND = {
-  lobbyMin: 5,        // seconds
+  lobbyMin: 5,
   lobbyMax: 30,
   countdown: 3,
   playTime: 180,
   resultsTime: 8,
   noRespawnLastSeconds: 10,
+};
+
+// ── Scoring (endless mode) ──────────────────────────────────────────
+export const SCORE = {
+  KO: 100,              // points per kill
+  BIG_HIT: 25,          // damage dealt > threshold
+  SMALL_HIT: 10,        // any damage dealt
+  DEATH: -50,           // penalty on death
+  BIG_HIT_THRESHOLD: 20,
+
+  STREAK_2X: 3,         // 2x multiplier after 3 consecutive KOs
+  STREAK_3X: 5,         // 3x multiplier after 5 consecutive KOs
+};
+
+// ── Portal (Vibe Jam 2026 webring) ──────────────────────────────────
+export const PORTAL = {
+  exitURL: 'https://vibej.am/portal/2026',
+
+  exit: {
+    height: 12,
+    radius: 3,
+    meshRadius: 2.5,
+    tubeRadius: 0.4,
+    rotationSpeed: 1.5,
+    color: 0x00ffff,
+    emissive: 0x0088ff,
+    emissiveIntensity: 2.0,
+    labelText: 'VIBE JAM PORTAL',
+  },
+
+  return: {
+    radius: 3,
+    meshRadius: 2.0,
+    tubeRadius: 0.3,
+    rotationSpeed: -1.0,
+    color: 0xff66ff,
+    emissive: 0xff00ff,
+    emissiveIntensity: 1.5,
+  },
+
+  ramps: {
+    count: 4,
+    innerRadius: 11,
+    outerRadius: 17,
+    width: 4,
+    height: 4,
+    launchForce: 16,
+    lateralForce: 3,
+    color: 0xff8800,
+    emissive: 0xff4400,
+    emissiveIntensity: 1.0,
+    cooldownPerCar: 1.5,
+  },
 };
 
 // ── Respawn ──────────────────────────────────────────────────────────
@@ -806,7 +859,8 @@ export const SHIELD_VS_RAM = {
 
 // ── Players / Bots ───────────────────────────────────────────────────
 export const PLAYERS = {
-  maxPerRoom: 8,
+  maxPerRoom: 16,
+  maxBots: 7,
   nicknameMaxLength: 12,
   nicknameDefault: 'PLAYER',
 };
@@ -817,13 +871,12 @@ export const PLAYERS = {
  * @param {number} index — slot 0-7
  * @returns {{ x: number, y: number, z: number, yaw: number }}
  */
-export function getSpawnPosition(index) {
-  const SPAWN_RADIUS = ARENA.diameter / 2 * 0.72; // 72% of arena radius
-  const angle = (index / PLAYERS.maxPerRoom) * Math.PI * 2;
+export function getSpawnPosition(index, totalSlots = 8) {
+  const SPAWN_RADIUS = ARENA.diameter / 2 * 0.72;
+  const slots = Math.max(totalSlots, 8);
+  const angle = (index / slots) * Math.PI * 2;
   const x = Math.cos(angle) * SPAWN_RADIUS;
   const z = Math.sin(angle) * SPAWN_RADIUS;
-  // Face toward center: forward is (-sin(yaw), -cos(yaw)), we need it to point at (0,0)
-  // Direction to center = (-x, -z), so: -sin(yaw) = -x → sin(yaw) = x, -cos(yaw) = -z → cos(yaw) = z
   const yaw = Math.atan2(x, z);
   return { x, y: 0.6, z, yaw };
 }
@@ -839,4 +892,6 @@ export const GAME_STATES = {
   COUNTDOWN: 'COUNTDOWN',
   PLAYING: 'PLAYING',
   RESULTS: 'RESULTS',
+  // Endless mode states
+  LOADING: 'LOADING',
 };

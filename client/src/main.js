@@ -1,14 +1,19 @@
 import { Game } from './core/Game.js';
-import { CARS, GAME_STATES } from './core/Config.js';
+import { CARS, CAR_ORDER } from './core/Config.js';
 import { SplashScreen } from './ui/SplashScreen.js';
 import { CarSelect } from './ui/CarSelect.js';
 import { preloadCarModels } from './rendering/CarFactory.js';
 import { menuMusic } from './audio/MenuMusic.js';
 
+// ── Portal detection ─────────────────────────────────────────────────
+const urlParams = new URLSearchParams(window.location.search);
+const isPortalEntry = urlParams.get('portal') === 'true';
+const portalUsername = urlParams.get('username') || null;
+
 // ── Create game instance ──────────────────────────────────────────────
 const game = new Game();
 
-// ── FPS / Frame-time counter (top-right) ─────────────────────────────
+// ��─ FPS / Frame-time counter (top-right) ─────────────────────────────
 const fpsDiv = document.createElement('div');
 fpsDiv.style.cssText = `
   position:fixed;top:16px;right:16px;
@@ -36,7 +41,7 @@ const _fpsLoop = () => {
 };
 requestAnimationFrame(_fpsLoop);
 
-// ── HUD elements ──────────────────────────────────────────────────────
+// ── HUD elements ───────────────────────────────────────���──────────────
 
 // Player info (top-left)
 const hudDiv = document.createElement('div');
@@ -143,7 +148,6 @@ const PU_DISPLAY = {
 
 function setPowerUpHud(type) {
   if (!type) {
-    // Empty slot
     puBox.style.borderColor = '#333';
     puBox.style.boxShadow = 'none';
     puBox.style.transform = 'scale(1)';
@@ -164,7 +168,6 @@ function setPowerUpHud(type) {
   puLabel.textContent = `[E] ${display.label}`;
   puLabel.style.color = colorHex;
 
-  // Pickup pop animation
   puBox.style.transform = 'scale(1.2)';
   setTimeout(() => { puBox.style.transform = 'scale(1)'; }, 200);
 }
@@ -179,15 +182,49 @@ function flashPowerUpUsed() {
   }, 300);
 }
 
-// Results overlay
-const resultsDiv = document.createElement('div');
-resultsDiv.style.cssText = `
-  position:fixed;inset:0;z-index:60;
-  display:none;align-items:center;justify-content:center;flex-direction:column;
-  background:rgba(5,5,16,0.85);
-  font-family:'Courier New',monospace;
+// ── Leaderboard (left side) ─────────────────────────────────────────
+const leaderboardDiv = document.createElement('div');
+leaderboardDiv.style.cssText = `
+  position:fixed;top:100px;left:16px;
+  color:#fff;font:bold 13px 'Courier New',monospace;
+  background:rgba(0,0,0,0.5);padding:10px 14px;
+  border-radius:6px;pointer-events:none;z-index:10;
+  display:none;min-width:180px;
 `;
-document.body.appendChild(resultsDiv);
+document.body.appendChild(leaderboardDiv);
+
+// ── Kill streak indicator (center) ──────────────────────────────────
+const streakDiv = document.createElement('div');
+streakDiv.style.cssText = `
+  position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  color:#ff0;font:bold 36px 'Courier New',monospace;
+  text-shadow:0 0 20px #ff0,0 0 40px #ff8800;
+  pointer-events:none;z-index:50;display:none;
+  transition:opacity 0.5s;
+`;
+document.body.appendChild(streakDiv);
+
+function updateLeaderboard(entries) {
+  const top5 = entries.slice(0, 5);
+  leaderboardDiv.innerHTML = '<div style="color:#0ff;margin-bottom:6px;letter-spacing:0.15em;">LEADERBOARD</div>' +
+    top5.map((e, i) => {
+      const isLocal = e.playerId === 'local';
+      const color = isLocal ? '#ff0' : (i === 0 ? '#0ff' : '#aaa');
+      const streakText = e.streak >= 3 ? ` 🔥${e.streak}` : '';
+      return `<div style="color:${color};padding:2px 0;">${i + 1}. ${e.nickname} — ${e.score}${streakText}</div>`;
+    }).join('');
+}
+
+function showStreakNotification(streak, multiplier) {
+  if (streak < 3) return;
+  streakDiv.textContent = `${multiplier}× KILL STREAK!`;
+  streakDiv.style.display = 'block';
+  streakDiv.style.opacity = '1';
+  setTimeout(() => {
+    streakDiv.style.opacity = '0';
+    setTimeout(() => { streakDiv.style.display = 'none'; }, 500);
+  }, 1500);
+}
 
 // ── HUD update functions ────────────────────────────────────────────────
 
@@ -201,6 +238,7 @@ function showHUD(nickname, carType) {
   hpDiv.style.display = 'block';
   abilityHud.style.display = 'block';
   powerupHud.style.display = 'block';
+  leaderboardDiv.style.display = 'block';
   abilityLabel.textContent = `${c.ability.name}\n[SPACE]`;
   setPowerUpHud(null);
 }
@@ -241,42 +279,17 @@ function updateHpHud() {
   }
 }
 
-function showResults(results) {
-  resultsDiv.style.display = 'flex';
-  const winner = results[0];
-  const title = winner && !winner.isEliminated ? `${winner.nickname} WINS!` : 'ROUND OVER';
-  resultsDiv.innerHTML = `
-    <h1 style="color:#0ff;font-size:2.5rem;margin-bottom:1.5rem;
-      text-shadow:0 0 20px #0ff;letter-spacing:0.15em;">${title}</h1>
-    <div style="width:min(400px,90vw)">
-      ${results.map((r, i) => {
-        const hpText = r.isEliminated ? 'ELIMINATED' : `${Math.ceil(r.hp)} HP`;
-        const color = r.isEliminated ? '#666' : (i === 0 ? '#ff0' : '#ccc');
-        const size = i === 0 ? '1.2rem' : '1rem';
-        return `
-          <div style="display:flex;justify-content:space-between;padding:8px 12px;
-            color:${color};font-size:${size};
-            border-bottom:1px solid #222;${r.isEliminated ? 'text-decoration:line-through;opacity:0.6;' : ''}">
-            <span>${i + 1}. ${r.nickname} (${r.carType})</span>
-            <span style="font-weight:bold">${hpText}</span>
-          </div>
-        `;
-      }).join('')}
-    </div>
-    <p style="color:#666;margin-top:1.5rem;font-size:0.8rem">Next round starting...</p>
-  `;
-}
-
 // ── Game event listeners ────────────────────────────────────────────────
 
-game.on('stateChange', ({ from, to }) => {
-  if (to === GAME_STATES.COUNTDOWN) {
-    resultsDiv.style.display = 'none';
-  }
+// Score events → leaderboard + streak notifications
+game.scoreManager.on('leaderboard', ({ entries }) => {
+  updateLeaderboard(entries);
 });
 
-game.on('roundEnd', ({ results }) => {
-  showResults(results);
+game.scoreManager.on('scoreUpdate', ({ playerId, streak, multiplier }) => {
+  if (playerId === 'local' && streak >= 3) {
+    showStreakNotification(streak, multiplier);
+  }
 });
 
 // ── Power-up events ────────────────────────────────────────────────────
@@ -307,7 +320,6 @@ requestAnimationFrame(_hudLoop);
 
 game.on('damage', ({ target, amount }) => {
   if (target === game.localPlayer && amount > 0) {
-    // Flash HP display red when taking damage
     hpDiv.style.color = '#ff0000';
     hpDiv.style.textShadow = '0 0 12px #ff0000';
     setTimeout(() => updateHpHud(), 200);
@@ -322,16 +334,51 @@ game.on('eliminated', ({ victim }) => {
   }
 });
 
-// ── UI Flow: Splash (load + nickname) → CarSelect → Game ─────────────
-
-new SplashScreen({
-  loadAssets: (onProgress) => preloadCarModels(onProgress),
-  onReady: (nickname) => {
-    new CarSelect(nickname, async (carType) => {
-      await menuMusic.stop();
-      await game.setPlayer(nickname, carType);
-      showHUD(nickname, carType);
-      game.start();
-    });
-  },
+// When player respawns with new car, update HUD
+game.on('playerSpawned', ({ carBody, carType }) => {
+  if (carBody === game.localPlayer) {
+    showHUD(game.playerNickname, carType);
+  }
 });
+
+// ── Respawn car select callback ───────────────────────────��─────────────
+
+game._onRespawnCarSelect = (onCarChosen) => {
+  new CarSelect(game.playerNickname, (carType) => {
+    onCarChosen(carType);
+  }, { respawnMode: true });
+};
+
+// ── Start game ──────────────────────────────────────────────────────────
+
+async function startGame(nickname, carType) {
+  await menuMusic.stop();
+  await game.setPlayer(nickname, carType);
+  showHUD(nickname, carType);
+  game.start();
+
+  // Emit initial leaderboard
+  const entries = game.scoreManager.getLeaderboard();
+  updateLeaderboard(entries);
+}
+
+if (isPortalEntry) {
+  // Portal entry: skip all menus, instant join
+  const nickname = portalUsername || 'PLAYER';
+  const randomCar = CAR_ORDER[Math.floor(Math.random() * CAR_ORDER.length)];
+
+  // Preload assets then start immediately
+  preloadCarModels(() => {}).then(() => {
+    startGame(nickname, randomCar);
+  });
+} else {
+  // Normal flow: Splash → CarSelect → Game
+  new SplashScreen({
+    loadAssets: (onProgress) => preloadCarModels(onProgress),
+    onReady: (nickname) => {
+      new CarSelect(nickname, async (carType) => {
+        startGame(nickname, carType);
+      });
+    },
+  });
+}

@@ -43,23 +43,50 @@ export class BotManager {
    * Call once after the local player has been added to carBodies.
    */
   async fillSlots() {
-    const slotsToFill = PLAYERS.maxPerRoom - this.carBodies.length;
+    // Count current human players (non-bot)
+    const humanCount = this.carBodies.filter(cb => !this.isBot(cb)).length;
+    // Max bots: min(PLAYERS.maxBots, PLAYERS.maxPerRoom - humanCount)
+    const maxBots = Math.min(PLAYERS.maxBots, PLAYERS.maxPerRoom - humanCount);
+    const slotsToFill = Math.max(0, maxBots - this.bots.length);
+
     const availableNames = BOTS.names.slice();
-    // Shuffle names
     for (let i = availableNames.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [availableNames[i], availableNames[j]] = [availableNames[j], availableNames[i]];
     }
 
     const promises = [];
-    // Slot 0 is reserved for local player; bots fill slots 1..7
-    const startSlot = this.carBodies.length; // typically 1 (after local player)
+    const startSlot = this.carBodies.length;
     for (let i = 0; i < slotsToFill; i++) {
       const name = availableNames[i % availableNames.length];
       const carType = CAR_KEYS[Math.floor(Math.random() * CAR_KEYS.length)];
       promises.push(this._spawnBot(name, carType, startSlot + i));
     }
     await Promise.all(promises);
+  }
+
+  /**
+   * Adjust bot count when human players join/leave (multiplayer-ready).
+   * Removes bots to stay within limits, or adds bots to fill empty space.
+   */
+  async adjustBotCount(humanCount) {
+    const maxBots = Math.min(PLAYERS.maxBots, PLAYERS.maxPerRoom - humanCount);
+    // Remove excess bots
+    while (this.bots.length > maxBots) {
+      const bot = this.bots.pop();
+      sampleEngineAudio.removeCar(bot.carBody);
+      this.scene.remove(bot.carBody.mesh);
+      this.world.removeBody(bot.carBody.body);
+      bot.ability.dispose();
+      this.abilities.delete(bot.carBody);
+      const idx = this.carBodies.indexOf(bot.carBody);
+      if (idx !== -1) this.carBodies.splice(idx, 1);
+    }
+    // Add bots if needed
+    if (this.bots.length < maxBots) {
+      await this.fillSlots();
+    }
+    this._syncBrainReferences();
   }
 
   /** Tick all bot brains and apply their inputs. */
