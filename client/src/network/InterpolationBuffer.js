@@ -13,7 +13,13 @@ export class InterpolationBuffer {
   constructor(bufferSize = 10, interpolationDelay = 100) {
     this._buffer = [];
     this._maxSize = bufferSize;
+    this._baseDelay = interpolationDelay;
     this._delay = interpolationDelay;
+
+    // Adaptive jitter tracking
+    this._lastPushTime = 0;
+    this._jitterSamples = [];
+    this._maxJitterSamples = 30;
   }
 
   /**
@@ -25,8 +31,21 @@ export class InterpolationBuffer {
     if (isNaN(state.posX) || isNaN(state.posY) || isNaN(state.posZ) ||
         isNaN(state.velX) || isNaN(state.velY) || isNaN(state.velZ)) return;
 
+    const now = performance.now();
+
+    // Track inter-packet jitter to adapt interpolation delay
+    if (this._lastPushTime > 0) {
+      const gap = now - this._lastPushTime;
+      this._jitterSamples.push(gap);
+      if (this._jitterSamples.length > this._maxJitterSamples) {
+        this._jitterSamples.shift();
+      }
+      this._updateAdaptiveDelay();
+    }
+    this._lastPushTime = now;
+
     const entry = {
-      time: performance.now(),
+      time: now,
       ...state,
     };
     this._buffer.push(entry);
@@ -46,7 +65,7 @@ export class InterpolationBuffer {
       // Single snapshot — extrapolate using velocity for smooth motion
       const s = this._buffer[0];
       const elapsed = (performance.now() - s.time) / 1000;
-      if (elapsed > 0 && elapsed < 0.2) {
+      if (elapsed > 0 && elapsed < 0.35) {
         return {
           posX: s.posX + s.velX * elapsed,
           posY: s.posY + s.velY * elapsed,
@@ -72,7 +91,7 @@ export class InterpolationBuffer {
     if (a === b) {
       // Only one unique snapshot — extrapolate using its velocity
       const elapsed = (renderTime - a.time) / 1000;
-      if (elapsed > 0 && elapsed < 0.2) { // cap extrapolation at 200ms
+      if (elapsed > 0 && elapsed < 0.35) { // cap extrapolation at 350ms
         return {
           posX: a.posX + a.velX * elapsed,
           posY: a.posY + a.velY * elapsed,
@@ -92,7 +111,7 @@ export class InterpolationBuffer {
     // If t > 1, we've run past the latest snapshot — extrapolate gently
     if (rawT > 1) {
       const overshoot = (renderTime - b.time) / 1000; // seconds past b
-      if (overshoot > 0 && overshoot < 0.2) { // cap at 200ms
+      if (overshoot > 0 && overshoot < 0.35) { // cap at 350ms
         return {
           posX: b.posX + b.velX * overshoot,
           posY: b.posY + b.velY * overshoot,
@@ -130,10 +149,35 @@ export class InterpolationBuffer {
   }
 
   /**
+   * Adapt interpolation delay based on measured jitter.
+   * Low jitter → smaller delay (more responsive).
+   * High jitter → larger delay (smoother, avoids stalls).
+   */
+  _updateAdaptiveDelay() {
+    if (this._jitterSamples.length < 5) return;
+    // Compute mean and standard deviation of inter-packet gaps
+    let sum = 0;
+    for (let i = 0; i < this._jitterSamples.length; i++) sum += this._jitterSamples[i];
+    const mean = sum / this._jitterSamples.length;
+    let variance = 0;
+    for (let i = 0; i < this._jitterSamples.length; i++) {
+      const d = this._jitterSamples[i] - mean;
+      variance += d * d;
+    }
+    const stdDev = Math.sqrt(variance / this._jitterSamples.length);
+    // Delay = mean gap + 2× stddev, clamped between baseDelay*0.5 and baseDelay*2.5
+    const desired = mean + 2 * stdDev;
+    this._delay = Math.max(this._baseDelay * 0.5, Math.min(desired, this._baseDelay * 2.5));
+  }
+
+  /**
    * Clear the buffer.
    */
   clear() {
     this._buffer.length = 0;
+    this._jitterSamples.length = 0;
+    this._lastPushTime = 0;
+    this._delay = this._baseDelay;
   }
 }
 
