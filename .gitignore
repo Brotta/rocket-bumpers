@@ -1,9 +1,9 @@
 node_modules/
 dist/
 .DS_Store
-*.png
-*.jpg
-*.jpeg
+
+# Don't ignore game assets
+!client/public/assets/**
 
 # IDE/AI agent folders
 .adal/
