@@ -409,11 +409,33 @@ export class PowerUpManager {
     }
   }
 
-  /** Remote player used a power-up — trigger visual effects. */
+  /** Remote player used a power-up — trigger visual/gameplay effects. */
   onNetworkUsed(playerId, powerupType, pos) {
-    // For now, remote power-up usage creates visual effects at the given position.
-    // Full projectile sync would require tracking remote projectiles.
-    // Minimal implementation: just log for now, expand later.
+    if (!pos) return;
+
+    switch (powerupType) {
+      case 'GLITCH_BOMB': {
+        // Spawn the 3D pulse VFX at the remote player's position
+        const fakeCar = { body: { position: { x: pos[0], y: pos[1], z: pos[2] } } };
+        this._spawnGlitchPulseVFX(fakeCar);
+
+        // Apply glitch effect to local player if within blast radius
+        const localPlayer = this.getLocalPlayer();
+        if (localPlayer && !localPlayer.isEliminated) {
+          const dx = localPlayer.body.position.x - pos[0];
+          const dz = localPlayer.body.position.z - pos[2];
+          const dist = Math.sqrt(dx * dx + dz * dz);
+          const config = POWERUPS.GLITCH_BOMB;
+          if (dist <= config.blastRadius) {
+            this._applyGlitchToTarget(localPlayer, null, config);
+          }
+        }
+        this._playGlitchBombSFX();
+        break;
+      }
+      default:
+        break;
+    }
   }
 
   /** Spawn a pickup with a specific type (for server-controlled spawns). */
@@ -1075,7 +1097,60 @@ export class PowerUpManager {
         }
       }
     }
+    // Notify other clients via server
+    if (this._networkManager?.isMultiplayer) {
+      this._networkManager.sendObstacleDestroyed(px, py, pz);
+    }
     this._emit('obstacle-destroyed', { type, x: px, y: py, z: pz });
+  }
+
+  /** Remote obstacle destruction — find and remove by position (no network re-send). */
+  onNetworkObstacleDestroyed(x, y, z) {
+    if (!this.obstacleBodies) return;
+    for (let i = this.obstacleBodies.length - 1; i >= 0; i--) {
+      const ob = this.obstacleBodies[i];
+      const dx = ob.position.x - x;
+      const dy = ob.position.y - y;
+      const dz = ob.position.z - z;
+      if (dx * dx + dy * dy + dz * dz < 4) { // within 2 units
+        this._destroyObstacleLocal(i);
+        return;
+      }
+    }
+  }
+
+  /** Destroy obstacle locally only (no network message). Used by onNetworkObstacleDestroyed. */
+  _destroyObstacleLocal(obstacleIndex) {
+    const ob = this.obstacleBodies[obstacleIndex];
+    const px = ob.position.x, py = ob.position.y, pz = ob.position.z;
+    const radius = ob._obstacleRadius || 1.5;
+    const type = ob._obstacleType || 'boulder';
+
+    this.world.removeBody(ob);
+    this.obstacleBodies.splice(obstacleIndex, 1);
+
+    if (this.obstacleGroups) {
+      for (let i = this.obstacleGroups.length - 1; i >= 0; i--) {
+        const og = this.obstacleGroups[i];
+        const gp = og.group.position;
+        const dx = gp.x - px, dz = gp.z - pz;
+        if (dx * dx + dz * dz < (radius + 1) ** 2) {
+          this._spawnShatterVFX(og.group.position, type);
+          this.scene.remove(og.group);
+          og.group.traverse((c) => {
+            if (c.isMesh) {
+              c.geometry?.dispose();
+              if (c.material) {
+                if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+                else c.material.dispose();
+              }
+            }
+          });
+          this.obstacleGroups.splice(i, 1);
+          break;
+        }
+      }
+    }
   }
 
   _spawnShatterVFX(pos, type) {

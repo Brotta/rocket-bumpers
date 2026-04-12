@@ -508,6 +508,11 @@ export class Game {
       this.powerUpManager.onNetworkUsed(playerId, powerupType, pos);
     });
 
+    // Remote obstacle destruction
+    _on('obstacleDestroyed', ({ x, y, z }) => {
+      this.powerUpManager.onNetworkObstacleDestroyed(x, y, z);
+    });
+
     // Ability used by remote player
     _on('abilityUsed', ({ playerId, abilityType, pos }) => {
       // Visual-only feedback for remote abilities (minimal for now)

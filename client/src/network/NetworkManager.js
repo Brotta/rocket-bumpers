@@ -238,6 +238,13 @@ export class NetworkManager {
     });
   }
 
+  sendObstacleDestroyed(x, y, z) {
+    this._sendJSON({
+      type: MSG.OBSTACLE_DESTROYED,
+      x, y, z,
+    });
+  }
+
   sendPlayerFell(lastHitById) {
     this._sendJSON({
       type: MSG.PLAYER_FELL,
@@ -344,6 +351,9 @@ export class NetworkManager {
 
       case SRV.SCORE_UPDATE:
         this._emit('scoreUpdate', data);
+        break;
+      case SRV.OBSTACLE_DESTROYED:
+        this._emit('obstacleDestroyed', data);
         break;
     }
   }

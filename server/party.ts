@@ -123,6 +123,10 @@ export default class RocketBumpersServer implements Party.Server {
   // Interval IDs for cleanup
   _intervals: ReturnType<typeof setInterval>[] = [];
 
+  // Server tick: buffer latest binary state per entity, broadcast at 30Hz
+  _stateBuffers: Map<string, { buffer: ArrayBuffer; senderId: string }> = new Map();
+  readonly TICK_RATE_MS = 33; // ~30Hz
+
   constructor(readonly room: Party.Room) {}
 
   onStart() {
@@ -137,6 +141,9 @@ export default class RocketBumpersServer implements Party.Server {
         respawnAt: null,
       });
     }
+
+    // Server tick loop: batch-broadcast all player states at 30Hz
+    this._intervals.push(setInterval(() => this._tickBroadcast(), this.TICK_RATE_MS));
 
     // Power-up respawn timer (check every second)
     this._intervals.push(setInterval(() => this._checkPowerupRespawns(), 1000));
@@ -178,6 +185,7 @@ export default class RocketBumpersServer implements Party.Server {
     this.players.delete(playerId);
     this.rateLimits.delete(playerId);
     this.obstacleDamageCooldowns.delete(playerId);
+    this._stateBuffers.delete(playerId);
     const invTimer = this.invincibilityTimers.get(playerId);
     if (invTimer) { clearTimeout(invTimer); this.invincibilityTimers.delete(playerId); }
 
@@ -200,6 +208,7 @@ export default class RocketBumpersServer implements Party.Server {
       }
       for (const botId of botIds) {
         this.players.delete(botId);
+        this._stateBuffers.delete(botId);
         this.room.broadcast(JSON.stringify({
           type: SRV.PLAYER_LEFT,
           id: botId,
@@ -273,6 +282,9 @@ export default class RocketBumpersServer implements Party.Server {
         break;
       case MSG.PLAYER_RESPAWN:
         this._onPlayerRespawn(data, sender);
+        break;
+      case MSG.OBSTACLE_DESTROYED:
+        this._onObstacleDestroyed(data, sender);
         break;
     }
   }
@@ -401,8 +413,8 @@ export default class RocketBumpersServer implements Party.Server {
     // Security: non-host can only send their own state
     if (sender.id !== this.hostId && entityId !== sender.id) return;
 
-    // Relay the entire binary message as-is to all OTHER clients
-    this.room.broadcast(buffer, [sender.id]);
+    // Buffer latest state — will be batch-broadcast at 30Hz tick
+    this._stateBuffers.set(entityId, { buffer: buffer.slice(0), senderId: sender.id });
 
     // Update server-side state for the entity
     // State layout: [0x01][idLen:1][entityId:N][carTypeIndex:1][...16 bytes float16...][flags:1][hp:1]
@@ -682,6 +694,21 @@ export default class RocketBumpersServer implements Party.Server {
     }
   }
 
+  _onObstacleDestroyed(data: any, sender: Party.Connection) {
+    const player = this.players.get(sender.id);
+    if (!player) return;
+
+    const { x, y, z } = data;
+    if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return;
+    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return;
+
+    // Broadcast to all OTHER clients so they remove the obstacle too
+    this.room.broadcast(JSON.stringify({
+      type: SRV.OBSTACLE_DESTROYED,
+      x, y, z,
+    }), [sender.id]);
+  }
+
   _onChangeCar(data: any, sender: Party.Connection) {
     const player = this.players.get(sender.id);
     if (!player) return;
@@ -724,6 +751,18 @@ export default class RocketBumpersServer implements Party.Server {
       if (p) p.isInvincible = false;
     }, ms);
     this.invincibilityTimers.set(playerId, handle);
+  }
+
+  // ── Server tick: batch-broadcast player states ──────────────────────
+
+  _tickBroadcast() {
+    if (this._stateBuffers.size === 0 || this.players.size === 0) return;
+
+    // Send each buffered state to all clients except the original sender
+    for (const [, { buffer, senderId }] of this._stateBuffers) {
+      this.room.broadcast(buffer, [senderId]);
+    }
+    this._stateBuffers.clear();
   }
 
   // ── Power-up respawns ────────────────────────────────────────────────

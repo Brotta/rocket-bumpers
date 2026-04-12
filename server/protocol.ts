@@ -14,6 +14,7 @@ export const MSG = {
   OBSTACLE_DAMAGE: 'OBSTACLE_DAMAGE',
   POWERUP_DAMAGE: 'POWERUP_DAMAGE',
   ENV_DAMAGE: 'ENV_DAMAGE',
+  OBSTACLE_DESTROYED: 'OBSTACLE_DESTROYED',
 
   // Binary message type byte
   PLAYER_STATE_BIN: 0x01,
@@ -36,6 +37,7 @@ export const SRV = {
   HOST_CHANGED: 'HOST_CHANGED',
   SCORE_UPDATE: 'SCORE_UPDATE',
   ROOM_FULL: 'ROOM_FULL',
+  OBSTACLE_DESTROYED: 'OBSTACLE_DESTROYED',
 } as const;
 
 // ── Shared game constants (must match client Config.js) ────────────────
