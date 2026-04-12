@@ -42,7 +42,21 @@ export class InterpolationBuffer {
   sample() {
     const len = this._buffer.length;
     if (len === 0) return null;
-    if (len === 1) return this._buffer[0];
+    if (len === 1) {
+      // Single snapshot — extrapolate using velocity for smooth motion
+      const s = this._buffer[0];
+      const elapsed = (performance.now() - s.time) / 1000;
+      if (elapsed > 0 && elapsed < 0.2) {
+        return {
+          posX: s.posX + s.velX * elapsed,
+          posY: s.posY + s.velY * elapsed,
+          posZ: s.posZ + s.velZ * elapsed,
+          velX: s.velX, velY: s.velY, velZ: s.velZ,
+          yaw: s.yaw, speed: s.speed, flags: s.flags, hp: s.hp,
+        };
+      }
+      return s;
+    }
 
     const renderTime = performance.now() - this._delay;
 

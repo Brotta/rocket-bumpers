@@ -193,6 +193,19 @@ export default class RocketBumpersServer implements Party.Server {
 
     // Host migration
     if (playerId === this.hostId) {
+      // Clean up orphaned bot entries — bots are managed by the host client
+      const botIds: string[] = [];
+      for (const [id] of this.players) {
+        if (id.startsWith('bot_')) botIds.push(id);
+      }
+      for (const botId of botIds) {
+        this.players.delete(botId);
+        this.room.broadcast(JSON.stringify({
+          type: SRV.PLAYER_LEFT,
+          id: botId,
+        }));
+      }
+
       this.hostId = this.connectionOrder[0] || null;
       if (this.hostId) {
         this.room.broadcast(JSON.stringify({

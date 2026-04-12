@@ -69,7 +69,7 @@ export class RemotePlayerManager {
       position: new CANNON.Vec3(0, 0.6, 0),
       collisionFilterGroup: COLLISION_GROUPS.CAR,
       collisionFilterMask: COLLISION_GROUPS.CAR, // only collide with other cars, not floor/obstacles
-      collisionResponse: false, // detect but don't resolve — reduces physics solver overhead
+      collisionResponse: true, // must be true for CANNON to fire 'collide' events
     });
     physBody.mass = mass; // store real mass for damage calculation
     this.game.physicsWorld.world.addBody(physBody);
