@@ -895,3 +895,14 @@ export const GAME_STATES = {
   // Endless mode states
   LOADING: 'LOADING',
 };
+
+// ── Network (Multiplayer) ───────────────────────────────────────────────
+export const NETWORK = {
+  partyKitHost: 'rocket-bumpers.brotta.partykit.dev',
+  interpolationBuffer: 100,  // ms behind live to render remote players (≥2× sendRate interval)
+  snapThreshold: 5,          // units — snap instead of interpolate if distance exceeds this
+  sendRate: 20,              // Hz — network state send rate
+  maxMessagesPerSecond: 60,
+  reconnectAttempts: 3,
+  reconnectDelay: 1000,      // ms
+};

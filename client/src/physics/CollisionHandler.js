@@ -47,6 +47,9 @@ export class CollisionHandler {
     // Per-pair damage cooldown: "idA-idB" → timestamp when cooldown expires
     this._pairCooldowns = new Map();
 
+    // Multiplayer: reference to NetworkManager (set by Game.connectMultiplayer)
+    this._networkManager = null;
+
     // World post-step: enforce velocity cap on all cars
     this.world.addEventListener('postStep', () => this._postStep());
   }
@@ -238,13 +241,24 @@ export class CollisionHandler {
       // Obstacle damage (proportional to speed, capped)
       const obsDmg = Math.min(DAMAGE.OBSTACLE_DAMAGE * (speed / 20), DAMAGE.OBSTACLE_DAMAGE);
       if (obsDmg > 0) {
-        const actual = carBody.takeDamage(obsDmg);
-        if (actual > 0) {
+        const isMultiplayer = this._networkManager?.isMultiplayer;
+        if (isMultiplayer) {
+          // In multiplayer, report obstacle damage to server — server applies HP
+          this._networkManager.sendObstacleDamage(obsDmg);
           this._emit('damage', {
-            target: carBody, amount: actual, source: null,
+            target: carBody, amount: obsDmg, source: null,
             tier: 'light', wasAbility: false,
+            _vfxOnly: true,
           });
-          this._checkEliminated(carBody, null, false);
+        } else {
+          const actual = carBody.takeDamage(obsDmg);
+          if (actual > 0) {
+            this._emit('damage', {
+              target: carBody, amount: actual, source: null,
+              tier: 'light', wasAbility: false,
+            });
+            this._checkEliminated(carBody, null, false);
+          }
         }
       }
 
@@ -327,24 +341,68 @@ export class CollisionHandler {
     const tierAtoB = this._hitTier(dmgAtoB);
     const tierBtoA = this._hitTier(dmgBtoA);
 
-    // Apply damage
-    if (dmgAtoB > 0) {
-      const actual = otherCar.takeDamage(dmgAtoB, carBody, wasAbilityA);
-      if (actual > 0) {
+    const isMultiplayer = this._networkManager?.isMultiplayer;
+
+    if (isMultiplayer) {
+      // ── Multiplayer: report collision to server, let server apply damage ──
+      // Only send if the attacker is locally-simulated (not remote) to avoid double-reports.
+      // This covers both local player and host-managed bots.
+      if (dmgAtoB > 0 && !carBody._isRemote && carBody.playerId) {
+        this._networkManager.sendCollision(
+          otherCar.playerId,
+          approachA,
+          carBody.body.mass,
+          otherCar.body.mass,
+          this._angleFactor(carBody, otherCar),
+          wasAbilityA,
+        );
+      }
+      if (dmgBtoA > 0 && !otherCar._isRemote && otherCar.playerId) {
+        this._networkManager.sendCollision(
+          carBody.playerId,
+          approachB,
+          otherCar.body.mass,
+          carBody.body.mass,
+          this._angleFactor(otherCar, carBody),
+          wasAbilityB,
+        );
+      }
+
+      // Still emit local VFX events (immediate feedback, no HP change)
+      if (dmgAtoB > 0) {
         this._emit('damage', {
-          target: otherCar, amount: actual, source: carBody,
+          target: otherCar, amount: dmgAtoB, source: carBody,
           tier: tierAtoB, wasAbility: wasAbilityA,
+          _vfxOnly: true,
         });
       }
-    }
-
-    if (dmgBtoA > 0) {
-      const actual = carBody.takeDamage(dmgBtoA, otherCar, wasAbilityB);
-      if (actual > 0) {
+      if (dmgBtoA > 0) {
         this._emit('damage', {
-          target: carBody, amount: actual, source: otherCar,
+          target: carBody, amount: dmgBtoA, source: otherCar,
           tier: tierBtoA, wasAbility: wasAbilityB,
+          _vfxOnly: true,
         });
+      }
+    } else {
+      // ── Single player: apply damage directly ──
+      if (dmgAtoB > 0) {
+        const actual = otherCar.takeDamage(dmgAtoB, carBody, wasAbilityA);
+        if (actual > 0) {
+          this._emit('damage', {
+            target: otherCar, amount: actual, source: carBody,
+            tier: tierAtoB, wasAbility: wasAbilityA,
+          });
+        }
+      }
+
+      if (dmgBtoA > 0) {
+        const actual = carBody.takeDamage(dmgBtoA, otherCar, wasAbilityB);
+        if (actual > 0) {
+          this._emit('damage', {
+            target: carBody, amount: actual, source: otherCar,
+            tier: tierBtoA, wasAbility: wasAbilityB,
+          });
+        }
       }
     }
 
@@ -366,9 +424,11 @@ export class CollisionHandler {
     otherCar._internalVelX -= bnx * bounce;
     otherCar._internalVelZ -= bnz * bounce;
 
-    // Check eliminations after both damages are applied
-    this._checkEliminated(otherCar, carBody, wasAbilityA);
-    this._checkEliminated(carBody, otherCar, wasAbilityB);
+    // Check eliminations after both damages are applied (single player only)
+    if (!isMultiplayer) {
+      this._checkEliminated(otherCar, carBody, wasAbilityA);
+      this._checkEliminated(carBody, otherCar, wasAbilityB);
+    }
   }
 
   // ── Elimination check ─────────────────────────────────────────────────
@@ -497,24 +557,34 @@ export class CollisionHandler {
   // ── Fall detection ────────────────────────────────────────────────────
 
   _handleFall(carBody) {
-    // Apply fall damage instead of score penalty
-    const actual = carBody.takeDamage(DAMAGE.FALL_DAMAGE);
-    if (actual > 0) {
-      this._emit('damage', {
-        target: carBody, amount: actual, source: null,
-        tier: 'heavy', wasAbility: false,
-      });
-    }
+    const isMultiplayer = this._networkManager?.isMultiplayer;
 
-    // Check if the fall eliminated the car
-    if (carBody.isEliminated) {
-      // Credit the last attacker if within attribution window
+    if (isMultiplayer) {
+      // In multiplayer, report fall to server — server handles damage
       const hit = carBody.lastHitBy;
       const now = performance.now();
       const windowMs = KO_ATTRIBUTION.windowSeconds * 1000;
-      const killer = (hit && (now - hit.time) < windowMs) ? hit.source : null;
-      const wasAbility = killer ? hit.wasAbility : false;
-      this._checkEliminated(carBody, killer, wasAbility);
+      const lastHitById = (hit && (now - hit.time) < windowMs) ? hit.source?.playerId : null;
+      this._networkManager.sendPlayerFell(lastHitById);
+    } else {
+      // Single player: apply fall damage directly
+      const actual = carBody.takeDamage(DAMAGE.FALL_DAMAGE);
+      if (actual > 0) {
+        this._emit('damage', {
+          target: carBody, amount: actual, source: null,
+          tier: 'heavy', wasAbility: false,
+        });
+      }
+
+      // Check if the fall eliminated the car
+      if (carBody.isEliminated) {
+        const hit = carBody.lastHitBy;
+        const now = performance.now();
+        const windowMs = KO_ATTRIBUTION.windowSeconds * 1000;
+        const killer = (hit && (now - hit.time) < windowMs) ? hit.source : null;
+        const wasAbility = killer ? hit.wasAbility : false;
+        this._checkEliminated(carBody, killer, wasAbility);
+      }
     }
 
     this._emit('fell', { victim: carBody });

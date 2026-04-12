@@ -1,0 +1,71 @@
+// ── Message type constants ─────────────────────────────────────────────
+
+// Client → Server
+export const MSG = {
+  // JSON messages
+  PLAYER_JOIN: 'PLAYER_JOIN',
+  COLLISION: 'COLLISION',
+  PICKUP_POWERUP: 'PICKUP_POWERUP',
+  USE_POWERUP: 'USE_POWERUP',
+  USE_ABILITY: 'USE_ABILITY',
+  PLAYER_FELL: 'PLAYER_FELL',
+  CHANGE_CAR: 'CHANGE_CAR',
+  PLAYER_RESPAWN: 'PLAYER_RESPAWN',
+  OBSTACLE_DAMAGE: 'OBSTACLE_DAMAGE',
+
+  // Binary message type byte
+  PLAYER_STATE_BIN: 0x01,
+} as const;
+
+// Server → Client
+export const SRV = {
+  ROOM_STATE: 'ROOM_STATE',
+  PLAYER_JOINED: 'PLAYER_JOINED',
+  PLAYER_LEFT: 'PLAYER_LEFT',
+  PLAYER_UPDATE: 'PLAYER_UPDATE',
+  DAMAGE_DEALT: 'DAMAGE_DEALT',
+  PLAYER_ELIMINATED: 'PLAYER_ELIMINATED',
+  POWERUP_SPAWNED: 'POWERUP_SPAWNED',
+  POWERUP_TAKEN: 'POWERUP_TAKEN',
+  PICKUP_DENIED: 'PICKUP_DENIED',
+  POWERUP_USED: 'POWERUP_USED',
+  ABILITY_USED: 'ABILITY_USED',
+  PLAYER_RESPAWN: 'PLAYER_RESPAWN',
+  HOST_CHANGED: 'HOST_CHANGED',
+  SCORE_UPDATE: 'SCORE_UPDATE',
+  ROOM_FULL: 'ROOM_FULL',
+} as const;
+
+// ── Shared game constants (must match client Config.js) ────────────────
+
+export const GAME = {
+  MAX_VELOCITY: 45,
+  PAIR_COOLDOWN_MS: 1000,
+  POWERUP_RESPAWN_MS: 8000,
+  MAX_HP: 100,
+  MAX_PLAYERS: 16,
+  MAX_BOTS: 7,
+
+  // Damage formula constants
+  BASE_DAMAGE: 8,
+  REF_SPEED: 15,
+  MIN_SPEED: 3,
+  MIN_DAMAGE: 2,
+  MAX_DAMAGE: 45,
+  ANGLE_MIN: 0.3,
+  ANGLE_MAX: 1.0,
+  ARMOR_FACTOR: 0.08,
+
+  // Scoring
+  SCORE_KO: 100,
+  SCORE_BIG_HIT: 25,
+  SCORE_SMALL_HIT: 10,
+  SCORE_DEATH: -50,
+  SCORE_BIG_HIT_THRESHOLD: 20,
+  SCORE_STREAK_2X: 3,
+  SCORE_STREAK_3X: 5,
+
+  // Environmental damage
+  FALL_DAMAGE: 25,
+  KO_ATTRIBUTION_WINDOW_MS: 3000,
+} as const;

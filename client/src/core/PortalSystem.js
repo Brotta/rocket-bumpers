@@ -51,6 +51,9 @@ export class PortalSystem {
     this._warpCanvas = null;
     this._warpCtx = null;
 
+    // ── Multiplayer: set by Game.connectMultiplayer ──
+    this._networkManager = null;
+
     // ── Incoming portal params ──
     this._incomingParams = this._parseURLParams();
 
@@ -126,9 +129,10 @@ export class PortalSystem {
     // Ref (this game's URL)
     params.set('ref', window.location.origin + window.location.pathname);
 
-    // Score
+    // Score — use server-assigned playerId in multiplayer, fallback to 'local'
     if (scoreManager) {
-      const stats = scoreManager.getPlayerStats('local');
+      const playerId = this._networkManager?.localPlayerId || 'local';
+      const stats = scoreManager.getPlayerStats(playerId);
       if (stats) {
         params.set('score', stats.score.toString());
       }
@@ -634,8 +638,11 @@ export class PortalSystem {
     // Fade in
     requestAnimationFrame(() => { overlay.style.opacity = '1'; });
 
-    // Redirect after animation
+    // Redirect after animation — disconnect from multiplayer first
     setTimeout(() => {
+      if (this._networkManager) {
+        this._networkManager.disconnect();
+      }
       window.location.href = this._warpURL;
     }, 2200);
   }

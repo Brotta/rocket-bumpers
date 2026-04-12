@@ -215,6 +215,12 @@ export class PowerUpManager {
       this._boxTemplate = null;
     });
 
+    // Multiplayer: set by Game.connectMultiplayer
+    this._networkManager = null;
+
+    // Optimistic pickup tracking (for rollback on denial)
+    this._optimisticPickups = new Map(); // pedestalId → car
+
     this._buildPedestals();
   }
 
@@ -232,10 +238,13 @@ export class PowerUpManager {
     const now = performance.now();
     const carBodies = this.getCarBodies();
 
-    // ── Pedestal logic (unchanged) ──
+    // ── Pedestal logic ──
     for (const pedestal of this._pedestals) {
-      if (!pedestal.active && pedestal.respawnAt > 0 && now >= pedestal.respawnAt) {
-        this._spawnPickup(pedestal);
+      // In multiplayer, server controls respawn timers via POWERUP_SPAWNED events
+      if (!this._networkManager?.isMultiplayer) {
+        if (!pedestal.active && pedestal.respawnAt > 0 && now >= pedestal.respawnAt) {
+          this._spawnPickup(pedestal);
+        }
       }
 
       if (pedestal.active && pedestal.pickupMesh) {
@@ -287,7 +296,14 @@ export class PowerUpManager {
           const dy = car.body.position.y - (pedestal.y || 0);
           const dist = Math.sqrt(dx * dx + dz * dz);
           if (dist < PICKUP_RADIUS && Math.abs(dy) < 3) {
-            this._pickup(pedestal, car);
+            if (this._networkManager?.isMultiplayer) {
+              // Multiplayer: send pickup request, do optimistic local pickup
+              this._networkManager.sendPickupRequest(`pu_${pedestal.index}`);
+              this._optimisticPickups.set(`pu_${pedestal.index}`, car);
+              this._pickup(pedestal, car);
+            } else {
+              this._pickup(pedestal, car);
+            }
             break;
           }
         }
@@ -325,10 +341,127 @@ export class PowerUpManager {
     this._held.set(car, null);
     this._applyEffect(type, car);
     this._emit('used', { car, type });
+
+    // Notify server of power-up usage
+    if (this._networkManager?.isMultiplayer) {
+      const pos = car.body.position;
+      this._networkManager.sendPowerUpUsed(type, [pos.x, pos.y, pos.z]);
+    }
+
     return true;
   }
 
   drop(car) { this._held.set(car, null); }
+
+  // ── Network event handlers (called by Game.js) ────────────────────────
+
+  /** Server confirmed a power-up spawn on a pedestal. */
+  onNetworkSpawn(id, powerupType, position) {
+    const idx = parseInt(id.replace('pu_', ''), 10);
+    const pedestal = this._pedestals[idx];
+    if (!pedestal) return;
+    if (pedestal.active) return; // already active
+
+    // Override the type with server's choice and spawn
+    this._spawnPickupWithType(pedestal, powerupType);
+  }
+
+  /** Server confirmed a power-up was taken by a player. */
+  onNetworkTaken(id, playerId, powerupType) {
+    const idx = parseInt(id.replace('pu_', ''), 10);
+    const pedestal = this._pedestals[idx];
+    if (!pedestal) return;
+
+    // If this wasn't our optimistic pickup, clear the pedestal
+    const optimisticCar = this._optimisticPickups.get(id);
+    this._optimisticPickups.delete(id);
+
+    if (!optimisticCar) {
+      // Someone else picked it up — remove visual
+      if (pedestal.active && pedestal.pickupMesh) {
+        this.scene.remove(pedestal.pickupMesh);
+        pedestal.pickupMesh = null;
+      }
+      pedestal.active = false;
+      pedestal.ringMat.emissive.setHex(0x222222);
+      pedestal.glowLight.intensity = 0.1;
+      pedestal.respawnAt = 0; // server controls respawn
+    }
+    // If it was our optimistic pickup, we already handled the visual
+  }
+
+  /** Server denied our pickup request — rollback optimistic pickup. */
+  onNetworkPickupDenied(powerupId) {
+    const car = this._optimisticPickups.get(powerupId);
+    this._optimisticPickups.delete(powerupId);
+    if (!car) return;
+
+    // Rollback: remove held power-up from car
+    const heldType = this._held.get(car);
+    this._held.set(car, null);
+    this._emit('pickup', { car, type: null }); // clear HUD
+
+    // Restore pedestal visuals — re-spawn the pickup mesh
+    const idx = parseInt(powerupId.replace('pu_', ''), 10);
+    const pedestal = this._pedestals[idx];
+    if (pedestal && !pedestal.active && heldType) {
+      this._spawnPickupWithType(pedestal, heldType);
+    }
+  }
+
+  /** Remote player used a power-up — trigger visual effects. */
+  onNetworkUsed(playerId, powerupType, pos) {
+    // For now, remote power-up usage creates visual effects at the given position.
+    // Full projectile sync would require tracking remote projectiles.
+    // Minimal implementation: just log for now, expand later.
+  }
+
+  /** Spawn a pickup with a specific type (for server-controlled spawns). */
+  _spawnPickupWithType(pedestal, type) {
+    // Same as _spawnPickup but with a predetermined type
+    const group = new THREE.Group();
+    group.position.set(pedestal.x, (pedestal.y || 0) + FLOAT_HEIGHT, pedestal.z);
+
+    const glowRingGeo = new THREE.TorusGeometry(1.0, 0.08, 8, 32);
+    const glowRingMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff, emissive: 0xff0000, emissiveIntensity: 3,
+      transparent: true, opacity: 0.7,
+    });
+    const glowRing = new THREE.Mesh(glowRingGeo, glowRingMat);
+    group.add(glowRing);
+
+    const glowRing2Mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff, emissive: 0x00ff00, emissiveIntensity: 3,
+      transparent: true, opacity: 0.7,
+    });
+    const glowRing2 = new THREE.Mesh(glowRingGeo, glowRing2Mat);
+    group.add(glowRing2);
+
+    group.userData.glowRing = glowRing;
+    group.userData.glowRingMat = glowRingMat;
+    group.userData.glowRing2 = glowRing2;
+    group.userData.glowRing2Mat = glowRing2Mat;
+    group.userData.boxMesh = null;
+
+    if (this._boxTemplate) {
+      this._addBoxModel(group);
+    } else {
+      this._boxModelReady.then(() => {
+        if (pedestal.pickupMesh === group && pedestal.active) {
+          this._addBoxModel(group);
+        }
+      });
+    }
+
+    this.scene.add(group);
+    pedestal.ringMat.emissive.setHex(0xffffff);
+    pedestal.glowLight.color.setHex(0xffffff);
+    pedestal.glowLight.intensity = 0.6;
+    pedestal.active = true;
+    pedestal.type = type;
+    pedestal.pickupMesh = group;
+    pedestal.respawnAt = 0;
+  }
   getHeld(car) { return this._held.get(car) || null; }
   getHeldConfig(car) {
     const type = this._held.get(car);

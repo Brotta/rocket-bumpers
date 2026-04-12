@@ -20,6 +20,9 @@ import { getAllEngineSampleURLs } from '../audio/AudioConfig.js';
 import { DebugMode } from '../debug/DebugMode.js';
 import { ScoreManager } from './ScoreManager.js';
 import { PortalSystem } from './PortalSystem.js';
+import { NetworkManager } from '../network/NetworkManager.js';
+import { RemotePlayerManager } from '../network/RemotePlayerManager.js';
+import { MobileControls } from '../ui/MobileControls.js';
 
 const MAX_DT = 1 / 30; // cap delta to avoid spiral of death
 const FIXED_DT = 1 / 60; // fixed timestep for deterministic game logic
@@ -102,6 +105,10 @@ export class Game {
     // ── Portal system (initialized after scene is ready) ──
     this.portalSystem = null;
 
+    // ── Multiplayer ──
+    this.networkManager = null;       // NetworkManager (null if offline)
+    this.remotePlayerManager = null;  // RemotePlayerManager
+
     // ── Local player ──
     this.localPlayer = null;   // CarBody
     this.localAbility = null;  // AbilitySystem
@@ -114,6 +121,19 @@ export class Game {
     // ── Input ──
     this.input = { forward: false, backward: false, left: false, right: false };
     this._inputEnabled = false;
+
+    // ── Mobile controls (auto-detected, hidden on desktop) ──
+    this.mobileControls = new MobileControls({
+      onInput: (input) => {
+        if (!this._inputEnabled) return;
+        this.input.forward = input.forward;
+        this.input.backward = input.backward;
+        this.input.left = input.left;
+        this.input.right = input.right;
+      },
+      onAbility: () => this.useAbility(),
+      onPowerUp: () => this.usePowerUp(),
+    });
 
     // ── Camera ──
     this._camDesired = new THREE.Vector3();
@@ -240,10 +260,12 @@ export class Game {
     audioManager.init();
     await audioManager.preloadAll(getAllEngineSampleURLs());
 
-    // Fill remaining slots with bots
+    // Fill remaining slots with bots (skip in multiplayer if not host — host fills bots)
     this.botManager.removeAll();
     this.nameTags.clear();
-    await this.botManager.fillSlots();
+    if (!this.networkManager?.isMultiplayer || this.networkManager.isHost) {
+      await this.botManager.fillSlots();
+    }
 
     // Register bots in score manager
     for (const bot of this.botManager.bots) {
@@ -274,6 +296,278 @@ export class Game {
       this.nameTags.add(bot.carBody, false);
       this.healthBars.add(bot.carBody, false);
     }
+  }
+
+  // ── Multiplayer ───────────────────────────────────────────────────────
+
+  /**
+   * Connect to a multiplayer room via PartyKit.
+   * Call after setPlayer(). Sets up NetworkManager, RemotePlayerManager,
+   * and wires all network events.
+   */
+  async connectMultiplayer(roomId) {
+    this.networkManager = new NetworkManager(this);
+    this.remotePlayerManager = new RemotePlayerManager(this);
+
+    // ── Remap local player ID from 'local' to server-assigned connection ID ──
+    // This is critical: without it, all clients use 'local' as their entity ID
+    // and every client would discard every other client's state updates.
+
+    // Wire network manager to subsystems
+    this.collisionHandler._networkManager = this.networkManager;
+    this.powerUpManager._networkManager = this.networkManager;
+    if (this.portalSystem) this.portalSystem._networkManager = this.networkManager;
+
+    // Connect to server
+    const roomState = await this.networkManager.connect(
+      roomId,
+      this.playerNickname,
+      this.playerCarType,
+    );
+
+    // Remap local player's playerId from 'local' to the server connection ID
+    const serverPlayerId = this.networkManager.localPlayerId;
+    if (this.localPlayer) {
+      this.localPlayer.playerId = serverPlayerId;
+    }
+    this.scoreManager.removePlayer('local');
+    this.scoreManager.registerPlayer(serverPlayerId, this.playerNickname);
+
+    // Store ability ref on carBodies for binary protocol encoding (flags)
+    if (this.localPlayer && this.localAbility) {
+      this.localPlayer._abilityRef = this.localAbility;
+    }
+    for (const [carBody, ability] of this.abilities) {
+      carBody._abilityRef = ability;
+    }
+
+    // Spawn remote players that are already in the room
+    for (const p of roomState.players) {
+      if (p.id === serverPlayerId) continue;
+      await this.remotePlayerManager.addPlayer(p.id, p.nickname, p.carType);
+      this.scoreManager.registerPlayer(p.id, p.nickname);
+    }
+
+    // If we are not the host, remove local bots + clean up their name tags/health bars
+    if (!this.networkManager.isHost) {
+      for (const bot of this.botManager.bots) {
+        this.nameTags.remove(bot.carBody);
+        this.healthBars.remove(bot.carBody);
+        this.scoreManager.removePlayer(bot.carBody.playerId);
+      }
+      this.botManager.removeAll();
+    }
+
+    // ── Wire network events (store handlers for cleanup) ──
+    // Clean up any existing handlers from a previous connection
+    if (this._networkHandlers?.length) this._cleanupNetworkHandlers();
+    this._networkHandlers = [];
+    const _on = (event, fn) => {
+      this.networkManager.on(event, fn);
+      this._networkHandlers.push({ event, fn });
+    };
+
+    // Remote player state updates (20Hz binary) — MUST be synchronous (no await)
+    // Unknown players are queued and created in the next frame by RemotePlayerManager
+    _on('remotePlayerState', ({ playerId, carType, state }) => {
+      // Skip our own state
+      if (playerId === serverPlayerId) return;
+
+      // Skip if this is a local bot (we're the host simulating it)
+      // Also skip bot-prefixed IDs while we're host (bots may still be loading)
+      if (this.networkManager.isHost) {
+        if (this._findLocalCarByPlayerId(playerId)) return;
+        if (playerId.startsWith('bot_')) return;
+      }
+
+      // Push state — if player doesn't exist yet, it gets queued for creation
+      this.remotePlayerManager.updatePlayerState(playerId, state, carType);
+    });
+
+    // New player joined — fire-and-forget async (don't block message handler)
+    _on('playerJoined', ({ id, nickname, carType }) => {
+      this.remotePlayerManager.addPlayer(id, nickname, carType).then(() => {
+        this.scoreManager.registerPlayer(id, nickname);
+        if (this.networkManager.isHost) {
+          const humanCount = this._countHumanPlayers();
+          this.botManager.adjustBotCount(humanCount);
+        }
+      });
+    });
+
+    // Player left
+    _on('playerLeft', ({ id }) => {
+      this.remotePlayerManager.removePlayer(id);
+      this.scoreManager.removePlayer(id);
+      if (this.networkManager.isHost) {
+        const humanCount = this._countHumanPlayers();
+        this.botManager.adjustBotCount(humanCount);
+      }
+    });
+
+    // Server-authoritative damage
+    _on('damageDealt', ({ targetId, amount, sourceId, wasAbility }) => {
+      // Apply to local player
+      if (targetId === this.networkManager.localPlayerId) {
+        if (this.localPlayer && !this.localPlayer.isEliminated) {
+          this.localPlayer.hp = Math.max(0, this.localPlayer.hp - amount);
+          this._emit('damage', {
+            target: this.localPlayer,
+            amount,
+            source: sourceId ? this._findCarByPlayerId(sourceId) : null,
+            tier: amount >= 30 ? 'devastating' : amount >= 15 ? 'heavy' : 'light',
+            wasAbility,
+          });
+        }
+        return;
+      }
+
+      // Apply to local bot first (if we're host) — takes priority over remote entry
+      const localCar = this._findLocalCarByPlayerId(targetId);
+      if (localCar) {
+        localCar.hp = Math.max(0, localCar.hp - amount);
+        this.healthBars.flashDamage(localCar);
+      } else {
+        // Apply to remote player (only if NOT a local bot)
+        const remote = this.remotePlayerManager.getPlayer(targetId);
+        if (remote) {
+          remote.hp = Math.max(0, remote.hp - amount);
+          this.healthBars.flashDamage(remote);
+        }
+      }
+    });
+
+    // Server-authoritative elimination
+    _on('playerEliminated', ({ playerId, killerId }) => {
+      if (playerId === this.networkManager.localPlayerId) {
+        // Local player eliminated by server authority
+        if (this.localPlayer && !this.localPlayer.isEliminated) {
+          this.localPlayer.hp = 0;
+          this.localPlayer.isEliminated = true;
+          const killer = killerId ? this._findCarByPlayerId(killerId) : null;
+          this._onEliminated({ victim: this.localPlayer, killer, wasAbility: false });
+        }
+        return;
+      }
+
+      // Local bot eliminated (host) — takes priority over remote entry
+      const localCar = this._findLocalCarByPlayerId(playerId);
+      if (localCar && !localCar.isEliminated) {
+        localCar.hp = 0;
+        localCar.isEliminated = true;
+        const killer = killerId ? this._findCarByPlayerId(killerId) : null;
+        this._onEliminated({ victim: localCar, killer, wasAbility: false });
+      } else if (!localCar) {
+        // Remote player eliminated (only if NOT a local bot)
+        const remote = this.remotePlayerManager.getPlayer(playerId);
+        if (remote) {
+          remote.hp = 0;
+          remote.isEliminated = true;
+          remote.mesh.visible = false;
+        }
+      }
+    });
+
+    // Power-up events
+    _on('powerupSpawned', ({ id, powerupType, position }) => {
+      this.powerUpManager.onNetworkSpawn(id, powerupType, position);
+    });
+
+    _on('powerupTaken', ({ id, playerId, powerupType }) => {
+      this.powerUpManager.onNetworkTaken(id, playerId, powerupType);
+    });
+
+    _on('pickupDenied', ({ powerupId }) => {
+      this.powerUpManager.onNetworkPickupDenied(powerupId);
+    });
+
+    _on('powerupUsed', ({ playerId, powerupType, pos }) => {
+      this.powerUpManager.onNetworkUsed(playerId, powerupType, pos);
+    });
+
+    // Ability used by remote player
+    _on('abilityUsed', ({ playerId, abilityType, pos }) => {
+      // Visual-only feedback for remote abilities (minimal for now)
+    });
+
+    // Remote player respawn — fire-and-forget
+    _on('playerRespawn', ({ playerId, carType, pos }) => {
+      if (playerId === this.networkManager.localPlayerId) return;
+      this.remotePlayerManager.respawnPlayer(playerId, carType, pos);
+    });
+
+    // Host changed — fire-and-forget
+    _on('hostChanged', ({ newHostId }) => {
+      if (newHostId === this.networkManager.localPlayerId) {
+        // Guard against concurrent fillSlots calls
+        if (this._fillingSlotsPromise) return;
+        this._fillingSlotsPromise = this.botManager.fillSlots().then(() => {
+          for (const bot of this.botManager.bots) {
+            this.scoreManager.registerPlayer(bot.carBody.playerId, bot.carBody.nickname);
+            bot.carBody.onEliminated = (e) => this._onEliminated(e);
+            bot.carBody._abilityRef = this.abilities.get(bot.carBody);
+          }
+        }).finally(() => {
+          this._fillingSlotsPromise = null;
+        });
+      }
+    });
+
+    // Score updates from server
+    _on('scoreUpdate', ({ scores }) => {
+      this.scoreManager.syncFromServer(scores);
+    });
+
+    // Disconnected — clean up all network event handlers
+    _on('disconnected', () => {
+      if (this.remotePlayerManager) {
+        this.remotePlayerManager.removeAll();
+      }
+      this._cleanupNetworkHandlers();
+    });
+  }
+
+  /** Remove all registered network event handlers to prevent leaks on reconnect. */
+  _cleanupNetworkHandlers() {
+    if (this._networkHandlers && this.networkManager) {
+      for (const { event, fn } of this._networkHandlers) {
+        this.networkManager.off(event, fn);
+      }
+    }
+    this._networkHandlers = [];
+  }
+
+  /** Count human (non-bot) players including local + remote */
+  _countHumanPlayers() {
+    let count = 1; // local player
+    for (const [, entry] of this.remotePlayerManager._players) {
+      if (!entry.playerId.startsWith('bot_')) count++;
+    }
+    return count;
+  }
+
+  /** Find any car (local, local bot, or remote) by playerId */
+  _findCarByPlayerId(playerId) {
+    if (this.localPlayer && playerId === this.localPlayer.playerId) {
+      return this.localPlayer;
+    }
+    // Check local bots
+    for (const bot of this.botManager.bots) {
+      if (bot.carBody.playerId === playerId) return bot.carBody;
+    }
+    // Check remote players
+    return this.remotePlayerManager?.getPlayer(playerId) || null;
+  }
+
+  /** Find a locally-simulated car (local player or local bot) by playerId */
+  _findLocalCarByPlayerId(playerId) {
+    if (this.localPlayer && playerId === this.localPlayer.playerId) {
+      return this.localPlayer;
+    }
+    for (const bot of this.botManager.bots) {
+      if (bot.carBody.playerId === playerId) return bot.carBody;
+    }
+    return null;
   }
 
   // ── Game loop control ─────────────────────────────────────────────────
@@ -395,8 +689,11 @@ export class Game {
       this.localPlayer.applyControls(this.input, dt);
     }
 
-    // Update bot brains (produces input + calls applyControls internally)
-    this.botManager.update(dt);
+    // Update bot brains — only if offline or if we are the host
+    const isMultiplayer = this.networkManager?.isMultiplayer;
+    if (!isMultiplayer || this.networkManager.isHost) {
+      this.botManager.update(dt);
+    }
 
     // Debug: apply player input to sync cars (multi-vehicle comparison)
     this.debug.fixedUpdate(dt);
@@ -415,6 +712,7 @@ export class Game {
     const _octRadius = ARENA.diameter / 2;
     const _octSides = 8;
     for (const cb of this.carBodies) {
+      if (cb._isRemote) continue; // remote players positioned by network, not physics
       if (cb.isEliminated && !cb.mesh.visible) continue;
       const pos = cb.body.position;
 
@@ -437,15 +735,19 @@ export class Game {
     }
 
     // Dynamic hazards (lava pool, eruptions, geysers) — skip in sandbox
+    // Filter out remote entries — hazards only affect locally-simulated cars
     if (!this.debug._sandboxActive) {
-      this.dynamicHazards.update(dt, this.carBodies);
+      const localCars = this.carBodies.filter(cb => !cb._isRemote);
+      this.dynamicHazards.update(dt, localCars);
     }
 
     // Collision detection (after physics step)
     this.collisionHandler.update();
 
     // Per-frame obstacle overlap enforcement (safety net for pass-through)
-    const overlapHits = this.physicsWorld.enforceObstacleOverlaps(this.carBodies);
+    // Skip remote entries — their positions come from network, not physics
+    const localCarsForOverlap = this.carBodies.filter(cb => !cb._isRemote);
+    const overlapHits = this.physicsWorld.enforceObstacleOverlaps(localCarsForOverlap);
     for (const hit of overlapHits) {
       this._applyOverlapStun(hit);
     }
@@ -455,6 +757,16 @@ export class Game {
 
     // Portal system (ramp launches, trigger checks)
     if (this.portalSystem) this.portalSystem.update(dt);
+
+    // Network: send local player state at 20Hz (every 3rd tick)
+    if (this.networkManager?.isMultiplayer && this.localPlayer && !this.localPlayer.isEliminated) {
+      this.networkManager.tickAndMaybeSend(this.localPlayer);
+
+      // Host: send bot states too
+      if (this.networkManager.isHost) {
+        this.networkManager.sendBotStates(this.botManager.bots);
+      }
+    }
   }
 
   // ── Visual update at display refresh rate ────────────────────────────
@@ -463,6 +775,7 @@ export class Game {
     if (this.gameState.isPlaying) {
       // Sync meshes with interpolation between prev and current physics state
       for (const cb of this.carBodies) {
+        if (cb._isRemote) continue; // remote players handled by RemotePlayerManager
         if (cb.isEliminated && !cb.mesh.visible) continue;
 
         cb._arenaGroup = this._arenaGroup;
@@ -475,7 +788,13 @@ export class Game {
       }
 
       // Tire smoke particles (after mesh sync so wheel positions are current)
-      this.tireSmokeFX.update(frameDt, this.carBodies);
+      // Filter remote entries — they don't have the tire smoke wheel data
+      this.tireSmokeFX.update(frameDt, this.carBodies.filter(cb => !cb._isRemote));
+
+      // Interpolate remote players (multiplayer)
+      if (this.remotePlayerManager) {
+        this.remotePlayerManager.interpolateAll(frameDt, alpha);
+      }
 
       // Stun visual FX (debris, stars, wobble, flash)
       this.stunFX.update(frameDt);
@@ -622,8 +941,11 @@ export class Game {
 
     this.carBodies.push(carBody);
 
-    // Start engine sound (if audio initialized and samples loaded)
-    sampleEngineAudio.addCar(carBody, playerId === 'local');
+    // Start engine sound — local player check works for both single-player ('local')
+    // and multiplayer (server-assigned ID matches networkManager.localPlayerId)
+    const isLocalPlayer = playerId === 'local'
+      || (this.networkManager?.localPlayerId && playerId === this.networkManager.localPlayerId);
+    sampleEngineAudio.addCar(carBody, isLocalPlayer);
 
     return carBody;
   }
@@ -743,8 +1065,8 @@ export class Game {
     // Flash the health bar
     this.healthBars.flashDamage(e.target);
 
-    // Score: credit the attacker
-    if (e.attacker && e.amount > 0) {
+    // Score: credit the attacker (skip in multiplayer — server handles scores)
+    if (!this.networkManager?.isMultiplayer && e.attacker && e.amount > 0) {
       this.scoreManager.onDamage(e.attacker.playerId, e.amount);
     }
 
@@ -759,11 +1081,13 @@ export class Game {
     const isLocal = victim === this.localPlayer;
     const isBot = this.botManager.isBot(victim);
 
-    // Score: credit kill or environmental death
-    if (killer) {
-      this.scoreManager.onKill(killer.playerId, victim.playerId);
-    } else {
-      this.scoreManager.onDeath(victim.playerId);
+    // Score: credit kill or environmental death (skip in multiplayer — server handles)
+    if (!this.networkManager?.isMultiplayer) {
+      if (killer) {
+        this.scoreManager.onKill(killer.playerId, victim.playerId);
+      } else {
+        this.scoreManager.onDeath(victim.playerId);
+      }
     }
 
     // Disable controls for local player
@@ -813,7 +1137,11 @@ export class Game {
     this.playerCarType = carType;
     const angle = Math.random() * Math.PI * 2;
     const r = ARENA.lava.radius + 5 + Math.random() * (ARENA.diameter / 2 - ARENA.lava.radius - 10);
-    const carBody = await this._spawnCar(carType, this.playerNickname, 'local');
+    // Use server-assigned ID in multiplayer, 'local' in single-player
+    const pid = this.networkManager?.isMultiplayer
+      ? this.networkManager.localPlayerId
+      : 'local';
+    const carBody = await this._spawnCar(carType, this.playerNickname, pid);
     this.localPlayer = carBody;
 
     carBody.setPosition(Math.cos(angle) * r, 0.6, Math.sin(angle) * r, angle + Math.PI);
@@ -827,6 +1155,7 @@ export class Game {
     });
     this.abilities.set(carBody, ability);
     this.localAbility = ability;
+    carBody._abilityRef = ability;
 
     // Wire elimination callback
     carBody.onEliminated = (e) => this._onEliminated(e);
@@ -851,6 +1180,13 @@ export class Game {
     }, RESPAWN.invincibilityDuration * 1000);
 
     this._emit('playerSpawned', { carBody, carType });
+
+    // Notify server of respawn
+    if (this.networkManager?.isMultiplayer) {
+      const pos = carBody.body.position;
+      this.networkManager.sendPlayerRespawn(carType, [pos.x, pos.y, pos.z]);
+      this.networkManager.sendChangeCar(carType);
+    }
   }
 
   /** Respawn an existing car (bot or fallback) in place. */

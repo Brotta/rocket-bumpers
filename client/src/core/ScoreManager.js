@@ -140,6 +140,24 @@ export class ScoreManager {
     return obj;
   }
 
+  /**
+   * Bulk-update player data from server state (multiplayer).
+   * @param {object[]} scores — [{ playerId, nickname, score, kills, deaths, streak }]
+   */
+  syncFromServer(scores) {
+    for (const s of scores) {
+      this.registerPlayer(s.playerId, s.nickname);
+      const data = this._players.get(s.playerId);
+      if (data) {
+        data.score = s.score;
+        data.kills = s.kills;
+        data.deaths = s.deaths;
+        data.streak = s.streak;
+      }
+    }
+    this._emitLeaderboard();
+  }
+
   // ── Internal ──────────────────────────────────────────────────────────
 
   _getStreakMultiplier(streak) {

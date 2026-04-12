@@ -11,7 +11,8 @@
   "dependencies": {
     "three": "^0.175.0",
     "cannon-es": "^0.20.0",
-    "howler": "^2.2.4"
+    "howler": "^2.2.4",
+    "partysocket": "^1.0.3"
   },
   "devDependencies": {
     "vite": "^6.3.0"

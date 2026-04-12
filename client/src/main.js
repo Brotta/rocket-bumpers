@@ -5,10 +5,11 @@ import { CarSelect } from './ui/CarSelect.js';
 import { preloadCarModels } from './rendering/CarFactory.js';
 import { menuMusic } from './audio/MenuMusic.js';
 
-// ── Portal detection ─────────────────────────────────────────────────
+// ── URL params detection ─────────────────────────────────────────────
 const urlParams = new URLSearchParams(window.location.search);
 const isPortalEntry = urlParams.get('portal') === 'true';
 const portalUsername = urlParams.get('username') || null;
+const roomId = urlParams.get('room') || 'arena-1'; // default public room
 
 // ── Create game instance ──────────────────────────────────────────────
 const game = new Game();
@@ -206,9 +207,10 @@ document.body.appendChild(streakDiv);
 
 function updateLeaderboard(entries) {
   const top5 = entries.slice(0, 5);
+  const localId = game.networkManager?.localPlayerId || 'local';
   leaderboardDiv.innerHTML = '<div style="color:#0ff;margin-bottom:6px;letter-spacing:0.15em;">LEADERBOARD</div>' +
     top5.map((e, i) => {
-      const isLocal = e.playerId === 'local';
+      const isLocal = e.playerId === localId;
       const color = isLocal ? '#ff0' : (i === 0 ? '#0ff' : '#aaa');
       const streakText = e.streak >= 3 ? ` 🔥${e.streak}` : '';
       return `<div style="color:${color};padding:2px 0;">${i + 1}. ${e.nickname} — ${e.score}${streakText}</div>`;
@@ -241,6 +243,11 @@ function showHUD(nickname, carType) {
   leaderboardDiv.style.display = 'block';
   abilityLabel.textContent = `${c.ability.name}\n[SPACE]`;
   setPowerUpHud(null);
+
+  // Set ability name on mobile controls
+  if (game.mobileControls?.isActive) {
+    game.mobileControls.setAbilityName(c.ability.name);
+  }
 }
 
 function updateAbilityHud() {
@@ -287,7 +294,8 @@ game.scoreManager.on('leaderboard', ({ entries }) => {
 });
 
 game.scoreManager.on('scoreUpdate', ({ playerId, streak, multiplier }) => {
-  if (playerId === 'local' && streak >= 3) {
+  const localId = game.networkManager?.localPlayerId || 'local';
+  if (playerId === localId && streak >= 3) {
     showStreakNotification(streak, multiplier);
   }
 });
@@ -297,12 +305,21 @@ game.scoreManager.on('scoreUpdate', ({ playerId, streak, multiplier }) => {
 game.powerUpManager.on('pickup', ({ car, type }) => {
   if (car === game.localPlayer) {
     setPowerUpHud(type);
+    // Update mobile power-up button
+    if (game.mobileControls?.isActive) {
+      const cfg = game.powerUpManager.getHeldConfig(car);
+      const hex = cfg ? '#' + cfg.color.toString(16).padStart(6, '0') : null;
+      game.mobileControls.setPowerUp(hex);
+    }
   }
 });
 
 game.powerUpManager.on('used', ({ car, type }) => {
   if (car === game.localPlayer) {
     flashPowerUpUsed();
+    if (game.mobileControls?.isActive) {
+      game.mobileControls.setPowerUp(null);
+    }
   }
 });
 
@@ -312,6 +329,14 @@ const _hudLoop = () => {
   if (game.gameState.isPlaying) {
     updateAbilityHud();
     updateHpHud();
+
+    // Sync mobile controls with ability state
+    if (game.mobileControls?.isActive && game.localAbility) {
+      game.mobileControls.updateAbility(
+        game.localAbility.state,
+        game.localAbility.cooldownProgress,
+      );
+    }
   }
 };
 requestAnimationFrame(_hudLoop);
@@ -351,9 +376,36 @@ game._onRespawnCarSelect = (onCarChosen) => {
 
 // ── Start game ──────────────────────────────────────────────────────────
 
+let _startingGame = false;
 async function startGame(nickname, carType) {
+  if (_startingGame) return;
+  _startingGame = true;
   await menuMusic.stop();
   await game.setPlayer(nickname, carType);
+
+  // Connect to multiplayer — auto-redirect to next room if full
+  {
+    let currentRoom = roomId;
+    const MAX_ROOM_ATTEMPTS = 10;
+    for (let attempt = 0; attempt < MAX_ROOM_ATTEMPTS; attempt++) {
+      try {
+        await game.connectMultiplayer(currentRoom);
+        showMultiplayerIndicator(currentRoom);
+        break;
+      } catch (err) {
+        if (err && err.roomFull && err.suggestedRoom) {
+          // Room full — try the suggested room
+          currentRoom = err.suggestedRoom;
+          continue;
+        }
+        // Actual connection error — offer offline play
+        const goOffline = confirm('Multiplayer connection failed: ' + (err?.message || String(err)) + '\n\nPlay offline instead?');
+        if (!goOffline) { _startingGame = false; return; }
+        break;
+      }
+    }
+  }
+
   showHUD(nickname, carType);
   game.start();
 
@@ -361,6 +413,23 @@ async function startGame(nickname, carType) {
   const entries = game.scoreManager.getLeaderboard();
   updateLeaderboard(entries);
 }
+
+// ── Multiplayer indicator ────────────────────────────────────────────────
+
+function showMultiplayerIndicator(rid) {
+  const div = document.createElement('div');
+  div.style.cssText = `
+    position:fixed;bottom:16px;left:16px;
+    color:#0ff;font:bold 12px 'Courier New',monospace;
+    background:rgba(0,0,0,0.6);padding:6px 10px;
+    border-radius:4px;pointer-events:none;z-index:10;
+    border:1px solid #0ff44;
+  `;
+  div.innerHTML = `ROOM: ${rid}<br><span style="color:#888;font-size:10px;">Share URL to invite</span>`;
+  document.body.appendChild(div);
+}
+
+// ── Start game ──────────────────────────────────────────────────────────
 
 if (isPortalEntry) {
   // Portal entry: skip all menus, instant join
