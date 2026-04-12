@@ -1,26 +1,29 @@
 # 🚀 ROCKET BUMPERS — Game Design Document
 
 ## Concept
-Arena vehicular combat. Pick your ride, crash into others to deal damage. 8 unique cars with different stats and abilities. 100 HP per car — last one standing wins. Think **Destruction Derby × Mario Kart Battle Mode × Rocket League** but simpler.
+Arena vehicular combat. Pick your ride, crash into others to deal damage. 8 unique cars with different stats and abilities. 100 HP per car. Think **Destruction Derby × Mario Kart Battle Mode × Rocket League** but simpler. **Always online** — all players join the same arena automatically. Bots fill empty slots and get kicked when humans join.
 
 ---
 
 ## Core Loop (30 seconds to understand)
 1. Pick a car (each plays different)
-2. Crash into other cars = deal damage (100 HP system)
-3. At 0 HP you're eliminated — last car standing wins
-4. Grab power-ups + use your car's unique ability
-5. Round ends when 1 car remains or timer runs out (90s) → results → new round
+2. Auto-join a multiplayer arena (bots fill empty slots)
+3. Crash into other cars = deal damage (100 HP system)
+4. At 0 HP you respawn with a new car — endless arena mode
+5. Grab power-ups + use your car's unique ability
+6. Climb the leaderboard — server tracks kills, deaths, streaks
 
 ---
 
 ## Player Flow
 ```
-LANDING → ENTER NICKNAME → CHOOSE CAR → PLAY → RESULTS → (CHOOSE CAR) → PLAY
+SPLASH → ENTER NICKNAME → CHOOSE CAR → AUTO-CONNECT → PLAY (endless) → ELIMINATED → CHOOSE CAR → RESPAWN
 ```
 - Nickname: input field, max 12 chars, default "PLAYER" + random 3 digits
 - Car select: scroll through 8 cars, see 3D preview + stat bars + ability name
-- After results: can change car or tap "PLAY AGAIN" to keep same car
+- Auto-connect: joins `arena-1` via PartyKit. If full, auto-redirected to `arena-2`, etc.
+- On elimination: car select shown, respawn with new car at full HP
+- Endless mode: no rounds, no timer. Continuous play with server-authoritative scoring
 
 ---
 
@@ -80,9 +83,10 @@ rocket-bumpers/
 │   │   │   ├── AbilitySystem.js   # Per-car unique ability logic
 │   │   │   └── CollisionHandler.js # Detect impacts, calc damage (approach-velocity model)
 │   │   ├── network/
-│   │   │   ├── NetworkManager.js  # PartyKit client connection
-│   │   │   ├── MessageTypes.js    # Enum of all message types
-│   │   │   └── Interpolation.js   # Lerp remote player positions
+│   │   │   ├── NetworkManager.js  # PartyKit WebSocket connection, send/receive, event dispatch
+│   │   │   ├── RemotePlayerManager.js # Remote player meshes, kinematic bodies, interpolation
+│   │   │   ├── InterpolationBuffer.js # Hermite interpolation + velocity extrapolation
+│   │   │   └── protocol.js        # Binary state encoding (float16), message type constants
 │   │   ├── ai/
 │   │   │   ├── BotManager.js      # Spawn/despawn bots, fill slots, reset on round/respawn
 │   │   │   ├── BotBrain.js        # State machine per bot, human-like imperfections, ground-ahead raycast
@@ -104,8 +108,9 @@ rocket-bumpers/
 │   ├── package.json
 │   └── vite.config.js
 ├── server/                    # PartyKit server
-│   ├── src/
-│   │   └── GameRoom.ts        # Room logic: state sync, round management
+│   ├── party.ts               # Room logic: HP authority, damage, matchmaking, bot kick
+│   ├── protocol.ts            # Shared message types + game constants
+│   ├── damage.ts              # Server-side damage formula (must match client)
 │   ├── partykit.json
 │   └── package.json
 ├── GAME_DESIGN.md             # THIS FILE — source of truth
@@ -385,74 +390,149 @@ Spawn on 6 fixed pedestals. Respawn 8s after pickup. Max 1 held at a time.
 | **Holo Evade** | Cyan | Semi-transparent + 2 decoy copies in random directions. 50% chance to confuse homing missiles | 1s + 0.3s fade |
 | **Auto Turret** | Orange | Mounts a turret on car roof that auto-targets nearest enemy (8 dmg/shot, 0.8s fire rate, 25u range) | 6s |
 
-### Round Structure
-1. **LOBBY** (5-30s): Players join, pick car, bots fill to 8
-2. **COUNTDOWN** (3s): "3… 2… 1… SMASH!" — cars locked on spawn points, HP reset to 100
-3. **PLAYING** (up to 90s): Active gameplay, cars get eliminated at 0 HP
-4. **Round ends** when: **1 car remaining** (instant win) OR **timer expires** (most HP wins)
-5. **RESULTS** (8s): Ranking by survival (alive first by HP, then eliminated). Shows "NICKNAME WINS!" or "ROUND OVER"
-6. **Quick restart**: if local player is eliminated and all remaining players are bots → round ends after 1.5s automatically
-7. Loop back to COUNTDOWN
+### Game Mode: Endless Arena
+- **No rounds, no timer.** Continuous play.
+- Players join and leave at any time
+- Server tracks persistent scores per session: kills, deaths, streak, total score
+- Leaderboard updated from server every 3 seconds
 
-### Elimination
-- At 0 HP → car is **eliminated** (no respawn for the rest of the round)
-- Mesh hidden after 2s death-cam, engine sound stopped
-- Eliminated bots stop acting (no controls, no brain updates)
+### Scoring (Server-Authoritative)
+| Event | Points | Multiplier |
+|-------|--------|-----------|
+| Kill (KO) | +100 | ×2 at 3-streak, ×3 at 5-streak |
+| Big hit (≥20 dmg) | +25 | streak multiplier |
+| Small hit (<20 dmg) | +10 | streak multiplier |
+| Death | -50 | none |
+
+### Elimination & Respawn
+- At 0 HP → car is **eliminated**
+- Car select screen shown → player picks new car → respawns at full HP
+- Server notified via `PLAYER_RESPAWN` → broadcasts to all clients
+- 1.5s spawn invincibility (server-managed timer, cancellable on disconnect/re-respawn)
 - `isEliminated` flag prevents all damage, collision, and ability processing
+- Bots auto-respawn after a delay
 
-### Respawn (fall off edge — NOT eliminated)
-- Fall off edge (Y < -5) → **25 HP damage** + respawn (unless HP reaches 0 → eliminated instead)
-- Controls disabled, camera follows falling car for 2s → teleport to random arena position
-- Velocity zeroed on respawn, car faces center
-- 1.5s invincibility (car blinks at 8Hz, collision mask = ARENA only)
-- Controls restored after invincibility ends
-- Held power-up is **dropped** (lost) on fall — `PowerUpManager.drop(victim)` called immediately
-- White screen flash on respawn (0.4s fade-out)
-- `_isDead` flag on Game prevents `applyControls()` during fall+respawn sequence
+### Fall Off Edge
+- Fall off edge (Y < -5) → **25 HP damage** reported to server via `PLAYER_FELL`
+- If HP reaches 0 → eliminated. Kill attributed to `lastHitById` if within 3s window
+- Controls disabled during fall+respawn sequence
+- 1.5s invincibility on respawn (server checks `isInvincible` before accepting damage)
+- Held power-up is **dropped** (lost) on fall
 
 ---
 
 ## Multiplayer Architecture
 
-### PartyKit Room Logic
-- Each room = 1 arena, max 8 players
-- Server authoritative for: round state, HP/eliminations, power-up spawns, join/leave
-- Client authoritative for: own position/velocity (client-side prediction)
-- Server validates: damage events, power-up pickups (first-come), eliminations
+### Always-Online Design
+- **No lobby, no waiting.** Every player auto-joins `arena-1` on game start
+- If arena is full (16 players), server responds `ROOM_FULL` → client auto-redirects to `arena-2`, `arena-3`, etc. (up to 10 attempts, seamless to player)
+- **Bots fill empty slots** (host-managed). When a human joins a full room, server kicks one bot to make room. Only redirects when 16 humans are in a room
+- Private rooms via `?room=<name>` URL parameter
+
+### Authority Model
+| Data | Authority | Notes |
+|------|-----------|-------|
+| **Position/velocity** | Client | Each client controls own car + host controls bots |
+| **HP** | Server | Server never trusts client HP. All damage goes through server |
+| **Damage (car-car)** | Server | Client detects collision, sends COLLISION. Server recalculates with own mass values |
+| **Damage (projectile)** | Server | Client detects hit, sends POWERUP_DAMAGE. Server validates and applies |
+| **Damage (environment)** | Server | Client sends ENV_DAMAGE/OBSTACLE_DAMAGE. Server validates and applies |
+| **Damage (fall)** | Server | Client sends PLAYER_FELL. Server applies fall damage |
+| **Power-up pickup** | Server | First-come-first-served. Server confirms or denies |
+| **Elimination** | Server | Server calls _handleElimination with double-call guard |
+| **Score** | Server | Server calculates kills/deaths/streak, broadcasts every 3s |
+| **Invincibility** | Server | Server manages timers with cancel-on-disconnect |
+
+### PartyKit Room Logic (party.ts)
+- **Max 16 players** per room (humans + bots combined)
+- **Host = first connected player.** Host's client simulates bots and sends their state
+- **Host migration**: when host disconnects, all bot entries are cleaned up, next player becomes host, `HOST_CHANGED` broadcast triggers new host to create bots
+- **Rate limiting**: 60 messages/sec per connection
+- **Stale detection**: players with no state update in 30s are auto-eliminated
+- **Input validation**: carType whitelist, mass ignored from client (server uses own), angleFactor clamped, targetId length-checked, damage values clamped
+
+### Binary State Protocol (20 Hz)
+Player state encoded as variable-length binary for bandwidth efficiency:
+```
+[0x01:1][idLen:1][entityId:N][carTypeIndex:1][posX/Y/Z:6][velX/Y/Z:6][yaw:2][speed:2][flags:1][hp:1]
+Total: 21 + N bytes per player
+```
+- Positions/velocities: IEEE 754 half-precision (float16)
+- Flags bitfield: abilityActive, hasShield, hasRam, isStunned, driftMode, isInvincible, holoEvadeActive
+- Server relays binary as-is (no decode). Non-host can only send own state; host can send bot states
 
 ### Network Messages (Client → Server)
 ```
-PLAYER_JOIN     { nickname: string, carType: string }
-PLAYER_STATE    { pos: [x,y,z], rot: [x,y,z,w], vel: [x,y,z], abilityActive: bool }  // 20 Hz
-COLLISION       { targetId: string, relativeVelocity: number }
-PICKUP_POWERUP  { powerupId: string }
-USE_POWERUP     { type: string, pos: [x,y,z] }
-USE_ABILITY     { type: string, pos: [x,y,z] }
-PLAYER_FELL     { }
-CHANGE_CAR      { carType: string }
+PLAYER_JOIN      { nickname, carType }
+PLAYER_STATE_BIN  Binary (see above) — 20 Hz
+COLLISION        { targetId, approachSpeed, attackerMass, victimMass, angleFactor, wasAbility }
+POWERUP_DAMAGE   { targetId, damage, powerupType }       — missile, turret, trail, glitch
+ENV_DAMAGE       { damage }                               — lava DPS, geyser
+OBSTACLE_DAMAGE  { damage }                               — pillar/boulder stun damage
+PLAYER_FELL      { lastHitById }
+PICKUP_POWERUP   { powerupId }
+USE_POWERUP      { powerupType, pos }
+USE_ABILITY      { abilityType, pos }
+CHANGE_CAR       { carType }
+PLAYER_RESPAWN   { carType, pos }
 ```
 
 ### Network Messages (Server → Client)
 ```
-ROOM_STATE      { players: [...], round: {...}, powerups: [...] }
-PLAYER_JOINED   { id, nickname, carType, color }
-PLAYER_LEFT     { id }
-PLAYER_UPDATE   { id, pos, rot, vel, abilityActive }
-ROUND_START     { countdown: number }
-ROUND_END       { results: [...] }  // ranked by HP (alive first, then eliminated)
-DAMAGE_DEALT    { targetId, amount, sourceId, wasAbility }
+ROOM_STATE       { playerId, hostId, players: [...], powerups: [...] }
+ROOM_FULL        { suggestedRoom }
+PLAYER_JOINED    { id, nickname, carType }
+PLAYER_LEFT      { id }
+DAMAGE_DEALT     { targetId, amount, sourceId, wasAbility }
 PLAYER_ELIMINATED { playerId, killerId }
-POWERUP_SPAWNED { id, type, position }
-POWERUP_TAKEN   { id, playerId }
-POWERUP_USED    { playerId, type, pos }
-ABILITY_USED    { playerId, type, pos }
-PLAYER_RESPAWN  { playerId, pos }
+POWERUP_SPAWNED  { id, powerupType, position }
+POWERUP_TAKEN    { id, playerId, powerupType }
+PICKUP_DENIED    { powerupId }
+POWERUP_USED     { playerId, powerupType, pos }
+ABILITY_USED     { playerId, abilityType, pos }
+PLAYER_RESPAWN   { playerId, carType, pos }
+HOST_CHANGED     { newHostId }
+SCORE_UPDATE     { scores: [{ playerId, nickname, score, kills, deaths, streak }] }
 ```
+
+### Remote Player Rendering
+- Remote players are **kinematic CANNON bodies** (mass=0, type=KINEMATIC, collisionResponse=true) positioned from interpolated network state
+- Mesh Y position offset: `-0.55` (matches CarBody.syncMesh) so cars sit on ground correctly
+- **InterpolationBuffer**: 120ms delay behind live, Hermite interpolation with velocity tangents, velocity-based extrapolation when buffer runs dry (capped at 200ms)
+- Collision events fire between local dynamic bodies and remote kinematic bodies → detected locally, reported to server
+- Remote `takeDamage()` is a stub (returns 0) — all damage goes through server via dedicated messages
+
+### Damage Sync Flow (Multiplayer)
+1. **Car-car collision**: CollisionHandler detects → `sendCollision()` → server recalculates damage with server-known mass → broadcasts `DAMAGE_DEALT` → all clients apply HP
+2. **Missile/turret/glitch bomb/trail hit**: PowerUpManager/CollisionHandler detects hit on remote → `sendPowerUpDamage()` → server validates → broadcasts `DAMAGE_DEALT`
+3. **Lava/geyser**: DynamicHazards applies locally → Game.js sends `sendEnvDamage()` → server applies → broadcasts `DAMAGE_DEALT`
+4. **Obstacle stun**: CollisionHandler detects → `sendObstacleDamage()` → server applies with 500ms per-player cooldown
+5. **Fall off edge**: CollisionHandler detects → `sendPlayerFell(lastHitById)` → server applies 25 HP → handles elimination if HP≤0
+
+### Power-Up Flow (Multiplayer)
+1. Client proximity-detects pickup → sends `sendPickupRequest(powerupId)` → performs **optimistic local pickup**
+2. Server checks first-come-first-served → broadcasts `POWERUP_TAKEN` (confirm) or sends `PICKUP_DENIED`
+3. On denial: client rolls back held power-up AND restores pedestal visual mesh
+4. Power-up usage: client applies effect locally + `sendPowerUpUsed()` → server validates + broadcasts to others
+5. Respawn: server sends `POWERUP_SPAWNED` with random type (weighted) → all clients spawn the pickup visual
+
+### Connection Lifecycle
+1. `NetworkManager.connect()` creates PartySocket with `maxRetries: 0` (no auto-reconnect)
+2. 10-second connection timeout → rejects promise → `disconnect()` cleans up
+3. On `ROOM_STATE`: resolve promise, set localPlayerId, wire event handlers via `_on()` helper
+4. All handlers tracked in `_networkHandlers[]` for cleanup
+5. On disconnect: `_cleanupNetworkHandlers()` removes all handlers, `remotePlayerManager.removeAll()` disposes meshes/bodies
+6. `connectMultiplayer()` always cleans up previous NetworkManager before creating new one (safe for redirect loop)
+7. Disconnect banner shown to user: "Connection lost — playing offline" (5s fade)
 
 ---
 
 ## AI Bots
-- Run **client-side** (no server compute)
+- Run **client-side on the host** (no server compute). Host sends bot states via binary protocol at 20Hz
+- In multiplayer: only the host simulates bots. Non-host clients receive bot states as remote players
+- When host disconnects: server cleans up all `bot_*` entries, new host creates fresh bots
+- When a human joins a full room: server kicks one bot (sends `PLAYER_LEFT`), host removes specific bot by ID
+- Bot count adjusts dynamically: `maxBots - humanCount` (up to 7 bots, 16 total players)
 - Each bot picks a random car type → gets those stats + uses that ability
 - Names: "TURBO", "BLAZE", "NITRO", "CRASH", "FURY", "BOLT", "HAVOC", "STORM"
 - State machine: ROAM → TARGET → CHARGE → EVADE (+ POWERUP_SEEK)
