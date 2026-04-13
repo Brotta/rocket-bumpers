@@ -232,14 +232,14 @@ export default class RocketBumpersServer implements Party.Server {
   // ── Message routing ──────────────────────────────────────────────────
 
   onMessage(message: string | ArrayBuffer, sender: Party.Connection) {
-    // Rate limiting
-    if (!this._checkRateLimit(sender.id)) return;
-
-    // Binary messages (PLAYER_STATE)
+    // Binary messages (PLAYER_STATE) — skip rate limiting (already throttled client-side)
     if (message instanceof ArrayBuffer) {
       this._handleBinaryState(message, sender);
       return;
     }
+
+    // Rate limiting (JSON messages only)
+    if (!this._checkRateLimit(sender.id)) return;
 
     // JSON messages
     let data: any;
