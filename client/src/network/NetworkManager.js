@@ -259,11 +259,14 @@ export class NetworkManager {
     });
   }
 
-  sendPlayerFell(lastHitById) {
-    this._sendJSON({
+  sendPlayerFell(lastHitById, playerId) {
+    const msg = {
       type: MSG.PLAYER_FELL,
       lastHitById,
-    });
+    };
+    // Include playerId for bot falls (host sends on behalf of bots)
+    if (playerId) msg.playerId = playerId;
+    this._sendJSON(msg);
   }
 
   sendChangeCar(carType) {

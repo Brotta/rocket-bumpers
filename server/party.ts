@@ -534,7 +534,14 @@ export default class RocketBumpersServer implements Party.Server {
   }
 
   _onPlayerFell(data: any, sender: Party.Connection) {
-    const player = this.players.get(sender.id);
+    // Host can send falls on behalf of bots via playerId field
+    let targetId = sender.id;
+    if (sender.id === this.hostId && typeof data.playerId === 'string'
+        && data.playerId.startsWith('bot_') && data.playerId.length <= 64) {
+      targetId = data.playerId;
+    }
+
+    const player = this.players.get(targetId);
     if (!player || player.isEliminated) return;
 
     // Skip if invincible
@@ -545,7 +552,7 @@ export default class RocketBumpersServer implements Party.Server {
 
     this.room.broadcast(JSON.stringify({
       type: SRV.DAMAGE_DEALT,
-      targetId: sender.id,
+      targetId,
       amount: GAME.FALL_DAMAGE,
       sourceId: null,
       wasAbility: false,

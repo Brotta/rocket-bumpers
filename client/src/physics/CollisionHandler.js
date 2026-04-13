@@ -573,7 +573,7 @@ export class CollisionHandler {
       const now = performance.now();
       const windowMs = KO_ATTRIBUTION.windowSeconds * 1000;
       const lastHitById = (hit && (now - hit.time) < windowMs) ? hit.source?.playerId : null;
-      this._networkManager.sendPlayerFell(lastHitById);
+      this._networkManager.sendPlayerFell(lastHitById, carBody.playerId);
     } else {
       // Single player: apply fall damage directly
       const actual = carBody.takeDamage(DAMAGE.FALL_DAMAGE);

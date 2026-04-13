@@ -832,10 +832,12 @@ export class PowerUpManager {
           car.body.position.x, car.body.position.y, car.body.position.z,
           p.y, 1.5,
         )) {
-          if (car._isRemote && this._networkManager?.isMultiplayer) {
-            // Remote player — report damage to server
+          if (this._networkManager?.isMultiplayer && car.playerId) {
+            // Multiplayer — report damage to server for scoring (both remote players and local bots)
             this._networkManager.sendPowerUpDamage(car.playerId, p.config.damage, p.isHoming ? 'HOMING_MISSILE' : 'MISSILE', p.owner?.playerId);
-          } else {
+          }
+          if (!car._isRemote) {
+            // Local car (player or bot) — apply damage directly
             car.takeDamage(p.config.damage, p.owner, false);
           }
           const knockback = 8;
@@ -2161,9 +2163,10 @@ export class PowerUpManager {
           car.body.position.x, car.body.position.y, car.body.position.z,
           b.y, b.config.bulletRadius + 1.0,
         )) {
-          if (car._isRemote && this._networkManager?.isMultiplayer) {
+          if (this._networkManager?.isMultiplayer && car.playerId) {
             this._networkManager.sendPowerUpDamage(car.playerId, b.config.damage, 'AUTO_TURRET', b.owner?.playerId);
-          } else {
+          }
+          if (!car._isRemote) {
             car.takeDamage(b.config.damage, b.owner, false);
           }
           // Light knockback in bullet direction
@@ -2321,9 +2324,10 @@ export class PowerUpManager {
       if (dist > config.blastRadius) continue;
 
       // Light damage
-      if (target._isRemote && this._networkManager?.isMultiplayer) {
+      if (this._networkManager?.isMultiplayer && target.playerId) {
         this._networkManager.sendPowerUpDamage(target.playerId, config.damage, 'GLITCH_BOMB', car.playerId);
-      } else {
+      }
+      if (!target._isRemote) {
         target.takeDamage(config.damage, car, false);
       }
       target.lastHitBy = { source: car, wasAbility: false, time: performance.now() };
