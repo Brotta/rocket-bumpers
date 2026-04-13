@@ -148,7 +148,7 @@ export class MobileControls {
     // Ability button (bottom-right)
     this._abilityBtn = document.createElement('div');
     this._abilityBtn.style.cssText = `
-      position:absolute;bottom:24px;right:24px;
+      position:absolute;bottom:max(12px, env(safe-area-inset-bottom, 0px));right:max(12px, env(safe-area-inset-right, 0px));
       width:${ABILITY_BTN_SIZE}px;height:${ABILITY_BTN_SIZE}px;
       border-radius:50%;
       border:3px solid rgba(0,255,0,0.7);
@@ -192,7 +192,7 @@ export class MobileControls {
     // Power-up button (above ability)
     this._powerupBtn = document.createElement('div');
     this._powerupBtn.style.cssText = `
-      position:absolute;bottom:${24 + ABILITY_BTN_SIZE + 16}px;right:${24 + (ABILITY_BTN_SIZE - POWERUP_BTN_SIZE) / 2}px;
+      position:absolute;bottom:calc(${ABILITY_BTN_SIZE + 16}px + max(12px, env(safe-area-inset-bottom, 0px)));right:calc(${(ABILITY_BTN_SIZE - POWERUP_BTN_SIZE) / 2}px + max(12px, env(safe-area-inset-right, 0px)));
       width:${POWERUP_BTN_SIZE}px;height:${POWERUP_BTN_SIZE}px;
       border-radius:50%;
       border:2px solid rgba(255,255,255,0.2);

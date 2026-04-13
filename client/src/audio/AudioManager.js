@@ -109,9 +109,9 @@ class AudioManagerSingleton {
         window.removeEventListener('keydown', resumeOnGesture);
         window.removeEventListener('touchstart', resumeOnGesture);
       };
-      window.addEventListener('click', resumeOnGesture, { once: false });
-      window.addEventListener('keydown', resumeOnGesture, { once: false });
-      window.addEventListener('touchstart', resumeOnGesture, { once: false });
+      window.addEventListener('click', resumeOnGesture);
+      window.addEventListener('keydown', resumeOnGesture);
+      window.addEventListener('touchstart', resumeOnGesture);
     }
   }
 

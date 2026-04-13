@@ -612,6 +612,9 @@ export class Game {
     this._clock.start();
     this._animate();
 
+    // Resume audio context (may be suspended on mobile until user gesture)
+    audioManager.resume();
+
     // Audio samples are already preloaded in setPlayer() (which is async and awaited).
     // Add engine sounds for all existing cars now that samples are cached.
     for (const cb of this.carBodies) {

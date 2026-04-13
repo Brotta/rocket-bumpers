@@ -211,7 +211,7 @@ export class HUD {
 
       /* Ability indicator */
       .hud-ability {
-        position:absolute;bottom:24px;right:24px;
+        position:absolute;bottom:max(12px, env(safe-area-inset-bottom, 0px));right:max(12px, env(safe-area-inset-right, 0px));
         display:flex;flex-direction:column;align-items:center;gap:4px;
       }
       .hud-ability-circle {
@@ -230,7 +230,7 @@ export class HUD {
 
       /* Power-up slot */
       .hud-powerup-slot {
-        position:absolute;bottom:112px;right:32px;
+        position:absolute;bottom:calc(100px + max(12px, env(safe-area-inset-bottom, 0px)));right:calc(20px + max(12px, env(safe-area-inset-right, 0px)));
         width:44px;height:44px;
         border:2px solid #333;border-radius:6px;
         background:rgba(30,30,30,0.6);

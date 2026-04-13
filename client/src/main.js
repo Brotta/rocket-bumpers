@@ -68,7 +68,7 @@ document.body.appendChild(hpDiv);
 // Ability cooldown ring (bottom-right)
 const abilityHud = document.createElement('div');
 abilityHud.style.cssText = `
-  position:fixed;bottom:24px;right:24px;
+  position:fixed;bottom:max(12px, env(safe-area-inset-bottom, 0px));right:max(12px, env(safe-area-inset-right, 0px));
   width:72px;height:72px;
   pointer-events:none;z-index:10;display:none;
 `;

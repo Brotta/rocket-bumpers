@@ -26,6 +26,14 @@ export class SceneManager {
     this._clock = new THREE.Clock();
 
     window.addEventListener('resize', () => this._onResize());
+    // Mobile orientation changes may not fire resize immediately
+    window.addEventListener('orientationchange', () => {
+      setTimeout(() => this._onResize(), 100);
+    });
+    // visualViewport resize (more reliable on mobile for keyboard/chrome changes)
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', () => this._onResize());
+    }
   }
 
   _initRenderer() {
@@ -111,8 +119,9 @@ export class SceneManager {
   }
 
   _onResize() {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
+    const vv = window.visualViewport;
+    const w = vv ? vv.width : window.innerWidth;
+    const h = vv ? vv.height : window.innerHeight;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
