@@ -360,7 +360,23 @@ export class PowerUpManager {
     const idx = parseInt(id.replace('pu_', ''), 10);
     const pedestal = this._pedestals[idx];
     if (!pedestal) return;
-    if (pedestal.active) return; // already active
+
+    // If already active, remove the old pickup mesh first (server is authoritative)
+    if (pedestal.active && pedestal.pickupMesh) {
+      const oldMesh = pedestal.pickupMesh;
+      this.scene.remove(oldMesh);
+      oldMesh.traverse((c) => {
+        if (c.isMesh) {
+          c.geometry?.dispose();
+          if (c.material) {
+            if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+            else c.material.dispose();
+          }
+        }
+      });
+      pedestal.pickupMesh = null;
+      pedestal.active = false;
+    }
 
     // Override the type with server's choice and spawn
     this._spawnPickupWithType(pedestal, powerupType);
@@ -818,7 +834,7 @@ export class PowerUpManager {
         )) {
           if (car._isRemote && this._networkManager?.isMultiplayer) {
             // Remote player — report damage to server
-            this._networkManager.sendPowerUpDamage(car.playerId, p.config.damage, p.isHoming ? 'HOMING_MISSILE' : 'MISSILE');
+            this._networkManager.sendPowerUpDamage(car.playerId, p.config.damage, p.isHoming ? 'HOMING_MISSILE' : 'MISSILE', p.owner?.playerId);
           } else {
             car.takeDamage(p.config.damage, p.owner, false);
           }
@@ -2146,7 +2162,7 @@ export class PowerUpManager {
           b.y, b.config.bulletRadius + 1.0,
         )) {
           if (car._isRemote && this._networkManager?.isMultiplayer) {
-            this._networkManager.sendPowerUpDamage(car.playerId, b.config.damage, 'AUTO_TURRET');
+            this._networkManager.sendPowerUpDamage(car.playerId, b.config.damage, 'AUTO_TURRET', b.owner?.playerId);
           } else {
             car.takeDamage(b.config.damage, b.owner, false);
           }
@@ -2306,7 +2322,7 @@ export class PowerUpManager {
 
       // Light damage
       if (target._isRemote && this._networkManager?.isMultiplayer) {
-        this._networkManager.sendPowerUpDamage(target.playerId, config.damage, 'GLITCH_BOMB');
+        this._networkManager.sendPowerUpDamage(target.playerId, config.damage, 'GLITCH_BOMB', car.playerId);
       } else {
         target.takeDamage(config.damage, car, false);
       }

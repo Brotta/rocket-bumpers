@@ -355,6 +355,7 @@ export class CollisionHandler {
           otherCar.body.mass,
           this._angleFactor(carBody, otherCar),
           wasAbilityA,
+          carBody.playerId,
         );
       }
       if (dmgBtoA > 0 && !otherCar._isRemote && otherCar.playerId) {
@@ -365,6 +366,7 @@ export class CollisionHandler {
           carBody.body.mass,
           this._angleFactor(otherCar, carBody),
           wasAbilityB,
+          otherCar.playerId,
         );
       }
 

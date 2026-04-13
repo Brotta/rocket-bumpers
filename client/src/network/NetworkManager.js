@@ -180,8 +180,8 @@ export class NetworkManager {
     }
   }
 
-  sendCollision(targetId, approachSpeed, attackerMass, victimMass, angleFactor, wasAbility) {
-    this._sendJSON({
+  sendCollision(targetId, approachSpeed, attackerMass, victimMass, angleFactor, wasAbility, attackerId) {
+    const msg = {
       type: MSG.COLLISION,
       targetId,
       approachSpeed,
@@ -189,7 +189,10 @@ export class NetworkManager {
       victimMass,
       angleFactor,
       wasAbility,
-    });
+    };
+    // Include attackerId for bot collisions (host sends on behalf of bots)
+    if (attackerId) msg.attackerId = attackerId;
+    this._sendJSON(msg);
   }
 
   sendPickupRequest(powerupId) {
@@ -215,13 +218,15 @@ export class NetworkManager {
     });
   }
 
-  sendPowerUpDamage(targetId, damage, powerupType) {
-    this._sendJSON({
+  sendPowerUpDamage(targetId, damage, powerupType, attackerId) {
+    const msg = {
       type: MSG.POWERUP_DAMAGE,
       targetId,
       damage,
       powerupType,
-    });
+    };
+    if (attackerId) msg.attackerId = attackerId;
+    this._sendJSON(msg);
   }
 
   sendEnvDamage(damage) {
@@ -235,6 +240,15 @@ export class NetworkManager {
     this._sendJSON({
       type: MSG.OBSTACLE_DAMAGE,
       damage,
+    });
+  }
+
+  sendRegisterBot(botId, nickname, carType) {
+    this._sendJSON({
+      type: MSG.REGISTER_BOT,
+      botId,
+      nickname,
+      carType,
     });
   }
 

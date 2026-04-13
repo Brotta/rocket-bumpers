@@ -283,6 +283,9 @@ export default class RocketBumpersServer implements Party.Server {
       case MSG.PLAYER_RESPAWN:
         this._onPlayerRespawn(data, sender);
         break;
+      case MSG.REGISTER_BOT:
+        this._onRegisterBot(data, sender);
+        break;
       case MSG.OBSTACLE_DESTROYED:
         this._onObstacleDestroyed(data, sender);
         break;
@@ -428,7 +431,12 @@ export default class RocketBumpersServer implements Party.Server {
   }
 
   _onCollision(data: any, sender: Party.Connection) {
-    const attackerId = sender.id;
+    // Host can send collisions on behalf of bots via attackerId field
+    let attackerId = sender.id;
+    if (sender.id === this.hostId && typeof data.attackerId === 'string'
+        && data.attackerId.startsWith('bot_') && data.attackerId.length <= 64) {
+      attackerId = data.attackerId;
+    }
     const { targetId, approachSpeed } = data;
 
     // Validate targetId
@@ -638,7 +646,13 @@ export default class RocketBumpersServer implements Party.Server {
   }
 
   _onPowerupDamage(data: any, sender: Party.Connection) {
-    const attacker = this.players.get(sender.id);
+    // Host can send power-up damage on behalf of bots
+    let attackerId = sender.id;
+    if (sender.id === this.hostId && typeof data.attackerId === 'string'
+        && data.attackerId.startsWith('bot_') && data.attackerId.length <= 64) {
+      attackerId = data.attackerId;
+    }
+    const attacker = this.players.get(attackerId);
     if (!attacker || attacker.isEliminated) return;
 
     const { targetId } = data;
@@ -657,14 +671,15 @@ export default class RocketBumpersServer implements Party.Server {
       type: SRV.DAMAGE_DEALT,
       targetId,
       amount: Math.round(damage * 10) / 10,
-      sourceId: sender.id,
+      sourceId: attackerId,
       wasAbility: false,
     }));
 
     attacker.hits++;
     const hitDelta = damage >= GAME.SCORE_BIG_HIT_THRESHOLD
       ? GAME.SCORE_BIG_HIT : GAME.SCORE_SMALL_HIT;
-    attacker.score += hitDelta;
+    const hitMult = getStreakMultiplier(attacker.streak);
+    attacker.score += hitDelta * hitMult;
 
     if (victim.hp <= 0) {
       this._handleElimination(victim, attacker);
@@ -692,6 +707,51 @@ export default class RocketBumpersServer implements Party.Server {
     if (player.hp <= 0) {
       this._handleElimination(player, null);
     }
+  }
+
+  _onRegisterBot(data: any, sender: Party.Connection) {
+    // Only the host can register bots
+    if (sender.id !== this.hostId) return;
+    const { botId, nickname, carType } = data;
+    if (typeof botId !== 'string' || !botId.startsWith('bot_')) return;
+    if (!VALID_CAR_TYPES.has(String(carType))) return;
+
+    const existing = this.players.get(botId);
+    if (existing) {
+      // Re-registration = respawn: reset HP and elimination state, keep score
+      existing.hp = GAME.MAX_HP;
+      existing.isEliminated = false;
+      existing.isInvincible = false;
+      existing.carType = String(carType);
+      existing.mass = getCarMass(carType);
+      existing.lastStateTime = Date.now();
+      return;
+    }
+
+    const bot: PlayerData = {
+      id: botId,
+      nickname: String(nickname).slice(0, 12),
+      carType: String(carType),
+      hp: GAME.MAX_HP,
+      mass: getCarMass(carType),
+      isEliminated: false,
+      isInvincible: false,
+      score: 0,
+      kills: 0,
+      deaths: 0,
+      streak: 0,
+      hits: 0,
+      lastStateTime: Date.now(),
+    };
+    this.players.set(botId, bot);
+
+    // Broadcast to non-host clients so they know bot nickname/carType
+    this.room.broadcast(JSON.stringify({
+      type: SRV.PLAYER_JOINED,
+      id: botId,
+      nickname: bot.nickname,
+      carType: bot.carType,
+    }), [sender.id]);
   }
 
   _onObstacleDestroyed(data: any, sender: Party.Connection) {

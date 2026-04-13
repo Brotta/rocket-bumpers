@@ -273,9 +273,12 @@ export class Game {
       await this.botManager.fillSlots();
     }
 
-    // Register bots in score manager
+    // Register bots in score manager (and on server if multiplayer host)
     for (const bot of this.botManager.bots) {
       this.scoreManager.registerPlayer(bot.carBody.playerId, bot.carBody.nickname);
+      if (this.networkManager?.isMultiplayer && this.networkManager.isHost) {
+        this.networkManager.sendRegisterBot(bot.carBody.playerId, bot.carBody.nickname, bot.carBody.carType);
+      }
     }
 
     // Wire elimination callback on every car (catches ALL damage sources)
@@ -532,6 +535,7 @@ export class Game {
         this._fillingSlotsPromise = this.botManager.fillSlots().then(() => {
           for (const bot of this.botManager.bots) {
             this.scoreManager.registerPlayer(bot.carBody.playerId, bot.carBody.nickname);
+            this.networkManager.sendRegisterBot(bot.carBody.playerId, bot.carBody.nickname, bot.carBody.carType);
             bot.carBody.onEliminated = (e) => this._onEliminated(e);
             bot.carBody._abilityRef = this.abilities.get(bot.carBody);
           }
@@ -1138,6 +1142,11 @@ export class Game {
         const randomCar = CAR_ORDER[Math.floor(Math.random() * CAR_ORDER.length)];
         setTimeout(() => {
           this._respawnCar(victim, randomCar, isBot);
+          // Notify server so bot's HP/eliminated state resets
+          if (this.networkManager?.isMultiplayer && this.networkManager.isHost) {
+            const pos = victim.body.position;
+            this.networkManager.sendRegisterBot(victim.playerId, victim.nickname, randomCar);
+          }
         }, 500);
       } else if (isLocal) {
         // Human player: show car select overlay, then respawn with chosen car
