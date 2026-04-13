@@ -297,9 +297,13 @@ export class PowerUpManager {
           const dist = Math.sqrt(dx * dx + dz * dz);
           if (dist < PICKUP_RADIUS && Math.abs(dy) < 3) {
             if (this._networkManager?.isMultiplayer) {
-              // Multiplayer: send pickup request, do optimistic local pickup
+              const localPlayer = this.getLocalPlayer();
+              // Multiplayer: send pickup request to server
               this._networkManager.sendPickupRequest(`pu_${pedestal.index}`);
-              this._optimisticPickups.set(`pu_${pedestal.index}`, car);
+              if (car === localPlayer) {
+                // Local player: optimistic pickup (rollback if denied)
+                this._optimisticPickups.set(`pu_${pedestal.index}`, car);
+              }
               this._pickup(pedestal, car);
             } else {
               this._pickup(pedestal, car);

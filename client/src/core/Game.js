@@ -448,10 +448,9 @@ export class Game {
         return;
       }
 
-      // Apply to local bot first (if we're host) — takes priority over remote entry
+      // Local bot (host) — damage already applied locally, just flash health bar
       const localCar = this._findLocalCarByPlayerId(targetId);
       if (localCar) {
-        localCar.hp = Math.max(0, localCar.hp - amount);
         this.healthBars.flashDamage(localCar);
       } else {
         // Apply to remote player (only if NOT a local bot)
