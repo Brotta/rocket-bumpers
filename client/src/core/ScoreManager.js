@@ -110,7 +110,8 @@ export class ScoreManager {
       score: player.score,
       streak: player.streak,
       delta,
-      multiplier: 1,
+      multiplier: this._getStreakMultiplier(player.streak),
+      isHit: true, // flag: this is a hit, not a kill — don't show streak notification
     });
   }
 
@@ -163,10 +164,21 @@ export class ScoreManager {
       this.registerPlayer(s.playerId, s.nickname);
       const data = this._players.get(s.playerId);
       if (data) {
+        const prevStreak = data.streak;
         data.score = s.score;
         data.kills = s.kills;
         data.deaths = s.deaths;
         data.streak = s.streak;
+        // Emit streak notification when streak crosses a threshold (3 or 5)
+        if (s.streak >= 3 && (prevStreak < 3 || (s.streak >= 5 && prevStreak < 5))) {
+          this._emit('scoreUpdate', {
+            playerId: s.playerId,
+            score: s.score,
+            streak: s.streak,
+            delta: 0,
+            multiplier: this._getStreakMultiplier(s.streak),
+          });
+        }
       }
     }
     this._emitLeaderboard();

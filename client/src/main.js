@@ -637,9 +637,10 @@ game.scoreManager.on('leaderboard', ({ entries }) => {
   }
 });
 
-game.scoreManager.on('scoreUpdate', ({ playerId, streak, multiplier }) => {
+game.scoreManager.on('scoreUpdate', ({ playerId, streak, multiplier, isHit }) => {
   const localId = game.networkManager?.localPlayerId || 'local';
-  if (playerId === localId && streak >= 3) {
+  // Only show streak notification on kills (not on every hit)
+  if (playerId === localId && streak >= 3 && !isHit) {
     showStreakNotification(streak, multiplier);
   }
 });
