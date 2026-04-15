@@ -738,6 +738,12 @@ export class Game {
       ability.update(dt);
     }
 
+    // Update remote player kinematic bodies BEFORE physics step
+    // so collision detection uses current positions
+    if (this.remotePlayerManager) {
+      this.remotePlayerManager.updatePhysicsBodies();
+    }
+
     // Step physics (single fixed step — no internal accumulator needed)
     this.physicsWorld.step(dt);
 

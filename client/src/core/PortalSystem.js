@@ -126,7 +126,8 @@ export class PortalSystem {
       params.set('hp', Math.ceil(player.hp).toString());
     }
 
-    // Ref (this game's URL)
+    // Portal flag + ref (this game's URL for return portal)
+    params.set('portal', 'true');
     params.set('ref', window.location.origin + window.location.pathname);
 
     // Score — use server-assigned playerId in multiplayer, fallback to 'local'

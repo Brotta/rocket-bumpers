@@ -130,6 +130,11 @@ export class RemotePlayerManager {
   }
 
   removePlayer(playerId) {
+    // Also clean up from pending queues (PLAYER_LEFT may arrive before creation)
+    this._pendingQueue.delete(playerId);
+    this._pendingStates.delete(playerId);
+    this._loading.delete(playerId);
+
     const entry = this._players.get(playerId);
     if (!entry) return;
 
@@ -264,6 +269,18 @@ export class RemotePlayerManager {
       existing.mesh.visible = true;
       existing.buffer.clear();
       if (pos) existing.mesh.position.set(pos[0], pos[1], pos[2]);
+    }
+  }
+
+  // ── Physics body update (called every fixed update, before physics step) ──
+
+  updatePhysicsBodies() {
+    for (const [, entry] of this._players) {
+      if (entry.isEliminated) continue;
+      const state = entry.buffer.sample();
+      if (!state) continue;
+      entry.body.position.set(state.posX, state.posY, state.posZ);
+      entry.body.velocity.set(state.velX, state.velY, state.velZ);
     }
   }
 

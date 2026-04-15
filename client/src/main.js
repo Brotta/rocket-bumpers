@@ -326,9 +326,11 @@ game.powerUpManager.on('used', ({ car, type }) => {
 // HUD updates each frame via a polling approach in rAF
 const _hudLoop = () => {
   requestAnimationFrame(_hudLoop);
+  // Always update HP (server can send damage outside of playing state)
+  updateHpHud();
+
   if (game.gameState.isPlaying) {
     updateAbilityHud();
-    updateHpHud();
 
     // Sync mobile controls with ability state
     if (game.mobileControls?.isActive && game.localAbility) {
