@@ -797,8 +797,21 @@ export class Game {
     // ── Hit-freeze: pause physics entirely for a brief moment ──
     if (this._hitFreezeTimer > 0) {
       this._hitFreezeTimer -= frameDt;
-      // During freeze: still update VFX but skip physics
+      // During freeze: still update VFX but skip physics.
+      // IMPORTANT: keep sending network state & interpolating remote players
+      // so other clients don't see us freeze during our hit-freeze.
+      if (this.networkManager?.isMultiplayer && this.localPlayer && !this.localPlayer.isEliminated) {
+        this.networkManager.tickAndMaybeSend(this.localPlayer);
+        if (this.networkManager.isHost) {
+          this.networkManager.sendBotStates(this.botManager.bots);
+        }
+      }
+      if (this.remotePlayerManager) {
+        this.remotePlayerManager.interpolateAll(frameDt, 0);
+      }
       this._updateImpactEffects(frameDt);
+      this.nameTags.update(this.sceneManager.camera, window.innerWidth, window.innerHeight);
+      this.healthBars.update(this.sceneManager.camera, window.innerWidth, window.innerHeight);
       this.sceneManager.update();
       return;
     }

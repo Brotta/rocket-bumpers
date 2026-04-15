@@ -114,9 +114,12 @@ export default class RocketBumpersServer implements Party.Server {
   rateLimits: Map<string, number[]> = new Map();
   readonly MAX_MESSAGES_PER_SECOND = 60;
 
-  // Binary rate limiting: connectionId → last binary message timestamp
+  // Binary rate limiting: entityId → last binary message timestamp
+  // Keyed per-entity (not per-connection) so the host can send states for
+  // multiple entities (local player + bots) in the same tick without them
+  // being rate-limited away.
   _binaryRateLimit: Map<string, number> = new Map();
-  readonly BINARY_MIN_INTERVAL_MS = 16; // ~60 messages/sec max
+  readonly BINARY_MIN_INTERVAL_MS = 16; // ~60 messages/sec max per entity
 
   // Per-player obstacle damage cooldown: playerId → expiry timestamp
   obstacleDamageCooldowns: Map<string, number> = new Map();
@@ -188,7 +191,7 @@ export default class RocketBumpersServer implements Party.Server {
     const playerId = conn.id;
     this.players.delete(playerId);
     this.rateLimits.delete(playerId);
-    this._binaryRateLimit.delete(playerId);
+    this._binaryRateLimit.delete(playerId); // entity-keyed rate limit
     this.obstacleDamageCooldowns.delete(playerId);
     this._stateBuffers.delete(playerId);
 
@@ -226,6 +229,7 @@ export default class RocketBumpersServer implements Party.Server {
       for (const botId of botIds) {
         this.players.delete(botId);
         this._stateBuffers.delete(botId);
+        this._binaryRateLimit.delete(botId);
         this.room.broadcast(JSON.stringify({
           type: SRV.PLAYER_LEFT,
           id: botId,
@@ -259,12 +263,23 @@ export default class RocketBumpersServer implements Party.Server {
   // ── Message routing ──────────────────────────────────────────────────
 
   onMessage(message: string | ArrayBuffer, sender: Party.Connection) {
-    // Binary messages (PLAYER_STATE) — lightweight server-side rate limit
+    // Binary messages (PLAYER_STATE) — per-entity rate limit so the host
+    // can send states for local player + all bots in the same tick.
     if (message instanceof ArrayBuffer) {
+      if (message.byteLength < 22) return;
+      const view = new DataView(message);
+      if (view.getUint8(0) !== MSG.PLAYER_STATE_BIN) return;
+
+      // Extract entity ID for per-entity rate limiting
+      const idLen = view.getUint8(1);
+      if (message.byteLength < 2 + idLen + 19) return;
+      const entityId = new TextDecoder().decode(new Uint8Array(message, 2, idLen));
+
       const now = Date.now();
-      const lastBinary = this._binaryRateLimit.get(sender.id) || 0;
+      const lastBinary = this._binaryRateLimit.get(entityId) || 0;
       if (now - lastBinary < this.BINARY_MIN_INTERVAL_MS) return;
-      this._binaryRateLimit.set(sender.id, now);
+      this._binaryRateLimit.set(entityId, now);
+
       this._handleBinaryState(message, sender);
       return;
     }
@@ -347,6 +362,7 @@ export default class RocketBumpersServer implements Party.Server {
       if (removedBotId) {
         // Remove the bot from server state
         this.players.delete(removedBotId);
+        this._binaryRateLimit.delete(removedBotId);
         const orderIdx = this.connectionOrder.indexOf(removedBotId);
         if (orderIdx !== -1) this.connectionOrder.splice(orderIdx, 1);
 
@@ -430,18 +446,10 @@ export default class RocketBumpersServer implements Party.Server {
   }
 
   _handleBinaryState(buffer: ArrayBuffer, sender: Party.Connection) {
-    // New format: [msgType:1][entityIdLen:1][entityId:N][carTypeIndex:1][state:18]
+    // Header already validated in onMessage (size, msgType, idLen).
     // Format: [0x01:1][idLen:1][entityId:N][carTypeIndex:1][16 bytes float16][flags:1][hp:1]
-    // Total = 2 + N + 19 bytes. Minimum with 1-char ID = 22
-    if (buffer.byteLength < 22) return;
-
     const view = new DataView(buffer);
-    if (view.getUint8(0) !== MSG.PLAYER_STATE_BIN) return;
-
     const idLen = view.getUint8(1);
-    if (buffer.byteLength < 2 + idLen + 19) return;
-
-    // Extract entity ID for validation
     const entityId = new TextDecoder().decode(new Uint8Array(buffer, 2, idLen));
 
     // Security: non-host can only send their own state

@@ -4,6 +4,7 @@ import { buildCar, animateWheels } from '../rendering/CarFactory.js';
 import { InterpolationBuffer } from './InterpolationBuffer.js';
 import { unpackFlags } from './protocol.js';
 import { NETWORK, COLLISION_GROUPS, STAT_MAP, CARS } from '../core/Config.js';
+const _snapThresholdSq = NETWORK.snapThreshold * NETWORK.snapThreshold;
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
 /**
@@ -327,6 +328,16 @@ export class RemotePlayerManager {
       if (!state) continue;
 
       const mesh = entry.mesh;
+
+      // Snap instead of interpolate if distance exceeds threshold (e.g., respawn, network stall)
+      const dx = state.posX - mesh.position.x;
+      const dy = (state.posY - 0.55) - mesh.position.y;
+      const dz = state.posZ - mesh.position.z;
+      if (dx * dx + dy * dy + dz * dz > _snapThresholdSq) {
+        // Clear the interpolation buffer so it doesn't drag us back
+        entry.buffer.clear();
+        entry.buffer.push(state);
+      }
 
       // Set position from interpolated state
       // Apply -0.55 Y offset to mesh (same as CarBody.syncMesh) — physics body stays at true Y
