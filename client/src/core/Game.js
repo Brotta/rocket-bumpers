@@ -748,25 +748,27 @@ export class Game {
     this.physicsWorld.step(dt);
 
     // Floor safety net (runs at fixed rate — no dt scaling needed)
-    // Use octagonal distance (perpendicular to nearest edge) instead of circular
-    // to match the actual arena shape and prevent bouncing at edge midpoints.
+    // Project onto face normals of the octagon (not vertex directions) to get
+    // perpendicular distance to each edge. The apothem = R * cos(π/8).
     const _octRadius = ARENA.diameter / 2;
     const _octSides = 8;
+    const _octApothem = _octRadius * Math.cos(Math.PI / _octSides);
     for (const cb of this.carBodies) {
       if (cb._isRemote) continue; // remote players positioned by network, not physics
       if (cb.isEliminated && !cb.mesh.visible) continue;
       const pos = cb.body.position;
 
-      // Octagonal distance: project onto each edge normal, take the max
+      // Project position onto each face outward normal — max is distance to nearest edge
       let maxProj = -Infinity;
       for (let i = 0; i < _octSides; i++) {
-        const a = (i / _octSides) * Math.PI * 2 - Math.PI / 8;
+        // Face normal = midpoint angle between vertex i and vertex i+1
+        const a = ((i + 0.5) / _octSides) * Math.PI * 2 - Math.PI / 8;
         const nx = Math.cos(a);
         const nz = Math.sin(a);
         const proj = pos.x * nx + pos.z * nz;
         if (proj > maxProj) maxProj = proj;
       }
-      const onArena = maxProj < _octRadius - 1;
+      const onArena = maxProj < _octApothem - 0.5;
 
       if (onArena && pos.y < 0 && pos.y > RESPAWN.fallOffY) {
         pos.y += (0.6 - pos.y) * 0.3;
