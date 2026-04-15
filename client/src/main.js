@@ -4,6 +4,7 @@ import { SplashScreen } from './ui/SplashScreen.js';
 import { CarSelect } from './ui/CarSelect.js';
 import { preloadCarModels } from './rendering/CarFactory.js';
 import { menuMusic } from './audio/MenuMusic.js';
+import { arenaMusic } from './audio/ArenaMusic.js';
 
 // ── URL params detection ─────────────────────────────────────────────
 const urlParams = new URLSearchParams(window.location.search);
@@ -208,12 +209,15 @@ document.body.appendChild(streakDiv);
 function updateLeaderboard(entries) {
   const top5 = entries.slice(0, 5);
   const localId = game.networkManager?.localPlayerId || 'local';
+  const hostId = game.networkManager?.hostId || null;
   leaderboardDiv.innerHTML = '<div style="color:#0ff;margin-bottom:6px;letter-spacing:0.15em;">LEADERBOARD</div>' +
     top5.map((e, i) => {
       const isLocal = e.playerId === localId;
-      const color = isLocal ? '#ff0' : (i === 0 ? '#0ff' : '#aaa');
+      const isHost = hostId && e.playerId === hostId;
+      const color = isHost ? '#ff8800' : (isLocal ? '#ff0' : (i === 0 ? '#0ff' : '#aaa'));
+      const hostTag = isHost ? ' [H]' : '';
       const streakText = e.streak >= 3 ? ` 🔥${e.streak}` : '';
-      return `<div style="color:${color};padding:2px 0;">${i + 1}. ${e.nickname} — ${e.score}${streakText}</div>`;
+      return `<div style="color:${color};padding:2px 0;">${i + 1}. ${e.nickname}${hostTag} — ${e.score}${streakText}</div>`;
     }).join('');
 }
 
@@ -370,15 +374,23 @@ game.on('playerSpawned', ({ carBody, carType }) => {
 
 // ── Disconnect notification ──────────────────────────────────────────
 game.on('disconnected', () => {
-  const banner = document.createElement('div');
-  banner.textContent = 'Connection lost — playing offline';
-  banner.style.cssText = `
-    position:fixed;top:16px;left:50%;transform:translateX(-50%);
-    color:#ff4444;font:bold 14px 'Courier New',monospace;
-    background:rgba(0,0,0,0.8);padding:8px 16px;border-radius:4px;
-    z-index:9999;pointer-events:none;`;
-  document.body.appendChild(banner);
-  setTimeout(() => banner.remove(), 5000);
+  const overlay = document.createElement('div');
+  overlay.style.cssText = `
+    position:fixed;top:0;left:0;width:100%;height:100%;
+    background:rgba(0,0,0,0.85);display:flex;flex-direction:column;
+    align-items:center;justify-content:center;z-index:9999;
+    color:#fff;font-family:'Courier New',monospace;`;
+  overlay.innerHTML = `
+    <h2 style="margin-bottom:10px;color:#ff4444;letter-spacing:0.1em;">Connection Lost</h2>
+    <p style="margin-bottom:24px;color:#aaa;">You have been disconnected from the server.</p>
+    <div>
+      <button id="btn-continue-offline" style="padding:10px 24px;margin:6px;cursor:pointer;background:#ff6600;border:none;color:#fff;border-radius:4px;font:bold 14px 'Courier New',monospace;letter-spacing:0.05em;">Continue Offline</button>
+      <button id="btn-reconnect" style="padding:10px 24px;margin:6px;cursor:pointer;background:#0066ff;border:none;color:#fff;border-radius:4px;font:bold 14px 'Courier New',monospace;letter-spacing:0.05em;">Reconnect</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  document.getElementById('btn-continue-offline').onclick = () => { overlay.remove(); };
+  document.getElementById('btn-reconnect').onclick = () => { overlay.remove(); location.reload(); };
 });
 
 // ── Respawn car select callback ───────────────────────────��─────────────
@@ -413,16 +425,31 @@ async function startGame(nickname, carType) {
           currentRoom = err.suggestedRoom;
           continue;
         }
-        // Actual connection error — offer offline play
-        const goOffline = confirm('Multiplayer connection failed: ' + (err?.message || String(err)) + '\n\nPlay offline instead?');
-        if (!goOffline) { _startingGame = false; return; }
-        break;
+        // Actual connection error — offer offline play via styled overlay
+        const userChoice = await new Promise((resolve) => {
+          const overlay = document.createElement('div');
+          overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:9999;color:#fff;font-family:Courier New,monospace;';
+          overlay.innerHTML = `
+            <h2 style="margin-bottom:10px;color:#ff4444;letter-spacing:0.1em;">Connection Failed</h2>
+            <p style="margin-bottom:24px;color:#aaa;max-width:400px;text-align:center;">${err?.message || String(err)}</p>
+            <div>
+              <button id="btn-offline" style="padding:10px 24px;margin:6px;cursor:pointer;background:#ff6600;border:none;color:#fff;border-radius:4px;font:bold 14px Courier New,monospace;letter-spacing:0.05em;">Play Offline</button>
+              <button id="btn-retry" style="padding:10px 24px;margin:6px;cursor:pointer;background:#0066ff;border:none;color:#fff;border-radius:4px;font:bold 14px Courier New,monospace;letter-spacing:0.05em;">Retry</button>
+            </div>
+          `;
+          document.body.appendChild(overlay);
+          document.getElementById('btn-offline').onclick = () => { overlay.remove(); resolve('offline'); };
+          document.getElementById('btn-retry').onclick = () => { overlay.remove(); resolve('retry'); };
+        });
+        if (userChoice === 'retry') { location.reload(); return; }
+        break; // 'offline' — continue without multiplayer
       }
     }
   }
 
   showHUD(nickname, carType);
   game.start();
+  arenaMusic.play();
 
   // Emit initial leaderboard
   const entries = game.scoreManager.getLeaderboard();

@@ -115,6 +115,12 @@ export class CollisionHandler {
   /**
    * Calculate approach speed: how fast `car` is moving toward `other`.
    * Returns 0 if car is moving away or stationary relative to other.
+   *
+   * Known limitation: For remote players, body.velocity is set from the
+   * latest network state which may be 50ms+ stale. This is inherent to
+   * networked games. The velocity used here comes from the physics body
+   * which is updated each frame from network interpolation, so it is the
+   * best available approximation.
    */
   _approachSpeed(car, other) {
     // Axis from car toward other
@@ -190,11 +196,34 @@ export class CollisionHandler {
     const otherCar = this._bodyToCarMap.get(otherPhysBody.id) || null;
 
     // Car-obstacle collision: static arena bodies (pillars, boulders)
+    // NOTE: Remote players skip damage (server handles it) but VFX still plays locally.
     if (!otherCar && otherPhysBody.mass === 0
         && (otherPhysBody.collisionFilterGroup & COLLISION_GROUPS.ARENA)
         && !otherPhysBody._isLava && otherPhysBody !== this._floorBody) {
       const contact = event.contact;
       if (!contact) return;
+
+      // Remote players: emit VFX only (sparks, stun animation), no local damage
+      if (carBody._isRemote) {
+        const dx2 = carBody.body.position.x - otherPhysBody.position.x;
+        const dz2 = carBody.body.position.z - otherPhysBody.position.z;
+        const d2 = Math.sqrt(dx2 * dx2 + dz2 * dz2) || 1;
+        const speed = Math.sqrt(
+          carBody.body.velocity.x * carBody.body.velocity.x +
+          carBody.body.velocity.z * carBody.body.velocity.z,
+        );
+        if (speed >= OBSTACLE_STUN.minStunSpeed) {
+          const hitX = (carBody.body.position.x + otherPhysBody.position.x) * 0.5;
+          const hitZ = (carBody.body.position.z + otherPhysBody.position.z) * 0.5;
+          const hitY = carBody.body.position.y;
+          this._emit('obstacle-hit', {
+            carBody, speed, stunDuration: 0,
+            hitX, hitY, hitZ,
+            normalX: dx2 / d2, normalZ: dz2 / d2,
+          });
+        }
+        return;
+      }
 
       // Skip if already stunned or in stun immunity window
       if (carBody._isStunned || carBody._stunImmunityTimer > 0) {
@@ -312,7 +341,7 @@ export class CollisionHandler {
     if (carBody.isEliminated || otherCar.isEliminated) return;
 
     // ── Per-pair damage cooldown: skip if this pair already hit recently ──
-    const now = performance.now();
+    const now = Date.now();
     const cooldownExpiry = this._pairCooldowns.get(pairKey) || 0;
     if (now < cooldownExpiry) return;
 
@@ -347,7 +376,10 @@ export class CollisionHandler {
       // ── Multiplayer: report collision to server, let server apply damage ──
       // Only send if the attacker is locally-simulated (not remote) to avoid double-reports.
       // This covers both local player and host-managed bots.
-      if (dmgAtoB > 0 && !carBody._isRemote && carBody.playerId) {
+      // Only the client with the lower playerId sends collision reports
+      // to avoid both clients reporting the same collision.
+      if (dmgAtoB > 0 && !carBody._isRemote && carBody.playerId
+          && carBody.playerId < otherCar.playerId) {
         this._networkManager.sendCollision(
           otherCar.playerId,
           approachA,
@@ -358,7 +390,8 @@ export class CollisionHandler {
           carBody.playerId,
         );
       }
-      if (dmgBtoA > 0 && !otherCar._isRemote && otherCar.playerId) {
+      if (dmgBtoA > 0 && !otherCar._isRemote && otherCar.playerId
+          && otherCar.playerId < carBody.playerId) {
         this._networkManager.sendCollision(
           carBody.playerId,
           approachB,
@@ -420,11 +453,18 @@ export class CollisionHandler {
     carBody.body.velocity.z += bnz * bounce;
     carBody._internalVelX += bnx * bounce;
     carBody._internalVelZ += bnz * bounce;
+    carBody.body._justBounced = true;
 
-    otherCar.body.velocity.x -= bnx * bounce;
-    otherCar.body.velocity.z -= bnz * bounce;
-    otherCar._internalVelX -= bnx * bounce;
-    otherCar._internalVelZ -= bnz * bounce;
+    if (!otherCar._isRemote) {
+      otherCar.body._justBounced = true;
+    }
+
+    if (!otherCar._isRemote) {
+      otherCar.body.velocity.x -= bnx * bounce;
+      otherCar.body.velocity.z -= bnz * bounce;
+      otherCar._internalVelX -= bnx * bounce;
+      otherCar._internalVelZ -= bnz * bounce;
+    }
 
     // Check eliminations after both damages are applied (single player only)
     if (!isMultiplayer) {
@@ -487,7 +527,7 @@ export class CollisionHandler {
     const trailBodies = AbilitySystem._activeTrailBodies;
     if (!trailBodies || trailBodies.size === 0) return;
 
-    const TRAIL_RADIUS_SQ = 1.44; // 1.2²
+    const TRAIL_RADIUS_SQ = 2.25; // 1.5² — larger radius to catch fast cars
 
     for (const worldBody of trailBodies) {
       if (!worldBody._isTrailFire) continue;
@@ -570,7 +610,7 @@ export class CollisionHandler {
     if (isMultiplayer) {
       // In multiplayer, report fall to server — server handles damage
       const hit = carBody.lastHitBy;
-      const now = performance.now();
+      const now = Date.now();
       const windowMs = KO_ATTRIBUTION.windowSeconds * 1000;
       const lastHitById = (hit && (now - hit.time) < windowMs) ? hit.source?.playerId : null;
       this._networkManager.sendPlayerFell(lastHitById, carBody.playerId);
@@ -587,7 +627,7 @@ export class CollisionHandler {
       // Check if the fall eliminated the car
       if (carBody.isEliminated) {
         const hit = carBody.lastHitBy;
-        const now = performance.now();
+        const now = Date.now();
         const windowMs = KO_ATTRIBUTION.windowSeconds * 1000;
         const killer = (hit && (now - hit.time) < windowMs) ? hit.source : null;
         const wasAbility = killer ? hit.wasAbility : false;
@@ -605,9 +645,14 @@ export class CollisionHandler {
     for (const cb of carBodies) {
       const vel = cb.body.velocity;
       const speed = vel.length();
-      if (speed > PHYSICS.maxVelocity) {
-        vel.scale(PHYSICS.maxVelocity / speed, vel);
+      // Allow 1.5x velocity cap for 1 frame after a bounce to preserve impulse
+      const cap = cb.body._justBounced
+        ? PHYSICS.maxVelocity * 1.5
+        : PHYSICS.maxVelocity;
+      if (speed > cap) {
+        vel.scale(cap / speed, vel);
       }
+      cb.body._justBounced = false;
     }
   }
 }

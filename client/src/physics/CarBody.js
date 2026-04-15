@@ -152,6 +152,17 @@ export class CarBody {
    * Call on respawn / round reset to clear any lingering power-up / ability effects.
    * Pending setTimeouts become stale (they check _generation).
    */
+  /**
+   * Clear all stun-related state. Can be called independently (e.g. on fall respawn)
+   * without resetting the full car state.
+   */
+  clearStun() {
+    this._isStunned = false;
+    this._stunTimer = 0;
+    this._stunSpinRate = 0;
+    this._stunImmunityTimer = 0;
+  }
+
   resetState() {
     this._generation++;
     this._isFalling = false;
@@ -165,10 +176,7 @@ export class CarBody {
     this.holoEvadeActive = false;
     this._restoreCarOpacity();
     this.lastHitBy = null;
-    this._isStunned = false;
-    this._stunTimer = 0;
-    this._stunSpinRate = 0;
-    this._stunImmunityTimer = 0;
+    this.clearStun();
     this._geyserAirborne = false;
     this._geyserAirborneTime = 0;
     this._geyserSpinRate = 0;

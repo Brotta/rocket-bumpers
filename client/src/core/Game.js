@@ -159,6 +159,7 @@ export class Game {
 
     // ── Respawn state ──
     this._isDead = false; // true while local player is falling / waiting to respawn
+    this._lastEliminationTime = 0; // timestamp guard to prevent double elimination triggers
 
     // ── Clock ──
     this._clock = new THREE.Clock();
@@ -274,8 +275,10 @@ export class Game {
     }
 
     // Register bots in score manager (and on server if multiplayer host)
+    // Also set _abilityRef so the binary state protocol can encode ability flags for guests
     for (const bot of this.botManager.bots) {
       this.scoreManager.registerPlayer(bot.carBody.playerId, bot.carBody.nickname);
+      bot.carBody._abilityRef = this.abilities.get(bot.carBody);
       if (this.networkManager?.isMultiplayer && this.networkManager.isHost) {
         this.networkManager.sendRegisterBot(bot.carBody.playerId, bot.carBody.nickname, bot.carBody.carType);
       }
@@ -365,6 +368,17 @@ export class Game {
       this.scoreManager.registerPlayer(p.id, p.nickname);
     }
 
+    // Sync initial scores from ROOM_STATE so leaderboard is correct immediately
+    const initialScores = roomState.players.map(p => ({
+      playerId: p.id,
+      nickname: p.nickname,
+      score: p.score || 0,
+      kills: p.kills || 0,
+      deaths: p.deaths || 0,
+      streak: p.streak || 0,
+    }));
+    this.scoreManager.syncFromServer(initialScores);
+
     // If we are not the host, remove local bots + clean up their name tags/health bars
     if (!this.networkManager.isHost) {
       for (const bot of this.botManager.bots) {
@@ -432,11 +446,17 @@ export class Game {
     });
 
     // Server-authoritative damage
-    _on('damageDealt', ({ targetId, amount, sourceId, wasAbility }) => {
+    _on('damageDealt', ({ targetId, amount, sourceId, wasAbility, newHp }) => {
       // Apply to local player
       if (targetId === this.networkManager.localPlayerId) {
         if (this.localPlayer && !this.localPlayer.isEliminated) {
-          this.localPlayer.hp = Math.max(0, this.localPlayer.hp - amount);
+          // Use server-reported HP if provided to prevent desync; otherwise calculate locally
+          // (the server's periodic state sync should correct any remaining drift)
+          if (newHp !== undefined && newHp !== null) {
+            this.localPlayer.hp = newHp;
+          } else {
+            this.localPlayer.hp = Math.max(0, this.localPlayer.hp - amount);
+          }
           this._emit('damage', {
             target: this.localPlayer,
             amount,
@@ -467,6 +487,9 @@ export class Game {
       if (playerId === this.networkManager.localPlayerId) {
         // Local player eliminated by server authority
         if (this.localPlayer && !this.localPlayer.isEliminated) {
+          // Guard against double elimination within 500ms window
+          if (Date.now() - this._lastEliminationTime < 500) return;
+          this._lastEliminationTime = Date.now();
           this.localPlayer.hp = 0;
           this.localPlayer.isEliminated = true;
           const killer = killerId ? this._findCarByPlayerId(killerId) : null;
@@ -754,8 +777,16 @@ export class Game {
     const _octSides = 8;
     const _octApothem = _octRadius * Math.cos(Math.PI / _octSides);
     for (const cb of this.carBodies) {
-      if (cb._isRemote) continue; // remote players positioned by network, not physics
       if (cb.isEliminated && !cb.mesh.visible) continue;
+
+      if (cb._isRemote) {
+        // Remote players: visual-only floor clamp to prevent clipping (don't modify body)
+        if (cb.mesh && cb.mesh.position.y < 0) {
+          cb.mesh.position.y = 0.6;
+        }
+        continue;
+      }
+
       const pos = cb.body.position;
 
       // Project position onto each face outward normal — max is distance to nearest edge
@@ -1119,6 +1150,11 @@ export class Game {
   _onEliminated({ victim, killer, wasAbility }) {
     // Guard: may be called from multiple paths (CarBody.onEliminated + event listeners)
     if (victim._eliminationHandled) return;
+
+    // Timestamp-based guard to prevent double elimination trigger within 500ms
+    if (Date.now() - this._lastEliminationTime < 500 && victim === this.localPlayer) return;
+    this._lastEliminationTime = Date.now();
+
     victim._eliminationHandled = true;
 
     const isLocal = victim === this.localPlayer;
@@ -1160,13 +1196,22 @@ export class Game {
         }, 500);
       } else if (isLocal) {
         // Human player: show car select overlay, then respawn with chosen car
-        if (this._onRespawnCarSelect) {
-          this._onRespawnCarSelect((chosenCarType) => {
-            this._respawnWithNewCar(chosenCarType);
-          });
+        if (typeof this._onRespawnCarSelect === 'function') {
+          try {
+            this._onRespawnCarSelect((chosenCarType) => {
+              this._respawnWithNewCar(chosenCarType);
+            });
+          } catch (_err) {
+            // Fallback if car select UI fails — respawn with current car after delay
+            setTimeout(() => {
+              this._respawnCar(victim, this.playerCarType, false);
+            }, RESPAWN.invincibilityDuration * 1000);
+          }
         } else {
-          // Fallback: respawn with same car
-          this._respawnCar(victim, this.playerCarType, false);
+          // Fallback: _onRespawnCarSelect not set (e.g., guest) — respawn with current car after delay
+          setTimeout(() => {
+            this._respawnCar(victim, this.playerCarType, false);
+          }, RESPAWN.invincibilityDuration * 1000);
         }
       }
     }, RESPAWN.deathCamDuration * 1000);
@@ -1174,6 +1219,15 @@ export class Game {
 
   /** Respawn the local player with a new car type (after car select). */
   async _respawnWithNewCar(carType) {
+    // Safety: clear any lingering invincibility blink to prevent invisible mesh
+    if (this._blinkInterval) {
+      clearInterval(this._blinkInterval);
+      this._blinkInterval = null;
+      if (this.localPlayer?.mesh) {
+        this.localPlayer.mesh.visible = true;
+      }
+    }
+
     const oldCar = this.localPlayer;
 
     // Remove old car
@@ -1212,6 +1266,20 @@ export class Game {
     this.nameTags.add(carBody, true);
     this.healthBars.add(carBody, true);
 
+    // Re-initialize camera to follow new car (avoid first-frame jump)
+    this._lookAtSmoothed.copy(carBody.mesh.position);
+    const cc = CAR_FEEL.camera;
+    const spawnFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(carBody.mesh.quaternion);
+    spawnFwd.y = 0;
+    spawnFwd.normalize();
+    const initCamPos = carBody.mesh.position.clone()
+      .addScaledVector(spawnFwd, -cc.followDist)
+      .setY(carBody.mesh.position.y + cc.height);
+    this.sceneManager.camera.position.copy(initCamPos);
+    this._currentFOV = cc.baseFOV;
+    this._currentSteerOffset = 0;
+    this._currentCamTilt = 0;
+
     // Respawn flash
     this._showRespawnFlash();
 
@@ -1224,7 +1292,7 @@ export class Game {
       carBody.isInvincible = false;
       AbilitySystem.setInvincible(carBody, false);
       carBody.mesh.visible = true;
-      this._isDead = false;
+      this._enableInput();
     }, RESPAWN.invincibilityDuration * 1000);
 
     this._emit('playerSpawned', { carBody, carType });
@@ -1239,6 +1307,15 @@ export class Game {
 
   /** Respawn an existing car (bot or fallback) in place. */
   _respawnCar(carBody, newCarType, isBot) {
+    // Safety: clear any lingering invincibility blink to prevent invisible mesh
+    if (this._blinkInterval) {
+      clearInterval(this._blinkInterval);
+      this._blinkInterval = null;
+      if (this.localPlayer?.mesh) {
+        this.localPlayer.mesh.visible = true;
+      }
+    }
+
     const angle = Math.random() * Math.PI * 2;
     const r = ARENA.lava.radius + 5 + Math.random() * (ARENA.diameter / 2 - ARENA.lava.radius - 10);
 
@@ -1261,7 +1338,7 @@ export class Game {
       this.botManager.resetBrain(carBody);
     } else {
       this._showRespawnFlash();
-      this._isDead = false;
+      this._enableInput();
     }
 
     // Invincibility blink
@@ -1294,17 +1371,29 @@ export class Game {
 
     setTimeout(() => {
       this._respawnCar(victim, victim.carType, isBot);
-      if (isLocal) this._isDead = false;
+      if (isLocal) this._enableInput();
     }, RESPAWN.deathCamDuration * 1000);
   }
 
   _startInvincibilityBlink(carBody) {
+    // Clear any previous blink interval to prevent overlapping blinks
+    if (this._blinkInterval) {
+      clearInterval(this._blinkInterval);
+      this._blinkInterval = null;
+      if (this.localPlayer?.mesh) {
+        this.localPlayer.mesh.visible = true;
+      }
+    }
+
     let blinkCount = 0;
     const maxBlinks = 12; // ~1.5s at 8Hz
-    const interval = setInterval(() => {
+    this._blinkInterval = setInterval(() => {
       if (blinkCount >= maxBlinks || !carBody.isInvincible) {
-        carBody.mesh.visible = true;
-        clearInterval(interval);
+        clearInterval(this._blinkInterval);
+        this._blinkInterval = null;
+        if (carBody.mesh) {
+          carBody.mesh.visible = true;
+        }
         return;
       }
       carBody.mesh.visible = !carBody.mesh.visible;
@@ -1327,6 +1416,13 @@ export class Game {
     });
   }
 
+  /** Centralized method to re-enable input after respawn/death. */
+  _enableInput() {
+    this._isDead = false;
+    // Clear any pending input state to prevent ghost inputs
+    this.input.forward = this.input.backward = this.input.left = this.input.right = false;
+  }
+
   // ── Round state handlers ──────────────────────────────────────────────
 
   _onStateChange({ from, to }) {
@@ -1337,7 +1433,7 @@ export class Game {
   }
 
   _onEnterPlaying() {
-    this._isDead = false;
+    this._enableInput();
     this.enableInput();
     // Hide legacy overlays
     if (this._countdownEl) this._countdownEl.style.display = 'none';

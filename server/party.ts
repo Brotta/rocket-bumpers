@@ -114,6 +114,10 @@ export default class RocketBumpersServer implements Party.Server {
   rateLimits: Map<string, number[]> = new Map();
   readonly MAX_MESSAGES_PER_SECOND = 60;
 
+  // Binary rate limiting: connectionId → last binary message timestamp
+  _binaryRateLimit: Map<string, number> = new Map();
+  readonly BINARY_MIN_INTERVAL_MS = 16; // ~60 messages/sec max
+
   // Per-player obstacle damage cooldown: playerId → expiry timestamp
   obstacleDamageCooldowns: Map<string, number> = new Map();
 
@@ -184,8 +188,14 @@ export default class RocketBumpersServer implements Party.Server {
     const playerId = conn.id;
     this.players.delete(playerId);
     this.rateLimits.delete(playerId);
+    this._binaryRateLimit.delete(playerId);
     this.obstacleDamageCooldowns.delete(playerId);
     this._stateBuffers.delete(playerId);
+
+    // Clean up pair cooldowns referencing this player so reconnect gets a clean slate
+    for (const key of this.pairCooldowns.keys()) {
+      if (key.includes(playerId)) this.pairCooldowns.delete(key);
+    }
     const invTimer = this.invincibilityTimers.get(playerId);
     if (invTimer) { clearTimeout(invTimer); this.invincibilityTimers.delete(playerId); }
 
@@ -202,10 +212,17 @@ export default class RocketBumpersServer implements Party.Server {
     // Host migration
     if (playerId === this.hostId) {
       // Clean up orphaned bot entries — bots are managed by the host client
+      // Preserve bot scores so new host can restore them
       const botIds: string[] = [];
-      for (const [id] of this.players) {
-        if (id.startsWith('bot_')) botIds.push(id);
+      const botScores: Map<string, { score: number; kills: number; deaths: number; streak: number }> = new Map();
+      for (const [id, p] of this.players) {
+        if (id.startsWith('bot_')) {
+          botIds.push(id);
+          botScores.set(id, { score: p.score, kills: p.kills, deaths: p.deaths, streak: p.streak });
+        }
       }
+      // Store bot scores for new host to reclaim
+      (this as any)._migratedBotScores = botScores;
       for (const botId of botIds) {
         this.players.delete(botId);
         this._stateBuffers.delete(botId);
@@ -217,10 +234,20 @@ export default class RocketBumpersServer implements Party.Server {
 
       this.hostId = this.connectionOrder[0] || null;
       if (this.hostId) {
+        // Notify all clients of host change
         this.room.broadcast(JSON.stringify({
           type: SRV.HOST_CHANGED,
           newHostId: this.hostId,
         }));
+        // Tell the new host to fill bot slots
+        const newHostConn = this.room.getConnection(this.hostId);
+        if (newHostConn) {
+          newHostConn.send(JSON.stringify({
+            type: SRV.HOST_CHANGED,
+            newHostId: this.hostId,
+            shouldFillBots: true,
+          }));
+        }
       }
     }
   }
@@ -232,8 +259,12 @@ export default class RocketBumpersServer implements Party.Server {
   // ── Message routing ──────────────────────────────────────────────────
 
   onMessage(message: string | ArrayBuffer, sender: Party.Connection) {
-    // Binary messages (PLAYER_STATE) — skip rate limiting (already throttled client-side)
+    // Binary messages (PLAYER_STATE) — lightweight server-side rate limit
     if (message instanceof ArrayBuffer) {
+      const now = Date.now();
+      const lastBinary = this._binaryRateLimit.get(sender.id) || 0;
+      if (now - lastBinary < this.BINARY_MIN_INTERVAL_MS) return;
+      this._binaryRateLimit.set(sender.id, now);
       this._handleBinaryState(message, sender);
       return;
     }
@@ -437,6 +468,12 @@ export default class RocketBumpersServer implements Party.Server {
         && data.attackerId.startsWith('bot_') && data.attackerId.length <= 64) {
       attackerId = data.attackerId;
     }
+
+    // Only accept collision reports from the attacker's connection
+    // (prevent double damage when both clients report the same collision).
+    // Non-host senders can only report collisions where they are the attacker.
+    if (sender.id !== this.hostId && attackerId !== sender.id) return;
+
     const { targetId, approachSpeed } = data;
 
     // Validate targetId
@@ -735,6 +772,8 @@ export default class RocketBumpersServer implements Party.Server {
       return;
     }
 
+    // Restore scores from host migration if available
+    const migrated = (this as any)._migratedBotScores?.get(botId);
     const bot: PlayerData = {
       id: botId,
       nickname: String(nickname).slice(0, 12),
@@ -743,13 +782,14 @@ export default class RocketBumpersServer implements Party.Server {
       mass: getCarMass(carType),
       isEliminated: false,
       isInvincible: false,
-      score: 0,
-      kills: 0,
-      deaths: 0,
-      streak: 0,
+      score: migrated?.score ?? 0,
+      kills: migrated?.kills ?? 0,
+      deaths: migrated?.deaths ?? 0,
+      streak: migrated?.streak ?? 0,
       hits: 0,
       lastStateTime: Date.now(),
     };
+    if (migrated) (this as any)._migratedBotScores.delete(botId);
     this.players.set(botId, bot);
 
     // Broadcast to non-host clients so they know bot nickname/carType
@@ -788,6 +828,7 @@ export default class RocketBumpersServer implements Party.Server {
   _onPlayerRespawn(data: any, sender: Party.Connection) {
     const player = this.players.get(sender.id);
     if (!player) return;
+    if (!player.isEliminated) return;
 
     player.hp = GAME.MAX_HP;
     player.isEliminated = false;
@@ -838,8 +879,11 @@ export default class RocketBumpersServer implements Party.Server {
     const now = Date.now();
     for (const [id, pedestal] of this.powerups) {
       if (!pedestal.type && pedestal.respawnAt && now >= pedestal.respawnAt) {
-        pedestal.type = randomPowerupType();
+        // Clear respawnAt first to prevent re-entry from a concurrent pickup
         pedestal.respawnAt = null;
+        // Re-check that pedestal is still empty (a pickup could have raced)
+        if (pedestal.type) continue;
+        pedestal.type = randomPowerupType();
         this.room.broadcast(JSON.stringify({
           type: SRV.POWERUP_SPAWNED,
           id,

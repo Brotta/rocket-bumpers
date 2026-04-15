@@ -53,7 +53,9 @@ export class NetworkManager {
       this._socket = new PartySocket({
         host,
         room: roomId,
-        maxRetries: 0, // disable auto-reconnect — we handle reconnection manually
+        maxRetries: 3,
+        startClosed: false,
+        maxRetryDelay: 2000,
       });
 
       this._socket.binaryType = 'arraybuffer';
@@ -80,7 +82,8 @@ export class NetworkManager {
         let data;
         try {
           data = JSON.parse(event.data);
-        } catch {
+        } catch (e) {
+          console.warn('[NetworkManager] Failed to parse server message:', e);
           return;
         }
 
@@ -149,6 +152,7 @@ export class NetworkManager {
 
   get isConnected() { return this._connected; }
   get isHost() { return this._localPlayerId === this._hostId; }
+  get hostId() { return this._hostId; }
   get localPlayerId() { return this._localPlayerId; }
   get roomId() { return this._roomId; }
   get isMultiplayer() { return this._connected; }

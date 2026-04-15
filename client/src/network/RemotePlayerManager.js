@@ -40,7 +40,28 @@ export class RemotePlayerManager {
    * @returns {Promise<object>} The remote player entry.
    */
   async addPlayer(playerId, nickname, carType) {
-    if (this._players.has(playerId)) return this._players.get(playerId);
+    if (this._players.has(playerId)) {
+      const existing = this._players.get(playerId);
+      // playerJoined may arrive after the player was already created from
+      // the pending queue with a placeholder nickname. Update the nickname
+      // and name tag DOM element with the real value.
+      if (nickname && existing.nickname !== nickname) {
+        existing.nickname = nickname;
+        // Update the DOM name tag element via the NameTags manager
+        const tag = this.game.nameTags._tags.get(existing);
+        if (tag) {
+          tag.textContent = nickname;
+          // Recalculate cached dimensions since text changed
+          tag._cachedW = 0;
+          tag._cachedH = 0;
+          requestAnimationFrame(() => {
+            tag._cachedW = tag.offsetWidth;
+            tag._cachedH = tag.offsetHeight;
+          });
+        }
+      }
+      return existing;
+    }
 
     const mesh = await buildCar(carType);
     // Check again after async — might have been added by another call
@@ -200,7 +221,7 @@ export class RemotePlayerManager {
     if (!this._pendingQueue.has(playerId)) {
       const nickname = playerId.startsWith('bot_')
         ? playerId.replace('bot_', '')
-        : playerId.slice(0, 8);
+        : 'Player';
       this._pendingQueue.set(playerId, { nickname, carType: carType || 'FANG' });
     }
   }
@@ -277,6 +298,12 @@ export class RemotePlayerManager {
   updatePhysicsBodies() {
     for (const [, entry] of this._players) {
       if (entry.isEliminated) continue;
+      // If the interpolation buffer has data, skip — interpolateAll() is the
+      // sole source of position/velocity updates for interpolated players.
+      // This avoids the race condition where position is set twice per frame
+      // (once here and once in interpolateAll), causing jitter.
+      if (entry.buffer._buffer.length > 0) continue;
+      // Fallback for players that just joined and have no buffered states yet
       const state = entry.buffer.sample();
       if (!state) continue;
       entry.body.position.set(state.posX, state.posY, state.posZ);

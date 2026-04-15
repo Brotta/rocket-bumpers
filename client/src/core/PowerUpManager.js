@@ -290,6 +290,7 @@ export class PowerUpManager {
 
       if (pedestal.active) {
         for (const car of carBodies) {
+          if (car.isEliminated) continue;
           if (this._held.get(car)) continue;
           const dx = car.body.position.x - pedestal.x;
           const dz = car.body.position.z - pedestal.z;
@@ -303,8 +304,10 @@ export class PowerUpManager {
               if (car === localPlayer) {
                 // Local player: optimistic pickup (rollback if denied)
                 this._optimisticPickups.set(`pu_${pedestal.index}`, car);
+                this._pickup(pedestal, car);
               }
-              this._pickup(pedestal, car);
+              // Remote players: don't call _pickup() locally.
+              // The server will broadcast POWERUP_TAKEN which handles visual cleanup.
             } else {
               this._pickup(pedestal, car);
             }
@@ -453,6 +456,41 @@ export class PowerUpManager {
         this._playGlitchBombSFX();
         break;
       }
+      case 'MISSILE':
+      case 'HOMING_MISSILE': {
+        // Missile launch burst VFX at remote player position
+        this._spawnRemotePowerUpBurst(pos, 0xff4400);
+        break;
+      }
+      case 'SHIELD': {
+        // Apply shield visual to remote player's car
+        const carBodies = this.getCarBodies();
+        const remoteCar = carBodies.find(c => c.playerId === playerId);
+        if (remoteCar) {
+          this._applyShield(remoteCar);
+        } else {
+          this._spawnRemotePowerUpBurst(pos, 0x00ff88);
+        }
+        break;
+      }
+      case 'REPAIR_KIT': {
+        // Green healing burst VFX at remote position
+        this._spawnRemotePowerUpBurst(pos, 0x44ff44);
+        break;
+      }
+      case 'AUTO_TURRET': {
+        // Turret deploy burst VFX at remote position
+        this._spawnRemotePowerUpBurst(pos, 0xffaa00);
+        break;
+      }
+      case 'HOLO_EVADE': {
+        // Hologram spawn burst VFX at remote position
+        this._spawnRemotePowerUpBurst(pos, 0x00ccff);
+        break;
+      }
+      case 'TRAIL_FIRE':
+        // Trail is visible from network state, no action needed
+        break;
       default:
         break;
     }
@@ -622,6 +660,28 @@ export class PowerUpManager {
     pedestal.glowLight.intensity = 0.1;
     pedestal.respawnAt = performance.now() + RESPAWN_TIME * 1000;
     this._emit('pickup', { car, type: pedestal.type, pedestalIndex: pedestal.index });
+
+    // In multiplayer, set a timeout for optimistic pickups.
+    // If no POWERUP_TAKEN or PICKUP_DENIED is received within 3 seconds, revert.
+    if (this._networkManager?.isMultiplayer) {
+      const pedestalId = `pu_${pedestal.index}`;
+      const heldType = pedestal.type;
+      setTimeout(() => {
+        // If still in optimistic state for this pickup, revert
+        if (this._optimisticPickups.has(pedestalId)) {
+          this._optimisticPickups.delete(pedestalId);
+          // Clear held power-up from car
+          if (this._held.get(car) === heldType) {
+            this._held.set(car, null);
+            this._emit('pickup', { car, type: null }); // clear HUD
+          }
+          // Restore pedestal visuals
+          if (!pedestal.active) {
+            this._spawnPickupWithType(pedestal, heldType);
+          }
+        }
+      }, 3000);
+    }
   }
 
   // ── Apply effect ──────────────────────────────────────────────────────
@@ -1283,6 +1343,27 @@ export class PowerUpManager {
         vfx.flashMat.opacity = 0.9 * (1 - t);
       }
 
+      if (vfx.type === 'remote_burst') {
+        const t = vfx.age / vfx.duration;
+        vfx.flash.scale.setScalar(2.5 + t * 3);
+        vfx.flashMat.opacity = Math.max(0, 1 - t * 1.5);
+
+        for (const d of vfx.debrisItems) {
+          d.life -= dt;
+          if (d.life <= 0 && d.mesh.visible) {
+            d.mesh.visible = false;
+            continue;
+          }
+          d.mesh.position.x += d.vx * dt;
+          d.mesh.position.y += d.vy * dt;
+          d.mesh.position.z += d.vz * dt;
+          d.vy -= 10 * dt;
+          d.mesh.rotation.x += 10 * dt;
+          d.mesh.rotation.z += 7 * dt;
+          d.mat.opacity = Math.max(0, d.life / 0.5);
+        }
+      }
+
       if (vfx.type === 'glitch_pulse') {
         const t = vfx.age / vfx.duration;
         const blastR = POWERUPS.GLITCH_BOMB.blastRadius;
@@ -1339,6 +1420,12 @@ export class PowerUpManager {
     if (vfx.type === 'turret_flash') {
       this.scene.remove(vfx.flash);
       vfx.flashMat.dispose();
+    }
+    if (vfx.type === 'remote_burst') {
+      this.scene.remove(vfx.flash);
+      this.scene.remove(vfx.debrisGroup);
+      vfx.flashMat.dispose();
+      for (const d of vfx.debrisItems) d.mat.dispose();
     }
     if (vfx.type === 'glitch_pulse') {
       this.scene.remove(vfx.ring);
@@ -1497,6 +1584,19 @@ export class PowerUpManager {
   // =====================================================================
 
   _applyShield(car) {
+    // Remove any existing shield for the same car before applying a new one
+    for (let i = this._activeShields.length - 1; i >= 0; i--) {
+      if (this._activeShields[i].car === car) {
+        const old = this._activeShields[i];
+        if (old.group) { old.group.parent?.remove(old.group); }
+        // Dispose materials
+        if (old.innerMat) old.innerMat.dispose();
+        if (old.wireMat) old.wireMat.dispose();
+        if (old.rings) old.rings.forEach(r => r.mat?.dispose());
+        this._activeShields.splice(i, 1);
+      }
+    }
+
     const config = POWERUPS.SHIELD;
     const gen = car._generation;
 
@@ -2727,6 +2827,53 @@ export class PowerUpManager {
     this._glitchNoiseCtx = null;
     this._glitchTearContainer = null;
     this._glitchFlashLayer = null;
+  }
+
+  // ── Remote power-up usage: generic particle burst VFX ──────────────────
+
+  _spawnRemotePowerUpBurst(pos, color) {
+    const cx = pos[0], cy = pos[1] + 0.5, cz = pos[2];
+
+    // Central flash sprite
+    const flashMat = new THREE.SpriteMaterial({
+      map: _glowTexture, color,
+      transparent: true, opacity: 1,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    const flash = new THREE.Sprite(flashMat);
+    flash.scale.setScalar(2.5);
+    flash.position.set(cx, cy, cz);
+    this.scene.add(flash);
+
+    // Small debris particles flying outward
+    const debrisGroup = new THREE.Group();
+    debrisGroup.position.set(cx, cy, cz);
+    const debrisItems = [];
+    const debrisGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
+    for (let d = 0; d < 10; d++) {
+      const angle = (d / 10) * Math.PI * 2 + Math.random() * 0.3;
+      const speed = 5 + Math.random() * 8;
+      const mat = new THREE.MeshBasicMaterial({
+        color, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(debrisGeo, mat);
+      mesh.position.set(0, 0, 0);
+      debrisGroup.add(mesh);
+      debrisItems.push({
+        mesh, mat,
+        vx: Math.cos(angle) * speed,
+        vy: 3 + Math.random() * 4,
+        vz: Math.sin(angle) * speed,
+        life: 0.4 + Math.random() * 0.3,
+      });
+    }
+    this.scene.add(debrisGroup);
+
+    this._vfxObjects.push({
+      type: 'remote_burst', age: 0, duration: 0.8,
+      flash, flashMat, debrisGroup, debrisItems, cy,
+    });
   }
 
   // ── Glitch Bomb: detonation VFX (3D pulse wave) ───────────────────────
