@@ -119,7 +119,7 @@ export default class RocketBumpersServer implements Party.Server {
   // multiple entities (local player + bots) in the same tick without them
   // being rate-limited away.
   _binaryRateLimit: Map<string, number> = new Map();
-  readonly BINARY_MIN_INTERVAL_MS = 16; // ~60 messages/sec max per entity
+  readonly BINARY_MIN_INTERVAL_MS = 8; // ~120 messages/sec max per entity (headroom for 60Hz sends)
 
   // Per-player obstacle damage cooldown: playerId → expiry timestamp
   obstacleDamageCooldowns: Map<string, number> = new Map();
@@ -130,9 +130,9 @@ export default class RocketBumpersServer implements Party.Server {
   // Interval IDs for cleanup
   _intervals: ReturnType<typeof setInterval>[] = [];
 
-  // Server tick: buffer latest binary state per entity, broadcast at 30Hz
+  // Server tick: buffer latest binary state per entity, broadcast at 60Hz
   _stateBuffers: Map<string, { buffer: ArrayBuffer; senderId: string }> = new Map();
-  readonly TICK_RATE_MS = 33; // ~30Hz
+  readonly TICK_RATE_MS = 16; // ~60Hz — doubled from 30Hz for smooth interpolation
 
   constructor(readonly room: Party.Room) {}
 

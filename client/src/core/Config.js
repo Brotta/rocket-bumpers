@@ -1099,7 +1099,7 @@ export const NETWORK = {
   partyKitHost: 'rocket-bumpers.brotta.partykit.dev',
   interpolationBuffer: 100,  // ms behind live — gives ~3 samples at 30Hz for smooth Hermite interp
   snapThreshold: 5,          // units — snap instead of interpolate if distance exceeds this
-  sendRate: 30,              // Hz — network state send rate
+  sendRate: 60,              // Hz — network state send rate (matched to 60Hz server tick)
   maxMessagesPerSecond: 60,
   reconnectAttempts: 3,
   reconnectDelay: 1000,      // ms
