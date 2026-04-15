@@ -596,6 +596,77 @@ export const COLLISION_IMPACT = {
   },
 };
 
+// ── Comic Impact Text ──────────────────────────────────────────────
+export const IMPACT_TEXT = {
+  maxVisible: 3,
+  poolSize: 4,
+
+  tiers: {
+    light: {
+      fontSize: [28, 36],
+      color: '#ffcc00',
+      strokeWidth: 2,
+      glowColor: 'rgba(255,204,0,0.4)',
+      duration: 0.6,
+    },
+    heavy: {
+      fontSize: [44, 56],
+      color: '#ff8800',
+      strokeWidth: 3,
+      glowColor: 'rgba(255,102,0,0.6)',
+      duration: 0.7,
+    },
+    devastating: {
+      fontSize: [64, 80],
+      color: '#ff4400',
+      strokeWidth: 4,
+      glowColor: 'rgba(255,68,0,0.7)',
+      duration: 0.8,
+    },
+  },
+
+  words: {
+    car: {
+      light:       ['BAM', 'POW', 'BONK', 'BOP', 'CLANG'],
+      heavy:       ['WHAM', 'CRASH', 'SMASH', 'CRUNCH'],
+      devastating: ['KABOOM', 'DESTROY', 'OBLITERATE'],
+    },
+    missile: {
+      light:       ['BOOM', 'BLAST', 'POW'],
+      heavy:       ['BOOM', 'BLAST', 'KABOOM'],
+      devastating: ['KABOOM', 'MEGABLAST', 'NUKE'],
+    },
+    turret: {
+      light:       ['PEW', 'ZAP', 'PING'],
+      heavy:       ['BLAM', 'ZAP', 'POW'],
+      devastating: ['BLAM', 'ZAP', 'POW'],
+    },
+    obstacle: {
+      light:       ['BONK', 'CLUNK', 'THUD'],
+      heavy:       ['CRASH', 'CRUNCH', 'SMASH'],
+      devastating: ['CRASH', 'CRUNCH', 'SMASH'],
+    },
+    trail: {
+      light:       ['SIZZLE', 'BURN', 'SCORCH'],
+      heavy:       ['SIZZLE', 'BURN', 'SCORCH'],
+      devastating: ['SIZZLE', 'BURN', 'SCORCH'],
+    },
+  },
+
+  animation: {
+    popScale: 1.3,
+    driftY: -30,
+    rotationRange: 30,
+  },
+};
+
+// ── Announcer Voice ────────────────────────────────────────────────
+export const ANNOUNCER = {
+  volume: 0.7,
+  cooldown: 0.3,
+  basePath: 'assets/audio/announcer/',
+};
+
 // ── Missile / Turret Impact FX ──────────────────────────────────────
 export const MISSILE_IMPACT = {
   // Camera shake

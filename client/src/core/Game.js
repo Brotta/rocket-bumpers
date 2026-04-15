@@ -11,7 +11,7 @@ import { BotManager } from '../ai/BotManager.js';
 import { NameTags } from '../ui/NameTags.js';
 import { DynamicHazards } from '../physics/DynamicHazards.js';
 import { TireSmokeFX } from '../rendering/TireSmokeFX.js';
-import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, COLLISION_IMPACT, MISSILE_IMPACT, DAMAGE, CAR_ORDER, getSpawnPosition } from './Config.js';
+import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, COLLISION_IMPACT, MISSILE_IMPACT, IMPACT_TEXT, DAMAGE, CAR_ORDER, getSpawnPosition } from './Config.js';
 import { HealthBars } from '../ui/HealthBars.js';
 import { StunFX } from '../rendering/StunFX.js';
 import { CollisionImpactFX } from '../rendering/CollisionImpactFX.js';
@@ -20,6 +20,8 @@ import { audioManager } from '../audio/AudioManager.js';
 import { sampleEngineAudio } from '../audio/SampleEngineAudio.js';
 import { getAllEngineSampleURLs } from '../audio/AudioConfig.js';
 import { playCollisionSFX, playVictimImpactSFX } from '../audio/CollisionSFX.js';
+import { ImpactText } from '../rendering/ImpactText.js';
+import { announcerSFX } from '../audio/AnnouncerSFX.js';
 import { DebugMode } from '../debug/DebugMode.js';
 import { ScoreManager } from './ScoreManager.js';
 import { PortalSystem } from './PortalSystem.js';
@@ -191,6 +193,9 @@ export class Game {
     // ── Collision impact FX (car-to-car: sparks, flash, shockwave) ──
     this.collisionImpactFX = new CollisionImpactFX(this.sceneManager.scene);
 
+    // ── Comic impact text overlay ("POW", "BOOM", etc.) ──
+    this.impactText = new ImpactText();
+
     // ── Chromatic aberration post-processing pass ──
     this._chromaticPass = createChromaticAberrationPass();
     // Insert before the OutputPass (last pass)
@@ -209,7 +214,17 @@ export class Game {
     this.collisionHandler.on('damage', (e) => this._onDamage(e));
     this.collisionHandler.on('eliminated', (e) => this._onEliminated(e));
     this.collisionHandler.on('fell', (e) => this._onPlayerFell(e));
-    this.collisionHandler.on('trail-hit', (e) => this._emit('trail-hit', e));
+    this.collisionHandler.on('trail-hit', (e) => {
+      this._emit('trail-hit', e);
+      if (e.victim?.body) {
+        const pos = e.victim.body.position;
+        const word = this._pickImpactWord('trail', 'light');
+        if (word) {
+          this.impactText.show({ word, tier: 'light', x: pos.x, y: pos.y + 0.5, z: pos.z });
+          announcerSFX.play(word);
+        }
+      }
+    });
     this.collisionHandler.on('obstacle-hit', (e) => this._onObstacleHit(e));
     this.collisionHandler.on('car-impact', (e) => this._onCarImpact(e));
 
@@ -296,6 +311,7 @@ export class Game {
     // by the caller — keeping start() synchronous avoids clock/timing issues.
     audioManager.init();
     await audioManager.preloadAll(getAllEngineSampleURLs());
+    announcerSFX.preload(); // fire-and-forget: clips load in background
 
     // Fill remaining slots with bots (skip in multiplayer if not host — host fills bots)
     this.botManager.removeAll();
@@ -999,6 +1015,12 @@ export class Game {
       window.innerWidth,
       window.innerHeight,
     );
+    this.impactText.update(
+      this.sceneManager.camera,
+      window.innerWidth,
+      window.innerHeight,
+      frameDt,
+    );
 
     // Debug overlay
     this.debug.update();
@@ -1211,6 +1233,24 @@ export class Game {
       this._cameraShakeDuration = shakeCfg.duration / 1000;
       this._cameraShakeTimer = this._cameraShakeDuration;
     }
+
+    // Comic impact text
+    if (e.hitX !== undefined) {
+      const obsTier = e.speed > 20 ? 'heavy' : 'light';
+      const word = this._pickImpactWord('obstacle', obsTier);
+      if (word) {
+        this.impactText.show({ word, tier: obsTier, x: e.hitX, y: e.hitY || 1.0, z: e.hitZ });
+        announcerSFX.play(word);
+      }
+    }
+  }
+
+  // ── Impact text helper ──────────────────────────────────────────────
+
+  _pickImpactWord(type, tier) {
+    const list = IMPACT_TEXT.words[type]?.[tier];
+    if (!list || list.length === 0) return null;
+    return list[Math.floor(Math.random() * list.length)];
   }
 
   // ── Car-to-car impact (VFX + SFX + hit-freeze) ─────────────────────
@@ -1255,7 +1295,16 @@ export class Game {
       this._hitFreezeTimer = freezeDuration;
     }
 
-    // ── 6. Slowmo (devastating only, after freeze ends) ──
+    // ── 6. Comic impact text + announcer ──
+    {
+      const word = this._pickImpactWord('car', tier);
+      if (word) {
+        this.impactText.show({ word, tier, x, y: y || 1.0, z });
+        announcerSFX.play(word);
+      }
+    }
+
+    // ── 7. Slowmo (devastating only, after freeze ends) ──
     if (localInvolved && tier === 'devastating') {
       this._slowmoTimer = cfg.slowmo.duration;
       this._slowmoRampTimer = 0;
@@ -1345,6 +1394,17 @@ export class Game {
     // ── 8. Victim-specific metallic crunch SFX ──
     if (isVictim) {
       playVictimImpactSFX(isTurret ? 'turret' : 'missile');
+    }
+
+    // ── 9. Comic impact text + announcer ──
+    if (x !== undefined) {
+      const textType = isTurret ? 'turret' : 'missile';
+      const textTier = type === 'HOMING_MISSILE' ? 'devastating' : isTurret ? 'light' : 'heavy';
+      const word = this._pickImpactWord(textType, textTier);
+      if (word) {
+        this.impactText.show({ word, tier: textTier, x, y: y || 1.0, z });
+        announcerSFX.play(word);
+      }
     }
   }
 
