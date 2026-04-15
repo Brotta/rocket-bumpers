@@ -24,9 +24,10 @@ export class NetworkManager {
     this._roomId = null;
     this._hostId = null;
 
-    // Send rate throttle
-    this._sendCounter = 0;
-    this._sendInterval = Math.round(60 / NETWORK.sendRate); // ticks between sends (3 for 20Hz)
+    // Send rate throttle — wall-clock time so sends are unaffected by
+    // game time scale (slowmo, hit-freeze).
+    this._lastSendTime = 0;
+    this._sendIntervalMs = 1000 / NETWORK.sendRate; // ms between sends
 
     // Reconnection
     this._reconnectAttempts = 0;
@@ -160,24 +161,25 @@ export class NetworkManager {
   // ── Send methods (called by Game.js) ──────────────────────────────────
 
   /**
-   * Called every fixed update tick. Sends player state at the configured
-   * network send rate (every 3rd tick for 20Hz).
+   * Called every frame from _animate(). Uses wall-clock time so the send
+   * rate is unaffected by game time scale (slowmo, hit-freeze).
+   * @returns {boolean} true if a send happened this call.
    */
   tickAndMaybeSend(localCarBody) {
-    if (!this._connected) return;
-    this._sendCounter++;
-    if (this._sendCounter % this._sendInterval !== 0) return;
+    if (!this._connected) return false;
+    const now = performance.now();
+    if (now - this._lastSendTime < this._sendIntervalMs) return false;
+    this._lastSendTime = now;
     this._sendBinary(encodePlayerState(localCarBody));
+    return true;
   }
 
   /**
-   * Send bot states (host only). Only sends on the same throttled ticks as
-   * the local player state (called right after tickAndMaybeSend).
+   * Send bot states (host only). Call right after tickAndMaybeSend —
+   * only sends when didSend is true (same wall-clock cadence).
    */
-  sendBotStates(bots) {
-    if (!this._connected || !this.isHost) return;
-    // Only send on the same tick that tickAndMaybeSend sent (throttle aligned)
-    if (this._sendCounter % this._sendInterval !== 0) return;
+  sendBotStates(bots, didSend) {
+    if (!this._connected || !this.isHost || !didSend) return;
     for (const bot of bots) {
       if (!bot.carBody) continue;
       this._sendBinary(encodePlayerState(bot.carBody));

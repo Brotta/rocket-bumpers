@@ -165,9 +165,11 @@ export class InterpolationBuffer {
       variance += d * d;
     }
     const stdDev = Math.sqrt(variance / this._jitterSamples.length);
-    // Delay = mean gap + 2× stddev, clamped between baseDelay*0.5 and baseDelay*2.5
+    // Delay = mean gap + 2× stddev, clamped between baseDelay and baseDelay*2.5.
+    // Never go below baseDelay — doing so starves the buffer (< 3 samples)
+    // and causes constant extrapolation stutter.
     const desired = mean + 2 * stdDev;
-    this._delay = Math.max(this._baseDelay * 0.5, Math.min(desired, this._baseDelay * 2.5));
+    this._delay = Math.max(this._baseDelay, Math.min(desired, this._baseDelay * 2.5));
   }
 
   /**

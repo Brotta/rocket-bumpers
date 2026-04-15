@@ -788,6 +788,16 @@ export class Game {
     if (!this._running) return;
     requestAnimationFrame(this._animate);
 
+    // ── Network send: runs at wall-clock rate, BEFORE any time scaling ──
+    // This ensures sends happen at consistent 30Hz regardless of hit-freeze,
+    // slowmo, or debug time scale.
+    if (this.networkManager?.isMultiplayer && this.localPlayer && !this.localPlayer.isEliminated) {
+      const didSend = this.networkManager.tickAndMaybeSend(this.localPlayer);
+      if (this.networkManager.isHost) {
+        this.networkManager.sendBotStates(this.botManager.bots, didSend);
+      }
+    }
+
     let frameDt = this._clock.getDelta();
     if (frameDt > MAX_DT) frameDt = MAX_DT;
 
@@ -797,15 +807,7 @@ export class Game {
     // ── Hit-freeze: pause physics entirely for a brief moment ──
     if (this._hitFreezeTimer > 0) {
       this._hitFreezeTimer -= frameDt;
-      // During freeze: still update VFX but skip physics.
-      // IMPORTANT: keep sending network state & interpolating remote players
-      // so other clients don't see us freeze during our hit-freeze.
-      if (this.networkManager?.isMultiplayer && this.localPlayer && !this.localPlayer.isEliminated) {
-        this.networkManager.tickAndMaybeSend(this.localPlayer);
-        if (this.networkManager.isHost) {
-          this.networkManager.sendBotStates(this.botManager.bots);
-        }
-      }
+      // During freeze: still interpolate remote players and update VFX
       if (this.remotePlayerManager) {
         this.remotePlayerManager.interpolateAll(frameDt, 0);
       }
@@ -956,15 +958,8 @@ export class Game {
     // Portal system (ramp launches, trigger checks)
     if (this.portalSystem) this.portalSystem.update(dt);
 
-    // Network: send local player state at 20Hz (every 3rd tick)
-    if (this.networkManager?.isMultiplayer && this.localPlayer && !this.localPlayer.isEliminated) {
-      this.networkManager.tickAndMaybeSend(this.localPlayer);
-
-      // Host: send bot states too
-      if (this.networkManager.isHost) {
-        this.networkManager.sendBotStates(this.botManager.bots);
-      }
-    }
+    // Network sends moved to _animate() — wall-clock throttled, unaffected
+    // by game time scale (slowmo / hit-freeze).
   }
 
   // ── Visual update at display refresh rate ────────────────────────────

@@ -1097,7 +1097,7 @@ export const GAME_STATES = {
 // ── Network (Multiplayer) ───────────────────────────────────────────────
 export const NETWORK = {
   partyKitHost: 'rocket-bumpers.brotta.partykit.dev',
-  interpolationBuffer: 70,   // ms behind live to render remote players
+  interpolationBuffer: 100,  // ms behind live — gives ~3 samples at 30Hz for smooth Hermite interp
   snapThreshold: 5,          // units — snap instead of interpolate if distance exceeds this
   sendRate: 30,              // Hz — network state send rate
   maxMessagesPerSecond: 60,
