@@ -409,6 +409,14 @@ export class Game {
     }));
     this.scoreManager.syncFromServer(initialScores);
 
+    // If we ARE the host, register bots on the server now that connection is live
+    // (setPlayer() ran before connectMultiplayer, so sendRegisterBot was skipped)
+    if (this.networkManager.isHost) {
+      for (const bot of this.botManager.bots) {
+        this.networkManager.sendRegisterBot(bot.carBody.playerId, bot.carBody.nickname, bot.carBody.carType);
+      }
+    }
+
     // If we are not the host, remove local bots + clean up their name tags/health bars
     if (!this.networkManager.isHost) {
       for (const bot of this.botManager.bots) {
