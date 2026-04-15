@@ -7,6 +7,10 @@ import { NETWORK, COLLISION_GROUPS, STAT_MAP, CARS } from '../core/Config.js';
 const _snapThresholdSq = NETWORK.snapThreshold * NETWORK.snapThreshold;
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
+// Visual smoothing rate — higher = more responsive, lower = smoother.
+// At 25, the mesh catches up ~87% in 5 frames (~83ms at 60fps).
+const VISUAL_SMOOTH_RATE = 25;
+
 /**
  * RemotePlayerManager — manages visual representations of remote players.
  *
@@ -329,27 +333,43 @@ export class RemotePlayerManager {
 
       const mesh = entry.mesh;
 
-      // Snap instead of interpolate if distance exceeds threshold (e.g., respawn, network stall)
-      const dx = state.posX - mesh.position.x;
-      const dy = (state.posY - 0.55) - mesh.position.y;
-      const dz = state.posZ - mesh.position.z;
-      if (dx * dx + dy * dy + dz * dz > _snapThresholdSq) {
-        // Clear the interpolation buffer so it doesn't drag us back
+      // Target position from interpolated network state
+      const targetX = state.posX;
+      const targetY = state.posY - 0.55; // mesh Y offset (same as CarBody.syncMesh)
+      const targetZ = state.posZ;
+
+      // Distance from current mesh to interpolated target
+      const dx = targetX - mesh.position.x;
+      const dy = targetY - mesh.position.y;
+      const dz = targetZ - mesh.position.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+
+      if (distSq > _snapThresholdSq) {
+        // Snap on large distance (respawn, first appearance, long network stall)
+        mesh.position.set(targetX, targetY, targetZ);
+        entry._yaw = state.yaw;
         entry.buffer.clear();
         entry.buffer.push(state);
+      } else {
+        // Visual smoothing — mesh lerps toward the interpolated target.
+        // Eliminates micro-jitter at sample boundaries while staying responsive.
+        const t = 1 - Math.exp(-VISUAL_SMOOTH_RATE * frameDt);
+        mesh.position.x += dx * t;
+        mesh.position.y += dy * t;
+        mesh.position.z += dz * t;
+
+        // Smooth yaw via shortest-arc lerp
+        let yawDiff = state.yaw - entry._yaw;
+        if (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+        if (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+        entry._yaw += yawDiff * t;
       }
 
-      // Set position from interpolated state
-      // Apply -0.55 Y offset to mesh (same as CarBody.syncMesh) — physics body stays at true Y
-      mesh.position.set(state.posX, state.posY - 0.55, state.posZ);
+      mesh.quaternion.setFromAxisAngle(_yAxis, entry._yaw);
 
-      // Update kinematic physics body position (for collision detection)
+      // Physics body uses exact interpolated position (no smoothing — accuracy matters)
       entry.body.position.set(state.posX, state.posY, state.posZ);
       entry.body.velocity.set(state.velX, state.velY, state.velZ);
-
-      // Yaw rotation
-      entry._yaw = state.yaw;
-      mesh.quaternion.setFromAxisAngle(_yAxis, state.yaw);
 
       // Update CarBody-like properties for collision/HUD
       entry._currentSpeed = state.speed;
