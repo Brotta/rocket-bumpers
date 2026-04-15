@@ -11,7 +11,7 @@ import { BotManager } from '../ai/BotManager.js';
 import { NameTags } from '../ui/NameTags.js';
 import { DynamicHazards } from '../physics/DynamicHazards.js';
 import { TireSmokeFX } from '../rendering/TireSmokeFX.js';
-import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, COLLISION_IMPACT, MISSILE_IMPACT, CAR_ORDER, getSpawnPosition } from './Config.js';
+import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, COLLISION_IMPACT, MISSILE_IMPACT, DAMAGE, CAR_ORDER, getSpawnPosition } from './Config.js';
 import { HealthBars } from '../ui/HealthBars.js';
 import { StunFX } from '../rendering/StunFX.js';
 import { CollisionImpactFX } from '../rendering/CollisionImpactFX.js';
@@ -1588,6 +1588,21 @@ export class Game {
     if (isLocal) this._isDead = true;
     this.powerUpManager.drop(victim);
 
+    // Apply fall damage locally as optimistic estimate (server will sync exact newHp later).
+    // In SP, takeDamage was already called by CollisionHandler; in MP it wasn't,
+    // so we apply it here to get the correct HP before respawn repositioning.
+    if (this.networkManager?.isMultiplayer && !victim.isEliminated) {
+      victim.hp = Math.max(0, victim.hp - DAMAGE.FALL_DAMAGE);
+    }
+
+    // Check if fall damage killed the victim
+    if (victim.hp <= 0 || victim.isEliminated) {
+      victim.hp = 0;
+      victim.isEliminated = true;
+      this._onEliminated({ victim, killer: victim._lastHitBy || null, wasAbility: false });
+      return;
+    }
+
     // Preserve HP after fall damage (don't reset to max)
     const hpAfterFall = victim.hp;
 
@@ -1595,6 +1610,7 @@ export class Game {
       this._respawnCar(victim, victim.carType, isBot);
       // Restore fall-damaged HP instead of full HP
       victim.hp = hpAfterFall;
+      victim._isFalling = false;
       if (isLocal) this._enableInput();
     }, RESPAWN.deathCamDuration * 1000);
   }
