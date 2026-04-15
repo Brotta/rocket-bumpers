@@ -52,13 +52,16 @@ export class HUD {
 
     // Color
     if (remaining <= 5) {
-      this._timerEl.style.color = '#f44';
+      this._timerEl.style.color = '#ff3322';
+      this._timerEl.style.borderColor = 'rgba(255,51,34,0.6)';
       this._timerEl.style.animation = 'hud-pulse 0.5s infinite';
     } else if (remaining <= 10) {
-      this._timerEl.style.color = '#f44';
+      this._timerEl.style.color = '#ff6633';
+      this._timerEl.style.borderColor = 'rgba(255,102,0,0.4)';
       this._timerEl.style.animation = 'none';
     } else {
-      this._timerEl.style.color = '#fff';
+      this._timerEl.style.color = '#fff5e6';
+      this._timerEl.style.borderColor = 'rgba(255,102,0,0.4)';
       this._timerEl.style.animation = 'none';
     }
   }
@@ -77,13 +80,13 @@ export class HUD {
   }
 
   _flashScore() {
-    this._scoreWrap.style.color = '#0f0';
-    this._scoreWrap.style.textShadow = '0 0 16px #0f0, 0 0 40px #0f0';
-    this._scoreWrap.style.transform = 'scale(1.15)';
+    this._scoreWrap.style.color = '#ffcc00';
+    this._scoreWrap.style.textShadow = '0 2px 0 #1a0e08, 0 0 20px #ffaa00, 0 0 40px rgba(255,170,0,0.4)';
+    this._scoreWrap.style.transform = 'scale(1.18)';
     clearTimeout(this._scoreFlashTimer);
     this._scoreFlashTimer = setTimeout(() => {
-      this._scoreWrap.style.color = '#fff';
-      this._scoreWrap.style.textShadow = '0 0 8px #000';
+      this._scoreWrap.style.color = '#fff5e6';
+      this._scoreWrap.style.textShadow = '0 2px 0 #1a0e08, 0 0 10px rgba(0,0,0,0.6)';
       this._scoreWrap.style.transform = 'scale(1)';
     }, 350);
   }
@@ -103,17 +106,17 @@ export class HUD {
     );
 
     if (state === 'ready') {
-      this._abilityRing.setAttribute('stroke', '#0f0');
-      this._abilityCircle.style.boxShadow = '0 0 18px #0f0, 0 0 36px #0f055';
-      this._abilityLetter.style.color = '#0f0';
+      this._abilityRing.setAttribute('stroke', '#ffcc00');
+      this._abilityCircle.style.boxShadow = '0 0 18px rgba(255,204,0,0.5), 0 0 36px rgba(255,170,0,0.2)';
+      this._abilityLetter.style.color = '#ffcc00';
     } else if (state === 'active') {
-      this._abilityRing.setAttribute('stroke', '#ff0');
-      this._abilityCircle.style.boxShadow = '0 0 12px #ff0';
-      this._abilityLetter.style.color = '#ff0';
+      this._abilityRing.setAttribute('stroke', '#ff6600');
+      this._abilityCircle.style.boxShadow = '0 0 14px rgba(255,102,0,0.5)';
+      this._abilityLetter.style.color = '#ff6600';
     } else {
-      this._abilityRing.setAttribute('stroke', '#555');
+      this._abilityRing.setAttribute('stroke', '#553322');
       this._abilityCircle.style.boxShadow = 'none';
-      this._abilityLetter.style.color = '#666';
+      this._abilityLetter.style.color = '#886644';
     }
   }
 
@@ -183,33 +186,44 @@ export class HUD {
     style.textContent = `
       @keyframes hud-pulse {
         0%,100% { opacity:1; transform:translateX(-50%) scale(1); }
-        50%     { opacity:0.5; transform:translateX(-50%) scale(1.08); }
+        50%     { opacity:0.5; transform:translateX(-50%) scale(1.12); }
       }
 
-      #game-hud { position:fixed;inset:0;pointer-events:none;z-index:10;font-family:'Courier New',monospace; }
+      #game-hud { position:fixed;inset:0;pointer-events:none;z-index:10;font-family:'Russo One',sans-serif; }
 
-      /* Timer */
+      /* Timer — chunky centered display */
       .hud-timer {
-        position:absolute;top:16px;left:50%;transform:translateX(-50%);
-        font:bold 28px 'Courier New',monospace;color:#fff;
-        text-shadow:0 0 8px #000;display:none;
+        position:absolute;top:12px;left:50%;transform:translateX(-50%);
+        font:32px 'Luckiest Guy',cursive;color:#fff5e6;
+        text-shadow:
+          0 2px 0 #1a0e08,
+          0 0 12px rgba(255,102,0,0.5),
+          0 0 30px rgba(255,68,0,0.2);
+        letter-spacing:0.08em;
+        background:linear-gradient(180deg, rgba(26,14,8,0.85) 0%, rgba(10,6,3,0.9) 100%);
+        border:2px solid rgba(255,102,0,0.4);
+        border-radius:10px;
+        padding:4px 20px;
+        display:none;
       }
 
-      /* Score */
+      /* Score — bold with warm accent */
       .hud-score-wrap {
         position:absolute;top:16px;left:16px;
-        color:#fff;text-shadow:0 0 8px #000;
+        color:#fff5e6;
+        text-shadow:0 2px 0 #1a0e08, 0 0 10px rgba(0,0,0,0.6);
         transition:color .2s,text-shadow .2s,transform .15s;
       }
       .hud-player-label {
-        font:bold 14px 'Courier New',monospace;color:#888;
-        margin-bottom:4px;
+        font:12px 'Russo One',sans-serif;color:#c9a87c;
+        margin-bottom:2px;letter-spacing:0.1em;
       }
       .hud-score {
-        font:bold 28px 'Courier New',monospace;
+        font:36px 'Luckiest Guy',cursive;
+        letter-spacing:0.04em;
       }
 
-      /* Ability indicator */
+      /* Ability indicator — warm glow ring */
       .hud-ability {
         position:absolute;bottom:max(12px, env(safe-area-inset-bottom, 0px));right:max(12px, env(safe-area-inset-right, 0px));
         display:flex;flex-direction:column;align-items:center;gap:4px;
@@ -220,41 +234,44 @@ export class HUD {
       }
       .hud-ability-letter {
         position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-        font:bold 26px 'Courier New',monospace;color:#0f0;
-        text-shadow:0 0 6px #000;
+        font:28px 'Luckiest Guy',cursive;color:#ffcc00;
+        text-shadow:0 2px 0 #1a0e08, 0 0 8px rgba(0,0,0,0.8);
       }
       .hud-ability-name {
-        font:bold 11px 'Courier New',monospace;color:#aaa;
+        font:11px 'Russo One',sans-serif;color:#c9a87c;
         text-transform:uppercase;letter-spacing:0.15em;
       }
 
-      /* Power-up slot */
+      /* Power-up slot — mini item box */
       .hud-powerup-slot {
         position:absolute;bottom:calc(100px + max(12px, env(safe-area-inset-bottom, 0px)));right:calc(20px + max(12px, env(safe-area-inset-right, 0px)));
-        width:44px;height:44px;
-        border:2px solid #333;border-radius:6px;
-        background:rgba(30,30,30,0.6);
+        width:48px;height:48px;
+        border:2px solid #553322;border-radius:8px;
+        background:linear-gradient(180deg, rgba(26,14,8,0.8) 0%, rgba(10,6,3,0.9) 100%);
         display:flex;align-items:center;justify-content:center;
-        transition:border-color .2s;
+        transition:border-color .2s, box-shadow .2s;
       }
       .hud-powerup-icon {
-        font:bold 11px 'Courier New',monospace;color:#666;
+        font:bold 10px 'Russo One',sans-serif;color:#886644;
         text-align:center;
       }
 
-      /* Kill feed */
+      /* Kill feed — warm themed, top-right */
       .hud-kill-feed {
-        position:absolute;top:16px;right:16px;
-        display:flex;flex-direction:column;gap:4px;
-        max-width:300px;
+        position:absolute;top:56px;right:16px;
+        display:flex;flex-direction:column;gap:5px;
+        max-width:320px;
       }
       .hud-kill-entry {
-        font:bold 13px 'Courier New',monospace;
-        color:#ff0;text-shadow:0 0 6px #000;
-        background:rgba(0,0,0,0.5);
-        padding:4px 10px;border-radius:4px;
+        font:13px 'Russo One',sans-serif;
+        color:#ffcc00;
+        text-shadow:0 1px 0 #1a0e08, 0 0 8px rgba(255,170,0,0.3);
+        background:linear-gradient(90deg, rgba(26,14,8,0.85) 0%, rgba(26,14,8,0.6) 80%, transparent 100%);
+        border-left:3px solid #ff6600;
+        padding:5px 12px;border-radius:0 6px 6px 0;
         opacity:0;transition:opacity .4s;
         white-space:nowrap;
+        letter-spacing:0.03em;
       }
     `;
     el.appendChild(style);
@@ -272,9 +289,9 @@ export class HUD {
     this._abilityCircle = this._div('hud-ability-circle', abilityWrap);
     this._abilityCircle.innerHTML = `
       <svg viewBox="0 0 72 72" style="width:100%;height:100%;position:absolute;inset:0;">
-        <circle cx="36" cy="36" r="30" fill="rgba(0,0,0,0.5)" stroke="#333" stroke-width="3"/>
+        <circle cx="36" cy="36" r="30" fill="rgba(26,14,8,0.7)" stroke="#553322" stroke-width="3"/>
         <circle class="hud-ability-ring" cx="36" cy="36" r="30" fill="none"
-          stroke="#0f0" stroke-width="4" stroke-linecap="round"
+          stroke="#ffcc00" stroke-width="4" stroke-linecap="round"
           stroke-dasharray="${RING_C}" stroke-dashoffset="0"
           transform="rotate(-90 36 36)"/>
       </svg>

@@ -75,7 +75,7 @@ export class CarSelect {
         background:${this._respawnMode
           ? 'rgba(5, 5, 16, 0.85)'
           : 'radial-gradient(ellipse at center 60%, #1a0e08 0%, #0d0604 50%, #050202 100%)'};
-        font-family:'Courier New',monospace;
+        font-family:'Russo One',sans-serif;
         padding:clamp(12px,3vw,24px);
         overflow:hidden;
         user-select:none;-webkit-user-select:none;
@@ -102,19 +102,21 @@ export class CarSelect {
       /* Header */
       .cs-header{text-align:center;width:100%;flex-shrink:0;position:relative;z-index:1}
       .cs-player{
-        color:#aa7755;font-size:0.8rem;letter-spacing:0.25em;
+        color:#c9a87c;font-size:0.8rem;letter-spacing:0.25em;
         margin-bottom:0.15rem;
       }
       .cs-title{
-        color:#ff6b20;font-size:clamp(0.65rem,2vw,0.8rem);
-        letter-spacing:0.35em;
-        text-shadow:0 0 10px #ff440066;
+        color:#ff8c00;font-size:clamp(0.65rem,2vw,0.8rem);
+        font-family:'Luckiest Guy',cursive;
+        letter-spacing:0.25em;
+        text-shadow:0 2px 0 #1a0e08, 0 0 10px rgba(255,68,0,0.4);
         margin-bottom:0.3rem;
       }
       .cs-car-name{
-        font-size:clamp(1.4rem,5vw,2.4rem);font-weight:bold;
-        color:#ffe0c0;letter-spacing:0.12em;
-        text-shadow:0 0 14px var(--car-glow,#ff6b20), 0 0 40px var(--car-glow,#ff440044);
+        font-family:'Luckiest Guy',cursive;
+        font-size:clamp(1.4rem,5vw,2.4rem);
+        color:#fff5e6;letter-spacing:0.08em;
+        text-shadow:0 3px 0 #1a0e08, 0 0 14px var(--car-glow,#ff6b20), 0 0 40px var(--car-glow,#ff440044);
         transition:opacity .25s;
       }
 
@@ -144,8 +146,9 @@ export class CarSelect {
       }
       .cs-arrow:active{transform:scale(0.9)}
       .cs-counter{
-        color:#aa7755;font-size:0.85rem;letter-spacing:0.15em;
+        color:#c9a87c;font-size:0.85rem;letter-spacing:0.15em;
         min-width:4em;text-align:center;
+        font-family:'Luckiest Guy',cursive;
       }
 
       /* Stat bars */
@@ -157,22 +160,27 @@ export class CarSelect {
         display:flex;align-items:center;margin:6px 0;
       }
       .cs-stat-label{
-        width:70px;color:#aa7755;font-size:0.75rem;
-        letter-spacing:0.12em;text-align:right;padding-right:10px;
+        width:80px;color:#c9a87c;font-size:0.7rem;
+        letter-spacing:0.1em;text-align:right;padding-right:10px;
+        font-family:'Russo One',sans-serif;
       }
       .cs-stat-track{
         flex:1;height:14px;background:#1a0e08;
-        border:1px solid #33180a;
-        border-radius:3px;overflow:hidden;position:relative;
+        border:2px solid rgba(255,102,0,0.2);
+        border-radius:7px;overflow:hidden;position:relative;
+        box-shadow:inset 0 2px 4px rgba(0,0,0,0.4);
       }
       .cs-stat-fill{
-        height:100%;border-radius:3px;
+        height:100%;border-radius:5px;
         transition:width .4s cubic-bezier(.25,.8,.25,1);
         box-shadow:0 0 8px var(--bar-color);
+        background-image:linear-gradient(180deg, rgba(255,255,255,0.2) 0%, transparent 50%);
+        background-blend-mode:overlay;
       }
       .cs-stat-val{
-        width:36px;text-align:center;color:#ffe0c0;font-size:0.8rem;
-        font-weight:bold;padding-left:8px;
+        width:36px;text-align:center;color:#fff5e6;font-size:0.8rem;
+        padding-left:8px;
+        font-family:'Luckiest Guy',cursive;
       }
 
       /* Ability */
@@ -183,31 +191,32 @@ export class CarSelect {
         position:relative;z-index:1;
       }
       .cs-ability-name{
-        color:#ff8c00;font-size:0.9rem;font-weight:bold;
-        letter-spacing:0.15em;
-        text-shadow:0 0 10px #ff6b2066;
+        color:#ff8c00;font-size:0.9rem;
+        font-family:'Luckiest Guy',cursive;
+        letter-spacing:0.1em;
+        text-shadow:0 2px 0 #1a0e08, 0 0 10px rgba(255,107,32,0.4);
       }
       .cs-ability-desc{
-        color:#aa7755;font-size:0.75rem;margin-top:2px;
+        color:#c9a87c;font-size:0.72rem;margin-top:2px;
       }
 
       /* Select button */
       .cs-select{
         flex-shrink:0;
-        background:transparent;
-        border:2px solid #ff6b20;color:#ff6b20;
-        font:bold clamp(1rem,3vw,1.4rem) 'Courier New',monospace;
+        background:linear-gradient(180deg, rgba(255,107,32,0.15) 0%, transparent 100%);
+        border:3px solid #ff6b20;color:#ff8c00;
+        font:clamp(1rem,3vw,1.4rem) 'Luckiest Guy',cursive;
         padding:0.7rem clamp(2rem,8vw,4rem);
-        cursor:pointer;letter-spacing:0.25em;
-        border-radius:4px;transition:all .15s;
-        text-shadow:0 0 8px #ff440088;
+        cursor:pointer;letter-spacing:0.15em;
+        border-radius:10px;transition:all .15s;
+        text-shadow:0 2px 0 #1a0e08, 0 0 8px rgba(255,68,0,0.5);
         margin-bottom:env(safe-area-inset-bottom,0);
         position:relative;z-index:1;
       }
       .cs-select:hover{
-        background:rgba(255,68,0,0.1);
-        box-shadow:0 0 20px #ff6b20, 0 0 40px #ff440033;
-        color:#ff8c00;border-color:#ff8c00;
+        background:linear-gradient(180deg, rgba(255,107,32,0.25) 0%, rgba(255,68,0,0.05) 100%);
+        box-shadow:0 0 20px rgba(255,107,32,0.5), 0 0 40px rgba(255,68,0,0.2);
+        color:#ffaa33;border-color:#ff8c00;
       }
       .cs-select:active{transform:scale(0.95)}
 

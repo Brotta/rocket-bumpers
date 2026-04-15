@@ -36,22 +36,28 @@ export class HealthBars {
         left:0;top:0;
         width:${BAR_WIDTH}px;
         height:${BAR_HEIGHT}px;
-        background:rgba(0,0,0,0.6);
-        border:1px solid rgba(255,255,255,0.3);
-        border-radius:3px;
+        background:linear-gradient(180deg, rgba(26,14,8,0.85) 0%, rgba(10,6,3,0.9) 100%);
+        border:2px solid rgba(255,102,0,0.35);
+        border-radius:7px;
         overflow:hidden;
         pointer-events:none;
         will-change:transform;
+        box-shadow:0 2px 6px rgba(0,0,0,0.5);
       }
       .hp-fill {
         height:100%;
         width:100%;
-        border-radius:2px;
+        border-radius:5px;
         transition:width 0.25s ease-out, background-color 0.3s;
         transform-origin:left center;
+        background-image:linear-gradient(180deg, rgba(255,255,255,0.15) 0%, transparent 50%, rgba(0,0,0,0.1) 100%);
+        background-blend-mode:overlay;
+      }
+      .hp-bar.is-local {
+        border-color:rgba(255,204,0,0.5);
       }
       .hp-bar.is-local .hp-fill {
-        box-shadow:0 0 4px currentColor;
+        box-shadow:0 0 6px currentColor;
       }
       .hp-bar.hit-flash .hp-fill {
         filter:brightness(2.0);

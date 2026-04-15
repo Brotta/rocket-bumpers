@@ -100,6 +100,20 @@ export class ScoreManager {
     });
   }
 
+  /** Apply a server-authoritative score delta (multiplayer real-time feedback). */
+  addServerDelta(playerId, delta) {
+    const player = this._players.get(playerId);
+    if (!player) return;
+    player.score = Math.max(0, player.score + delta);
+    this._emit('scoreUpdate', {
+      playerId,
+      score: player.score,
+      streak: player.streak,
+      delta,
+      multiplier: 1,
+    });
+  }
+
   /** Called when a player dies (no killer — environmental, self). */
   onDeath(playerId) {
     const player = this._players.get(playerId);

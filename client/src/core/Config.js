@@ -517,6 +517,133 @@ export const PHYSICS = {
   networkSendRate: 20,    // Hz
 };
 
+// ── Collision Impact FX (car-to-car) ────────────────────────────────
+export const COLLISION_IMPACT = {
+  // Hit-freeze durations (brief time pause on impact)
+  hitFreeze: {
+    light:       0.04,   // seconds
+    heavy:       0.08,
+    devastating: 0.14,
+  },
+
+  // Slow-motion after devastating hit (time scale ramps back to 1.0)
+  slowmo: {
+    scale:    0.3,       // time scale during slowmo
+    duration: 0.2,       // seconds at slowmo scale
+    rampBack: 0.15,      // seconds to ease back to 1.0
+  },
+
+  // Camera shake per tier
+  cameraShake: {
+    light:       { intensity: 0.012, duration: 150 },
+    heavy:       { intensity: 0.025, duration: 250 },
+    devastating: { intensity: 0.045, duration: 400 },
+  },
+
+  // Screen flash overlay
+  flash: {
+    light:       { color: 0xffffff, alpha: 0.12, duration: 0.08 },
+    heavy:       { color: 0xff8800, alpha: 0.20, duration: 0.12 },
+    devastating: { color: 0xff4400, alpha: 0.35, duration: 0.20 },
+  },
+
+  // Chromatic aberration pulse (heavy + devastating only)
+  chromatic: {
+    heavy:       { strength: 0.003, duration: 0.15 },
+    devastating: { strength: 0.008, duration: 0.30 },
+  },
+
+  // Spark particles at impact point
+  sparks: {
+    light:       { count: 6,  speed: 8,  size: 0.12, lifetime: 0.4, color: 0xffcc44 },
+    heavy:       { count: 12, speed: 12, size: 0.15, lifetime: 0.5, color: 0xffaa22 },
+    devastating: { count: 20, speed: 16, size: 0.18, lifetime: 0.6, color: 0xff6600 },
+  },
+
+  // Car emissive flash on impact
+  emissiveFlash: {
+    light:       { intensity: 1.0, duration: 0.08 },
+    heavy:       { intensity: 2.0, duration: 0.12 },
+    devastating: { intensity: 3.0, duration: 0.20 },
+  },
+
+  // Shockwave ring (devastating only)
+  shockwave: {
+    startRadius: 0.5,
+    endRadius:   8.0,
+    duration:    0.35,
+    color:       0xff6600,
+    opacity:     0.4,
+  },
+
+  // Audio synthesis parameters
+  audio: {
+    light: {
+      thud:   { freq: 70,  gain: 0.15, decay: 0.08 },
+      crunch: { freqLo: 800,  freqHi: 2000, gain: 0.10, decay: 0.06 },
+    },
+    heavy: {
+      thud:   { freq: 60,  gain: 0.30, decay: 0.12 },
+      crunch: { freqLo: 600,  freqHi: 2500, gain: 0.20, decay: 0.10 },
+      glass:  { freqHi: 4000, gain: 0.08, decay: 0.04 },
+    },
+    devastating: {
+      thud:   { freq: 45,  gain: 0.50, decay: 0.18 },
+      crunch: { freqLo: 500,  freqHi: 3000, gain: 0.35, decay: 0.15 },
+      glass:  { freqHi: 5000, gain: 0.15, decay: 0.08 },
+      sub:    { freq: 30,  gain: 0.40, decay: 0.20 },
+    },
+  },
+};
+
+// ── Missile / Turret Impact FX ──────────────────────────────────────
+export const MISSILE_IMPACT = {
+  // Camera shake
+  missile: {
+    shakeAttacker: { intensity: 0.015, duration: 200 },
+    shakeVictim:   { intensity: 0.035, duration: 300 },
+    hitFreeze: 0.06,          // seconds — brief pause on impact
+    chromatic: { strength: 0.005, duration: 0.20 },
+    screenFlash: { color: 0xff4400, alpha: 0.18, duration: 0.10 },
+    emissiveFlash: { intensity: 2.5, duration: 0.15 },
+    vignette: { alpha: 0.5, duration: 0.6 },
+    shockwave: {
+      startRadius: 0.5, endRadius: 6.0,
+      duration: 0.30, color: 0xff4400, opacity: 0.35,
+    },
+  },
+  homing: {
+    shakeAttacker: { intensity: 0.020, duration: 250 },
+    shakeVictim:   { intensity: 0.040, duration: 350 },
+    hitFreeze: 0.08,
+    chromatic: { strength: 0.006, duration: 0.25 },
+    screenFlash: { color: 0xff00ff, alpha: 0.22, duration: 0.12 },
+    emissiveFlash: { intensity: 3.0, duration: 0.18 },
+    vignette: { alpha: 0.6, duration: 0.7 },
+    shockwave: {
+      startRadius: 0.5, endRadius: 7.0,
+      duration: 0.35, color: 0xff00ff, opacity: 0.4,
+    },
+  },
+  turret: {
+    shakeVictim: { intensity: 0.008, duration: 100 },
+    hitFreeze: 0,                 // no freeze for turret (too frequent)
+    screenFlash: { color: 0xffaa00, alpha: 0.08, duration: 0.06 },
+    emissiveFlash: { intensity: 1.2, duration: 0.08 },
+    vignette: { alpha: 0.2, duration: 0.3 },
+  },
+  // Victim-only metallic crunch SFX
+  victimAudio: {
+    missile: {
+      crunch: { freqLo: 600, freqHi: 2500, gain: 0.25, decay: 0.12 },
+      thud:   { freq: 50, gain: 0.35, decay: 0.15 },
+    },
+    turret: {
+      crunch: { freqLo: 1000, freqHi: 3000, gain: 0.10, decay: 0.06 },
+    },
+  },
+};
+
 // ── Obstacle Stun (boulder / pillar collision) ──────────────────────
 export const OBSTACLE_STUN = {
   // Minimum speed for stun + damage; below this → soft bounce only

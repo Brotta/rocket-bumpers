@@ -11,12 +11,15 @@ import { BotManager } from '../ai/BotManager.js';
 import { NameTags } from '../ui/NameTags.js';
 import { DynamicHazards } from '../physics/DynamicHazards.js';
 import { TireSmokeFX } from '../rendering/TireSmokeFX.js';
-import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, CAR_ORDER, getSpawnPosition } from './Config.js';
+import { GAME_STATES, ARENA, RESPAWN, CAR_FEEL, OBSTACLE_STUN, COLLISION_IMPACT, MISSILE_IMPACT, CAR_ORDER, getSpawnPosition } from './Config.js';
 import { HealthBars } from '../ui/HealthBars.js';
 import { StunFX } from '../rendering/StunFX.js';
+import { CollisionImpactFX } from '../rendering/CollisionImpactFX.js';
+import { createChromaticAberrationPass } from '../rendering/ChromaticAberrationPass.js';
 import { audioManager } from '../audio/AudioManager.js';
 import { sampleEngineAudio } from '../audio/SampleEngineAudio.js';
 import { getAllEngineSampleURLs } from '../audio/AudioConfig.js';
+import { playCollisionSFX, playVictimImpactSFX } from '../audio/CollisionSFX.js';
 import { DebugMode } from '../debug/DebugMode.js';
 import { ScoreManager } from './ScoreManager.js';
 import { PortalSystem } from './PortalSystem.js';
@@ -95,9 +98,14 @@ export class Game {
     this.dynamicHazards.on('geyserErupt', (e) => this._onGeyserErupt(e));
     this.dynamicHazards.on('eruptionBlast', () => this._onEruptionBlast());
     this.dynamicHazards.on('damage', (e) => {
-      // In multiplayer, sync environmental damage (lava/geyser) to server for local player
-      if (this.networkManager?.isMultiplayer && e.target === this.localPlayer && e.amount > 0) {
-        this.networkManager.sendEnvDamage(e.amount);
+      // In multiplayer, sync environmental damage (lava/geyser) to server
+      if (this.networkManager?.isMultiplayer && e.amount > 0) {
+        if (e.target === this.localPlayer) {
+          this.networkManager.sendEnvDamage(e.amount);
+        } else if (this.networkManager.isHost && this.botManager.isBot(e.target)) {
+          // Host reports lava/env damage for its local bots
+          this.networkManager.sendEnvDamage(e.amount, e.target.playerId);
+        }
       }
     });
 
@@ -180,15 +188,37 @@ export class Game {
     // ── Stun visual FX ──
     this.stunFX = new StunFX(this.sceneManager.scene);
 
+    // ── Collision impact FX (car-to-car: sparks, flash, shockwave) ──
+    this.collisionImpactFX = new CollisionImpactFX(this.sceneManager.scene);
+
+    // ── Chromatic aberration post-processing pass ──
+    this._chromaticPass = createChromaticAberrationPass();
+    // Insert before the OutputPass (last pass)
+    const composer = this.sceneManager.composer;
+    composer.insertPass(this._chromaticPass, composer.passes.length - 1);
+    this._chromaticStrength = 0;
+    this._chromaticDecayRate = 0;
+
+    // ── Hit-freeze / slowmo state ──
+    this._hitFreezeTimer = 0;     // remaining freeze time (pauses physics)
+    this._slowmoTimer = 0;        // remaining slowmo time
+    this._slowmoRampTimer = 0;    // ramp-back to 1.0 time
+    this._timeScale = 1.0;        // current game time scale (1.0 = normal)
+
     // ── Wire collision events ──
     this.collisionHandler.on('damage', (e) => this._onDamage(e));
     this.collisionHandler.on('eliminated', (e) => this._onEliminated(e));
     this.collisionHandler.on('fell', (e) => this._onPlayerFell(e));
     this.collisionHandler.on('trail-hit', (e) => this._emit('trail-hit', e));
     this.collisionHandler.on('obstacle-hit', (e) => this._onObstacleHit(e));
+    this.collisionHandler.on('car-impact', (e) => this._onCarImpact(e));
 
     // ── Debug mode ──
     this.debug = new DebugMode(this);
+
+    // ── Wire power-up damage events (missiles, turrets, glitch bomb) ──
+    this.powerUpManager.on('damage', (e) => this._onDamage(e));
+    this.powerUpManager.on('powerup-hit', (e) => this._onPowerupHit(e));
 
     // ── Wire hazard damage/elimination events ──
     this.dynamicHazards.on('damage', (e) => this._onDamage(e));
@@ -446,12 +476,11 @@ export class Game {
     });
 
     // Server-authoritative damage
-    _on('damageDealt', ({ targetId, amount, sourceId, wasAbility, newHp }) => {
+    _on('damageDealt', ({ targetId, amount, sourceId, wasAbility, newHp, scoreDelta }) => {
       // Apply to local player
       if (targetId === this.networkManager.localPlayerId) {
         if (this.localPlayer && !this.localPlayer.isEliminated) {
-          // Use server-reported HP if provided to prevent desync; otherwise calculate locally
-          // (the server's periodic state sync should correct any remaining drift)
+          // Use server-reported HP to prevent desync; fallback to local calculation
           if (newHp !== undefined && newHp !== null) {
             this.localPlayer.hp = newHp;
           } else {
@@ -468,15 +497,31 @@ export class Game {
         return;
       }
 
-      // Local bot (host) — damage already applied locally, just flash health bar
+      // Real-time score feedback: credit attacker immediately (server-authoritative delta)
+      if (scoreDelta && sourceId) {
+        const isLocalAttacker = sourceId === this.networkManager.localPlayerId
+          || this._findLocalCarByPlayerId(sourceId);
+        if (isLocalAttacker) {
+          this.scoreManager.addServerDelta(sourceId, scoreDelta);
+        }
+      }
+
+      // Local bot (host) — damage already applied locally; sync HP from server to prevent drift
       const localCar = this._findLocalCarByPlayerId(targetId);
       if (localCar) {
+        if (newHp !== undefined && newHp !== null) {
+          localCar.hp = newHp;
+        }
         this.healthBars.flashDamage(localCar);
       } else {
         // Apply to remote player (only if NOT a local bot)
         const remote = this.remotePlayerManager.getPlayer(targetId);
         if (remote) {
-          remote.hp = Math.max(0, remote.hp - amount);
+          if (newHp !== undefined && newHp !== null) {
+            remote.hp = newHp;
+          } else {
+            remote.hp = Math.max(0, remote.hp - amount);
+          }
           this.healthBars.flashDamage(remote);
         }
       }
@@ -487,8 +532,8 @@ export class Game {
       if (playerId === this.networkManager.localPlayerId) {
         // Local player eliminated by server authority
         if (this.localPlayer && !this.localPlayer.isEliminated) {
-          // Guard against double elimination within 500ms window
-          if (Date.now() - this._lastEliminationTime < 500) return;
+          // Guard against double elimination within 1500ms window (accounts for high-latency MP)
+          if (Date.now() - this._lastEliminationTime < 1500) return;
           this._lastEliminationTime = Date.now();
           this.localPlayer.hp = 0;
           this.localPlayer.isEliminated = true;
@@ -711,6 +756,34 @@ export class Game {
     // Apply debug time scale
     frameDt *= this.debug.timeScale;
 
+    // ── Hit-freeze: pause physics entirely for a brief moment ──
+    if (this._hitFreezeTimer > 0) {
+      this._hitFreezeTimer -= frameDt;
+      // During freeze: still update VFX but skip physics
+      this._updateImpactEffects(frameDt);
+      this.sceneManager.update();
+      return;
+    }
+
+    // ── Slowmo: reduce time scale temporarily after devastating hit ──
+    if (this._slowmoTimer > 0) {
+      this._slowmoTimer -= frameDt;
+      this._timeScale = COLLISION_IMPACT.slowmo.scale;
+      if (this._slowmoTimer <= 0) {
+        this._slowmoRampTimer = COLLISION_IMPACT.slowmo.rampBack;
+      }
+    } else if (this._slowmoRampTimer > 0) {
+      this._slowmoRampTimer -= frameDt;
+      const t = Math.max(0, this._slowmoRampTimer / COLLISION_IMPACT.slowmo.rampBack);
+      this._timeScale = COLLISION_IMPACT.slowmo.scale + (1 - COLLISION_IMPACT.slowmo.scale) * (1 - t);
+      if (this._slowmoRampTimer <= 0) this._timeScale = 1.0;
+    } else {
+      this._timeScale = 1.0;
+    }
+
+    // Apply slowmo to frame delta
+    frameDt *= this._timeScale;
+
     // Game state timers (safe to run at render rate — only drives countdowns/UI)
     this.gameState.update(frameDt);
 
@@ -872,6 +945,9 @@ export class Game {
 
       // Stun visual FX (debris, stars, wobble, flash)
       this.stunFX.update(frameDt);
+
+      // Collision impact VFX (sparks, emissive flash, screen flash, shockwave)
+      this._updateImpactEffects(frameDt);
     }
 
     // Update audio systems (listener position = camera, engine crossfade, voice priorities)
@@ -1115,6 +1191,141 @@ export class Game {
     }
   }
 
+  // ── Car-to-car impact (VFX + SFX + hit-freeze) ─────────────────────
+
+  _onCarImpact(e) {
+    const { tier, x, y, z, nx, nz, carA, carB, damageA, damageB } = e;
+    const cfg = COLLISION_IMPACT;
+
+    // Determine if local player is involved (for screen effects)
+    const localInvolved = carA === this.localPlayer || carB === this.localPlayer;
+
+    // The victim is whichever took more damage (for emissive flash)
+    const victim = damageA >= damageB ? carB : carA;
+
+    // ── 1. Visual FX: sparks, emissive flash, screen flash, shockwave ──
+    this.collisionImpactFX.trigger({
+      tier, x, y, z, nx, nz, victim,
+      isLocalPlayer: localInvolved,
+    });
+
+    // ── 2. Audio: procedural crash SFX ──
+    playCollisionSFX(tier, x, z);
+
+    // ── 3. Camera shake (local player only) ──
+    if (localInvolved) {
+      const shakeCfg = cfg.cameraShake[tier];
+      this._cameraShakeIntensity = shakeCfg.intensity;
+      this._cameraShakeDuration = shakeCfg.duration / 1000;
+      this._cameraShakeTimer = this._cameraShakeDuration;
+    }
+
+    // ── 4. Chromatic aberration pulse (heavy + devastating, local only) ──
+    if (localInvolved && cfg.chromatic[tier]) {
+      const ca = cfg.chromatic[tier];
+      this._chromaticStrength = ca.strength;
+      this._chromaticDecayRate = ca.strength / ca.duration;
+    }
+
+    // ── 5. Hit freeze (pause physics briefly) ──
+    if (localInvolved) {
+      const freezeDuration = cfg.hitFreeze[tier];
+      this._hitFreezeTimer = freezeDuration;
+    }
+
+    // ── 6. Slowmo (devastating only, after freeze ends) ──
+    if (localInvolved && tier === 'devastating') {
+      this._slowmoTimer = cfg.slowmo.duration;
+      this._slowmoRampTimer = 0;
+    }
+  }
+
+  // ── Impact effects per-frame update (chromatic aberration + VFX) ────
+
+  _updateImpactEffects(dt) {
+    // Chromatic aberration decay
+    if (this._chromaticStrength > 0) {
+      this._chromaticStrength -= this._chromaticDecayRate * dt;
+      if (this._chromaticStrength < 0.0001) this._chromaticStrength = 0;
+      this._chromaticPass.uniforms.strength.value = this._chromaticStrength;
+    }
+
+    // Collision impact VFX update (sparks, emissive flashes, screen flash, shockwaves)
+    this.collisionImpactFX.update(dt);
+  }
+
+  // ── Missile / Turret hit impact (VFX + SFX) ────────────────────────
+
+  _onPowerupHit({ attacker, victim, type, x, y, z }) {
+    if (!this.localPlayer) return;
+
+    const isMissile = type === 'MISSILE' || type === 'HOMING_MISSILE';
+    const isTurret = type === 'AUTO_TURRET';
+    const isVictim = victim === this.localPlayer;
+    const isAttacker = attacker === this.localPlayer;
+    const localInvolved = isVictim || isAttacker;
+
+    // Determine config key
+    const cfgKey = type === 'HOMING_MISSILE' ? 'homing' : isTurret ? 'turret' : 'missile';
+    const cfg = MISSILE_IMPACT[cfgKey];
+    if (!cfg) return;
+
+    // ── 1. Camera shake ──
+    if (isVictim && cfg.shakeVictim) {
+      this._cameraShakeIntensity = cfg.shakeVictim.intensity;
+      this._cameraShakeDuration = cfg.shakeVictim.duration / 1000;
+      this._cameraShakeTimer = this._cameraShakeDuration;
+    } else if (isAttacker && cfg.shakeAttacker) {
+      this._cameraShakeIntensity = cfg.shakeAttacker.intensity;
+      this._cameraShakeDuration = cfg.shakeAttacker.duration / 1000;
+      this._cameraShakeTimer = this._cameraShakeDuration;
+    }
+
+    // ── 2. Emissive flash on victim car ──
+    if (cfg.emissiveFlash && victim?.mesh) {
+      this.collisionImpactFX.triggerEmissiveFlash(
+        victim, cfg.emissiveFlash.intensity, cfg.emissiveFlash.duration,
+      );
+    }
+
+    // ── 3. Screen flash (attacker sees it dim, victim sees it bright) ──
+    if (isVictim && cfg.screenFlash) {
+      this.collisionImpactFX.triggerScreenFlash(
+        cfg.screenFlash.color, cfg.screenFlash.alpha, cfg.screenFlash.duration,
+      );
+    } else if (isAttacker && cfg.screenFlash) {
+      this.collisionImpactFX.triggerScreenFlash(
+        cfg.screenFlash.color, cfg.screenFlash.alpha * 0.5, cfg.screenFlash.duration,
+      );
+    }
+
+    // ── 4. Damage vignette (victim only) ──
+    if (isVictim && cfg.vignette) {
+      this.collisionImpactFX.triggerVignette(cfg.vignette.alpha, cfg.vignette.duration);
+    }
+
+    // ── 5. Chromatic aberration (victim only, missiles) ──
+    if (isVictim && cfg.chromatic) {
+      this._chromaticStrength = cfg.chromatic.strength;
+      this._chromaticDecayRate = cfg.chromatic.strength / cfg.chromatic.duration;
+    }
+
+    // ── 6. Hit freeze (missiles only, local player involved) ──
+    if (localInvolved && cfg.hitFreeze > 0) {
+      this._hitFreezeTimer = cfg.hitFreeze;
+    }
+
+    // ── 7. Shockwave ring (missiles only) ──
+    if (isMissile && cfg.shockwave && x !== undefined) {
+      this.collisionImpactFX.triggerShockwave(x, y || 0.5, z, cfg.shockwave);
+    }
+
+    // ── 8. Victim-specific metallic crunch SFX ──
+    if (isVictim) {
+      playVictimImpactSFX(isTurret ? 'turret' : 'missile');
+    }
+  }
+
   // ── Geyser eruption camera shake ───────────────────────────────────
 
   _onGeyserErupt({ x, z }) {
@@ -1140,8 +1351,8 @@ export class Game {
     this.healthBars.flashDamage(e.target);
 
     // Score: credit the attacker (skip in multiplayer — server handles scores)
-    if (!this.networkManager?.isMultiplayer && e.attacker && e.amount > 0) {
-      this.scoreManager.onDamage(e.attacker.playerId, e.amount);
+    if (!this.networkManager?.isMultiplayer && e.source && e.amount > 0 && !e._vfxOnly) {
+      this.scoreManager.onDamage(e.source.playerId, e.amount);
     }
 
     this._emit('damage', e);
@@ -1151,8 +1362,8 @@ export class Game {
     // Guard: may be called from multiple paths (CarBody.onEliminated + event listeners)
     if (victim._eliminationHandled) return;
 
-    // Timestamp-based guard to prevent double elimination trigger within 500ms
-    if (Date.now() - this._lastEliminationTime < 500 && victim === this.localPlayer) return;
+    // Timestamp-based guard to prevent double elimination trigger within 1500ms (high-latency MP)
+    if (Date.now() - this._lastEliminationTime < 1500 && victim === this.localPlayer) return;
     this._lastEliminationTime = Date.now();
 
     victim._eliminationHandled = true;
@@ -1369,8 +1580,13 @@ export class Game {
     if (isLocal) this._isDead = true;
     this.powerUpManager.drop(victim);
 
+    // Preserve HP after fall damage (don't reset to max)
+    const hpAfterFall = victim.hp;
+
     setTimeout(() => {
       this._respawnCar(victim, victim.carType, isBot);
+      // Restore fall-damaged HP instead of full HP
+      victim.hp = hpAfterFall;
       if (isLocal) this._enableInput();
     }, RESPAWN.deathCamDuration * 1000);
   }
@@ -1448,8 +1664,8 @@ export class Game {
     cd.style.cssText = `
       position:fixed;inset:0;z-index:50;
       display:none;align-items:center;justify-content:center;
-      font:bold clamp(4rem,15vw,10rem) 'Courier New',monospace;
-      color:#ff6600;text-shadow:0 0 30px #ff4400,0 0 80px #ff2200;
+      font:clamp(4rem,15vw,10rem) 'Luckiest Guy',cursive;
+      color:#ff6600;text-shadow:0 4px 0 #1a0e08, 0 0 30px rgba(255,68,0,0.6), 0 0 80px rgba(255,34,0,0.3);
       pointer-events:none;
     `;
     document.body.appendChild(cd);

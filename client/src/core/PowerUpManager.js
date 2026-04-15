@@ -358,7 +358,11 @@ export class PowerUpManager {
     return true;
   }
 
-  drop(car) { this._held.set(car, null); }
+  drop(car) {
+    const hadItem = this._held.get(car);
+    this._held.set(car, null);
+    if (hadItem) this._emit('drop', { car, type: hadItem });
+  }
 
   // ── Network event handlers (called by Game.js) ────────────────────────
 
@@ -902,7 +906,17 @@ export class PowerUpManager {
           }
           if (!car._isRemote) {
             // Local car (player or bot) — apply damage directly
-            car.takeDamage(p.config.damage, p.owner, false);
+            const actual = car.takeDamage(p.config.damage, p.owner, false);
+            if (actual > 0) {
+              this._emit('damage', {
+                target: car, amount: actual, source: p.owner,
+                tier: actual >= 30 ? 'devastating' : actual >= 15 ? 'heavy' : 'light',
+                wasAbility: false,
+              });
+            }
+          } else {
+            // Remote car — optimistic HP update to prevent multiple projectiles hitting a dead target
+            car.hp = Math.max(0, car.hp - p.config.damage);
           }
           const knockback = 8;
           car.body.velocity.x -= Math.sin(p.yaw) * knockback;
@@ -910,7 +924,11 @@ export class PowerUpManager {
           car.body.velocity.y += 2;
           car.lastHitBy = { source: p.owner, wasAbility: false, time: performance.now() };
           this._detonateProjectile(p);
-          this._emit('powerup-hit', { attacker: p.owner, victim: car, type: p.isHoming ? 'HOMING_MISSILE' : 'MISSILE' });
+          this._emit('powerup-hit', {
+            attacker: p.owner, victim: car,
+            type: p.isHoming ? 'HOMING_MISSILE' : 'MISSILE',
+            x: p.x, y: p.y, z: p.z,
+          });
           hit = true;
           break;
         }
@@ -2271,7 +2289,16 @@ export class PowerUpManager {
             this._networkManager.sendPowerUpDamage(car.playerId, b.config.damage, 'AUTO_TURRET', b.owner?.playerId);
           }
           if (!car._isRemote) {
-            car.takeDamage(b.config.damage, b.owner, false);
+            const actual = car.takeDamage(b.config.damage, b.owner, false);
+            if (actual > 0) {
+              this._emit('damage', {
+                target: car, amount: actual, source: b.owner,
+                tier: 'light', wasAbility: false,
+              });
+            }
+          } else {
+            // Remote car — optimistic HP update to prevent multiple bullets hitting a dead target
+            car.hp = Math.max(0, car.hp - b.config.damage);
           }
           // Light knockback in bullet direction
           const speed = Math.sqrt(b.vx * b.vx + b.vz * b.vz);
@@ -2280,7 +2307,10 @@ export class PowerUpManager {
             car.body.velocity.z += (b.vz / speed) * b.config.knockback;
           }
           car.lastHitBy = { source: b.owner, wasAbility: false, time: performance.now() };
-          this._emit('powerup-hit', { attacker: b.owner, victim: car, type: 'AUTO_TURRET' });
+          this._emit('powerup-hit', {
+            attacker: b.owner, victim: car, type: 'AUTO_TURRET',
+            x: b.x, y: b.y, z: b.z,
+          });
 
           // Small hit spark
           this._spawnBulletHitVFX(b.x, b.y, b.z);
@@ -2421,7 +2451,7 @@ export class PowerUpManager {
 
     // ── Apply glitch to all OTHER cars in blast radius ──
     for (const target of carBodies) {
-      if (target === car || target.isEliminated) continue;
+      if (target === car || target.isEliminated || target.isInvincible) continue;
       const dx = target.body.position.x - car.body.position.x;
       const dz = target.body.position.z - car.body.position.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
@@ -2432,7 +2462,13 @@ export class PowerUpManager {
         this._networkManager.sendPowerUpDamage(target.playerId, config.damage, 'GLITCH_BOMB', car.playerId);
       }
       if (!target._isRemote) {
-        target.takeDamage(config.damage, car, false);
+        const actual = target.takeDamage(config.damage, car, false);
+        if (actual > 0) {
+          this._emit('damage', {
+            target, amount: actual, source: car,
+            tier: 'light', wasAbility: false,
+          });
+        }
       }
       target.lastHitBy = { source: car, wasAbility: false, time: performance.now() };
 

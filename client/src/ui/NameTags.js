@@ -30,16 +30,18 @@ export class NameTags {
       .name-tag {
         position:absolute;
         left:0;top:0;
-        font:bold 22px 'Courier New',monospace;
-        color:#fff;
-        text-shadow:0 0 6px #000, 0 0 12px #000;
+        font:18px 'Russo One',sans-serif;
+        color:#fff5e6;
+        text-shadow:0 2px 0 #1a0e08, 0 0 8px rgba(0,0,0,0.8), 0 0 16px rgba(0,0,0,0.4);
         white-space:nowrap;
         pointer-events:none;
         opacity:0.9;
         will-change:transform;
+        letter-spacing:0.04em;
       }
       .name-tag.is-local {
-        color:#0ff;
+        color:#ffcc00;
+        text-shadow:0 2px 0 #1a0e08, 0 0 8px rgba(255,170,0,0.4), 0 0 16px rgba(0,0,0,0.4);
       }
     `;
     container.appendChild(style);

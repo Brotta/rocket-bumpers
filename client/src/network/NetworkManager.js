@@ -233,11 +233,10 @@ export class NetworkManager {
     this._sendJSON(msg);
   }
 
-  sendEnvDamage(damage) {
-    this._sendJSON({
-      type: MSG.ENV_DAMAGE,
-      damage,
-    });
+  sendEnvDamage(damage, botId = null) {
+    const msg = { type: MSG.ENV_DAMAGE, damage };
+    if (botId) msg.playerId = botId;
+    this._sendJSON(msg);
   }
 
   sendObstacleDamage(damage) {
@@ -263,10 +262,11 @@ export class NetworkManager {
     });
   }
 
-  sendPlayerFell(lastHitById, playerId) {
+  sendPlayerFell(lastHitById, playerId, lastHitTime = 0) {
     const msg = {
       type: MSG.PLAYER_FELL,
       lastHitById,
+      lastHitTime,
     };
     // Include playerId for bot falls (host sends on behalf of bots)
     if (playerId) msg.playerId = playerId;

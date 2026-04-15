@@ -518,21 +518,23 @@ export default class RocketBumpersServer implements Party.Server {
     // Apply damage
     victim.hp = Math.max(0, victim.hp - damage);
 
-    // Broadcast damage
-    this.room.broadcast(JSON.stringify({
-      type: SRV.DAMAGE_DEALT,
-      targetId,
-      amount: Math.round(damage * 10) / 10,
-      sourceId: attackerId,
-      wasAbility: !!data.wasAbility,
-    }));
-
     // Score: credit attacker for hit
     attacker.hits++;
     const hitDelta = damage >= GAME.SCORE_BIG_HIT_THRESHOLD
       ? GAME.SCORE_BIG_HIT : GAME.SCORE_SMALL_HIT;
     const hitMult = getStreakMultiplier(attacker.streak);
     attacker.score += hitDelta * hitMult;
+
+    // Broadcast damage (include newHp to prevent client desync)
+    this.room.broadcast(JSON.stringify({
+      type: SRV.DAMAGE_DEALT,
+      targetId,
+      amount: Math.round(damage * 10) / 10,
+      newHp: Math.round(victim.hp * 10) / 10,
+      sourceId: attackerId,
+      wasAbility: !!data.wasAbility,
+      scoreDelta: hitDelta * hitMult,
+    }));
 
     // Check elimination
     if (victim.hp <= 0) {
@@ -591,15 +593,20 @@ export default class RocketBumpersServer implements Party.Server {
       type: SRV.DAMAGE_DEALT,
       targetId,
       amount: GAME.FALL_DAMAGE,
+      newHp: Math.round(player.hp * 10) / 10,
       sourceId: null,
       wasAbility: false,
     }));
 
     if (player.hp <= 0) {
-      // Validate lastHitBy attribution: must be a string, existing player, not eliminated
+      // Validate lastHitBy attribution: must be a string, existing player, not eliminated,
+      // and the hit must have happened within the KO attribution window
       const killerId = (typeof data.lastHitById === 'string') ? data.lastHitById : null;
-      const killer = killerId ? this.players.get(killerId) : null;
-      // Only credit kill if the killer exists and isn't eliminated
+      const lastHitTime = (typeof data.lastHitTime === 'number') ? data.lastHitTime : 0;
+      const now = Date.now();
+      const withinWindow = lastHitTime > 0 && (now - lastHitTime) < GAME.KO_ATTRIBUTION_WINDOW_MS;
+      const killer = (killerId && withinWindow) ? this.players.get(killerId) : null;
+      // Only credit kill if the killer exists, isn't eliminated, and hit was recent
       this._handleElimination(player, (killer && !killer.isEliminated) ? killer : null);
     }
   }
@@ -680,6 +687,7 @@ export default class RocketBumpersServer implements Party.Server {
       type: SRV.DAMAGE_DEALT,
       targetId: sender.id,
       amount: Math.round(damage * 10) / 10,
+      newHp: Math.round(player.hp * 10) / 10,
       sourceId: null,
       wasAbility: false,
     }));
@@ -711,19 +719,21 @@ export default class RocketBumpersServer implements Party.Server {
 
     victim.hp = Math.max(0, victim.hp - damage);
 
-    this.room.broadcast(JSON.stringify({
-      type: SRV.DAMAGE_DEALT,
-      targetId,
-      amount: Math.round(damage * 10) / 10,
-      sourceId: attackerId,
-      wasAbility: false,
-    }));
-
     attacker.hits++;
     const hitDelta = damage >= GAME.SCORE_BIG_HIT_THRESHOLD
       ? GAME.SCORE_BIG_HIT : GAME.SCORE_SMALL_HIT;
     const hitMult = getStreakMultiplier(attacker.streak);
     attacker.score += hitDelta * hitMult;
+
+    this.room.broadcast(JSON.stringify({
+      type: SRV.DAMAGE_DEALT,
+      targetId,
+      amount: Math.round(damage * 10) / 10,
+      newHp: Math.round(victim.hp * 10) / 10,
+      sourceId: attackerId,
+      wasAbility: false,
+      scoreDelta: hitDelta * hitMult,
+    }));
 
     if (victim.hp <= 0) {
       this._handleElimination(victim, attacker);
@@ -731,7 +741,14 @@ export default class RocketBumpersServer implements Party.Server {
   }
 
   _onEnvDamage(data: any, sender: Party.Connection) {
-    const player = this.players.get(sender.id);
+    // Host can send env damage on behalf of bots via playerId field
+    let targetId = sender.id;
+    if (sender.id === this.hostId && typeof data.playerId === 'string'
+        && data.playerId.startsWith('bot_') && data.playerId.length <= 64) {
+      targetId = data.playerId;
+    }
+
+    const player = this.players.get(targetId);
     if (!player || player.isEliminated || player.isInvincible) return;
 
     const damage = typeof data.damage === 'number' && isFinite(data.damage)
@@ -742,8 +759,9 @@ export default class RocketBumpersServer implements Party.Server {
 
     this.room.broadcast(JSON.stringify({
       type: SRV.DAMAGE_DEALT,
-      targetId: sender.id,
+      targetId,
       amount: Math.round(damage * 10) / 10,
+      newHp: Math.round(player.hp * 10) / 10,
       sourceId: null,
       wasAbility: false,
     }));
@@ -765,10 +783,12 @@ export default class RocketBumpersServer implements Party.Server {
       // Re-registration = respawn: reset HP and elimination state, keep score
       existing.hp = GAME.MAX_HP;
       existing.isEliminated = false;
-      existing.isInvincible = false;
+      existing.isInvincible = true;
       existing.carType = String(carType);
       existing.mass = getCarMass(carType);
       existing.lastStateTime = Date.now();
+      // Grant spawn invincibility (same as human players)
+      this._setInvincibilityTimer(botId, 1500);
       return;
     }
 

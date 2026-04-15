@@ -15,8 +15,8 @@ const JOYSTICK_RADIUS = 60;
 const JOYSTICK_THUMB_RADIUS = 24;
 const ABILITY_BTN_SIZE = 72;
 const POWERUP_BTN_SIZE = 48;
-const NEON_BORDER = 'rgba(0,255,255,0.6)';
-const BG_SEMI = 'rgba(255,255,255,0.08)';
+const NEON_BORDER = 'rgba(255,140,0,0.5)';
+const BG_SEMI = 'rgba(26,14,8,0.4)';
 
 export class MobileControls {
   /**
@@ -125,9 +125,9 @@ export class MobileControls {
       position:absolute;
       width:${JOYSTICK_THUMB_RADIUS * 2}px;height:${JOYSTICK_THUMB_RADIUS * 2}px;
       border-radius:50%;
-      background:rgba(0,255,255,0.35);
-      border:2px solid rgba(0,255,255,0.8);
-      box-shadow:0 0 12px rgba(0,255,255,0.4);
+      background:rgba(255,140,0,0.3);
+      border:2px solid rgba(255,170,0,0.7);
+      box-shadow:0 0 12px rgba(255,140,0,0.3);
       left:${JOYSTICK_RADIUS - JOYSTICK_THUMB_RADIUS}px;
       top:${JOYSTICK_RADIUS - JOYSTICK_THUMB_RADIUS}px;
       pointer-events:none;
@@ -151,11 +151,11 @@ export class MobileControls {
       position:absolute;bottom:max(12px, env(safe-area-inset-bottom, 0px));right:max(12px, env(safe-area-inset-right, 0px));
       width:${ABILITY_BTN_SIZE}px;height:${ABILITY_BTN_SIZE}px;
       border-radius:50%;
-      border:3px solid rgba(0,255,0,0.7);
+      border:3px solid rgba(255,204,0,0.6);
       background:${BG_SEMI};
       pointer-events:auto;touch-action:none;
       display:flex;align-items:center;justify-content:center;
-      box-shadow:0 0 16px rgba(0,255,0,0.3);
+      box-shadow:0 0 16px rgba(255,204,0,0.2);
     `;
 
     // SVG cooldown ring inside ability button
@@ -168,8 +168,8 @@ export class MobileControls {
     this._abilityCooldown.setAttribute('cx', '36');
     this._abilityCooldown.setAttribute('cy', '36');
     this._abilityCooldown.setAttribute('r', '30');
-    this._abilityCooldown.setAttribute('fill', 'rgba(0,0,0,0.3)');
-    this._abilityCooldown.setAttribute('stroke', '#0f0');
+    this._abilityCooldown.setAttribute('fill', 'rgba(26,14,8,0.5)');
+    this._abilityCooldown.setAttribute('stroke', '#ffcc00');
     this._abilityCooldown.setAttribute('stroke-width', '4');
     this._abilityCooldown.setAttribute('stroke-dasharray', String(2 * Math.PI * 30));
     this._abilityCooldown.setAttribute('stroke-dashoffset', '0');
@@ -181,8 +181,8 @@ export class MobileControls {
     // Ability label
     const abilityLbl = document.createElement('div');
     abilityLbl.style.cssText = `
-      font:bold 11px 'Courier New',monospace;color:#0f0;
-      text-shadow:0 0 6px #000;pointer-events:none;z-index:1;
+      font:10px 'Russo One',sans-serif;color:#ffcc00;
+      text-shadow:0 2px 0 #1a0e08, 0 0 6px rgba(0,0,0,0.8);pointer-events:none;z-index:1;
     `;
     abilityLbl.textContent = 'ABILITY';
     this._abilityBtn.appendChild(abilityLbl);
@@ -202,7 +202,7 @@ export class MobileControls {
     `;
     const pwrLbl = document.createElement('div');
     pwrLbl.style.cssText = `
-      font:bold 9px 'Courier New',monospace;color:#666;
+      font:9px 'Russo One',sans-serif;color:#886644;
       text-shadow:0 0 4px #000;pointer-events:none;
     `;
     pwrLbl.textContent = 'PWR';
@@ -336,20 +336,20 @@ export class MobileControls {
     );
 
     if (this._abilityState === 'ready') {
-      this._abilityCooldown.setAttribute('stroke', '#0f0');
-      this._abilityBtn.style.borderColor = 'rgba(0,255,0,0.7)';
-      this._abilityBtn.style.boxShadow = '0 0 18px rgba(0,255,0,0.4)';
-      this._abilityLabel.style.color = '#0f0';
+      this._abilityCooldown.setAttribute('stroke', '#ffcc00');
+      this._abilityBtn.style.borderColor = 'rgba(255,204,0,0.6)';
+      this._abilityBtn.style.boxShadow = '0 0 18px rgba(255,204,0,0.3)';
+      this._abilityLabel.style.color = '#ffcc00';
     } else if (this._abilityState === 'active') {
-      this._abilityCooldown.setAttribute('stroke', '#ff0');
-      this._abilityBtn.style.borderColor = 'rgba(255,255,0,0.7)';
-      this._abilityBtn.style.boxShadow = '0 0 12px rgba(255,255,0,0.3)';
-      this._abilityLabel.style.color = '#ff0';
+      this._abilityCooldown.setAttribute('stroke', '#ff6600');
+      this._abilityBtn.style.borderColor = 'rgba(255,102,0,0.6)';
+      this._abilityBtn.style.boxShadow = '0 0 12px rgba(255,102,0,0.3)';
+      this._abilityLabel.style.color = '#ff6600';
     } else {
-      this._abilityCooldown.setAttribute('stroke', '#555');
-      this._abilityBtn.style.borderColor = 'rgba(100,100,100,0.5)';
+      this._abilityCooldown.setAttribute('stroke', '#553322');
+      this._abilityBtn.style.borderColor = 'rgba(85,51,34,0.6)';
       this._abilityBtn.style.boxShadow = 'none';
-      this._abilityLabel.style.color = '#666';
+      this._abilityLabel.style.color = '#886644';
     }
   }
 

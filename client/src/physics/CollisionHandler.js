@@ -375,11 +375,11 @@ export class CollisionHandler {
     if (isMultiplayer) {
       // ── Multiplayer: report collision to server, let server apply damage ──
       // Only send if the attacker is locally-simulated (not remote) to avoid double-reports.
-      // This covers both local player and host-managed bots.
-      // Only the client with the lower playerId sends collision reports
-      // to avoid both clients reporting the same collision.
+      // When both cars are local (e.g. host + bot), send both directions.
+      // When one is remote, only the lower playerId sends to prevent duplicates.
+      const bothLocal = !carBody._isRemote && !otherCar._isRemote;
       if (dmgAtoB > 0 && !carBody._isRemote && carBody.playerId
-          && carBody.playerId < otherCar.playerId) {
+          && (bothLocal || carBody.playerId < otherCar.playerId)) {
         this._networkManager.sendCollision(
           otherCar.playerId,
           approachA,
@@ -391,7 +391,7 @@ export class CollisionHandler {
         );
       }
       if (dmgBtoA > 0 && !otherCar._isRemote && otherCar.playerId
-          && otherCar.playerId < carBody.playerId) {
+          && (bothLocal || otherCar.playerId < carBody.playerId)) {
         this._networkManager.sendCollision(
           carBody.playerId,
           approachB,
@@ -439,6 +439,25 @@ export class CollisionHandler {
           });
         }
       }
+    }
+
+    // ── Emit car-impact event for VFX/SFX (once per collision, uses max damage of the two) ──
+    const maxDmg = Math.max(dmgAtoB, dmgBtoA);
+    if (maxDmg > 0) {
+      const impactTier = maxDmg >= 30 ? 'devastating' : maxDmg >= 15 ? 'heavy' : 'light';
+      const midX = (carBody.body.position.x + otherCar.body.position.x) * 0.5;
+      const midY = (carBody.body.position.y + otherCar.body.position.y) * 0.5;
+      const midZ = (carBody.body.position.z + otherCar.body.position.z) * 0.5;
+      const sepXn = carBody.body.position.x - otherCar.body.position.x;
+      const sepZn = carBody.body.position.z - otherCar.body.position.z;
+      const sepDn = Math.sqrt(sepXn * sepXn + sepZn * sepZn) || 1;
+      this._emit('car-impact', {
+        tier: impactTier,
+        x: midX, y: midY, z: midZ,
+        nx: sepXn / sepDn, nz: sepZn / sepDn,
+        carA: carBody, carB: otherCar,
+        damageA: dmgAtoB, damageB: dmgBtoA,
+      });
     }
 
     // ── Bounce apart: push cars away from each other ──
@@ -583,7 +602,7 @@ export class CollisionHandler {
           // Apply trail damage
           let actual = 0;
           if (cb._isRemote && this._networkManager?.isMultiplayer) {
-            this._networkManager.sendPowerUpDamage(cb.playerId, DAMAGE.TRAIL_DAMAGE, 'TRAIL_FIRE');
+            this._networkManager.sendPowerUpDamage(cb.playerId, DAMAGE.TRAIL_DAMAGE, 'TRAIL_FIRE', owner?.playerId);
             actual = DAMAGE.TRAIL_DAMAGE; // for VFX
           } else {
             actual = cb.takeDamage(DAMAGE.TRAIL_DAMAGE, owner, true);
@@ -612,8 +631,10 @@ export class CollisionHandler {
       const hit = carBody.lastHitBy;
       const now = Date.now();
       const windowMs = KO_ATTRIBUTION.windowSeconds * 1000;
-      const lastHitById = (hit && (now - hit.time) < windowMs) ? hit.source?.playerId : null;
-      this._networkManager.sendPlayerFell(lastHitById, carBody.playerId);
+      const withinWindow = hit && (now - hit.time) < windowMs;
+      const lastHitById = withinWindow ? hit.source?.playerId : null;
+      const lastHitTime = withinWindow ? hit.time : 0;
+      this._networkManager.sendPlayerFell(lastHitById, carBody.playerId, lastHitTime);
     } else {
       // Single player: apply fall damage directly
       const actual = carBody.takeDamage(DAMAGE.FALL_DAMAGE);

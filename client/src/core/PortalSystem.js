@@ -473,7 +473,7 @@ export class PortalSystem {
     canvas.height = 128;
     const ctx = canvas.getContext('2d');
 
-    ctx.font = 'bold 48px Courier New';
+    ctx.font = '48px Luckiest Guy, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
@@ -616,8 +616,8 @@ export class PortalSystem {
     text.textContent = 'WARPING...';
     text.style.cssText = `
       position:absolute;bottom:15%;left:50%;transform:translateX(-50%);
-      font:bold 32px 'Courier New',monospace;color:#0ff;
-      text-shadow:0 0 20px #0ff,0 0 40px #08f;
+      font:32px 'Luckiest Guy',cursive;color:#ff8c00;
+      text-shadow:0 2px 0 #1a0e08, 0 0 20px rgba(255,140,0,0.5), 0 0 40px rgba(255,102,0,0.3);
       letter-spacing:0.3em;
       animation:warp-pulse 0.6s ease-in-out infinite alternate;
     `;
