@@ -501,6 +501,13 @@ export class Game {
             tier: amount >= 30 ? 'devastating' : amount >= 15 ? 'heavy' : 'light',
             wasAbility,
           });
+          // Server says HP=0 but local elimination hasn't fired yet — trigger it
+          if (this.localPlayer.hp <= 0 && !this.localPlayer.isEliminated) {
+            this.localPlayer.hp = 0;
+            this.localPlayer.isEliminated = true;
+            const killer = sourceId ? this._findCarByPlayerId(sourceId) : null;
+            this._onEliminated({ victim: this.localPlayer, killer, wasAbility });
+          }
         }
         return;
       }
@@ -521,6 +528,13 @@ export class Game {
           localCar.hp = newHp;
         }
         this.healthBars.flashDamage(localCar);
+        // Server says bot HP=0 but local elimination hasn't fired — trigger it
+        if (localCar.hp <= 0 && !localCar.isEliminated) {
+          localCar.hp = 0;
+          localCar.isEliminated = true;
+          const killer = sourceId ? this._findCarByPlayerId(sourceId) : null;
+          this._onEliminated({ victim: localCar, killer, wasAbility });
+        }
       } else {
         // Apply to remote player (only if NOT a local bot)
         const remote = this.remotePlayerManager.getPlayer(targetId);
