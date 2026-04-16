@@ -1009,23 +1009,36 @@ export default class RocketBumpersServer implements Party.Server {
     // can integrate huge steps and fly out of the arena.
     const dt = Math.min(dtMs, 100) / 1000;
 
-    // Build one authoritative snapshot of every entity for this tick. Every
-    // AI/collision decision reads from the SAME snapshot so racing against
-    // the wire order of client uploads doesn't produce inconsistent results.
-    const snapshots = this._buildSnapshots();
-
-    // Step AI + physics for each bot. Track hunter counts so target
-    // selection naturally spreads bots across multiple victims (anti-gangup).
+    // Step AI + physics. AI decisions use a snapshot from BEFORE this tick's
+    // integration so bots all see the same world state when steering / target-
+    // selecting. After integration we rebuild snapshots so subsequent
+    // damage / projectile / pickup checks use bots' CURRENT positions —
+    // previously _detectBotCollisions compared post-step bot positions to
+    // pre-step target.posX, producing false positives + false negatives.
+    const aiSnapshots = this._buildSnapshots();
     const hunterCounts = new Map<string, number>();
     for (const [, bot] of this._bots) {
       const player = this.players.get(bot.botId);
       if (!player || player.isEliminated) continue;
-      stepBot(bot, dt, snapshots, now, hunterCounts);
+      stepBot(bot, dt, aiSnapshots, now, hunterCounts);
       player.lastStateTime = now;
     }
 
-    // Bot↔player physical collisions — server-authoritative since bots have
-    // no local client running cannon for them.
+    // Resolve physical overlaps: bots vs bots (mutate both) and bots vs
+    // humans (mutate only the bot — human positions are authoritative on
+    // their own client). Without this, multiple bots chasing the same
+    // target converge into a stack and just sit there because nothing
+    // pushes them apart.
+    this._resolveBotPhysicalCollisions(aiSnapshots);
+
+    // Now build a fresh snapshot reflecting POST-step + POST-separation
+    // positions. Every downstream collision/damage/pickup decision uses
+    // this so target.posX matches what we just integrated.
+    const snapshots = this._buildSnapshots();
+
+    // Bot↔player damage detection (server-authoritative). Uses fresh
+    // snapshots; pair cooldowns deduplicate against client-reported
+    // collisions for the same pair.
     this._detectBotCollisions(snapshots, now);
 
     // Power-up pickup + situational use. Fires real projectiles into the
@@ -1037,6 +1050,84 @@ export default class RocketBumpersServer implements Party.Server {
     // moved out of the way on their own client genuinely dodges.
     this._stepBotProjectiles(dt, snapshots, now);
     this._stepBotTurrets(dt, snapshots, now);
+  }
+
+  // ── Bot↔* physical separation ────────────────────────────────────────
+  //
+  // Damage application doesn't push entities apart. Without this pass,
+  // bots chasing the same target converge to the same spot and stack
+  // indefinitely (the user observed 4-5 bots overlapping motionless).
+  //
+  // Bot↔bot: each bot moves half the overlap; both get equal/opposite
+  // bounce impulse along the contact normal.
+  // Bot↔human: bot moves the full overlap; human keeps its authoritative
+  // client position. Bot's velocity component into the human reflects.
+
+  _resolveBotPhysicalCollisions(snapshots: PlayerSnapshot[]) {
+    const minDist = this._BOT_COLLIDE_RADIUS;
+    const minDist2 = minDist * minDist;
+    const restitution = 0.4; // mild bounce — too lively and bots ping-pong
+
+    // Collect live bots once
+    const liveBots: BotPhysicsState[] = [];
+    for (const [, b] of this._bots) {
+      const p = this.players.get(b.botId);
+      if (!p || p.isEliminated) continue;
+      liveBots.push(b);
+    }
+
+    // Bot↔bot pairwise
+    for (let i = 0; i < liveBots.length; i++) {
+      const a = liveBots[i];
+      for (let j = i + 1; j < liveBots.length; j++) {
+        const b = liveBots[j];
+        const dx = b.posX - a.posX;
+        const dz = b.posZ - a.posZ;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= minDist2) continue;
+        const d = Math.sqrt(d2) || 0.0001;
+        const nx = dx / d;
+        const nz = dz / d;
+        const overlap = (minDist - d) * 0.5;
+        a.posX -= nx * overlap;
+        a.posZ -= nz * overlap;
+        b.posX += nx * overlap;
+        b.posZ += nz * overlap;
+        // Relative velocity along normal — negative when approaching
+        const dvn = (b.velX - a.velX) * nx + (b.velZ - a.velZ) * nz;
+        if (dvn < 0) {
+          const impulse = -dvn * (1 + restitution) * 0.5;
+          a.velX -= nx * impulse;
+          a.velZ -= nz * impulse;
+          b.velX += nx * impulse;
+          b.velZ += nz * impulse;
+        }
+      }
+    }
+
+    // Bot↔human (humans live in `snapshots` with isBot=false)
+    for (const bot of liveBots) {
+      for (const target of snapshots) {
+        if (target.isBot || target.isEliminated) continue;
+        const dx = bot.posX - target.posX;
+        const dz = bot.posZ - target.posZ;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= minDist2) continue;
+        const d = Math.sqrt(d2) || 0.0001;
+        const nx = dx / d;
+        const nz = dz / d;
+        const overlap = minDist - d;
+        bot.posX += nx * overlap;
+        bot.posZ += nz * overlap;
+        // Bot velocity component INTO the human (negative when moving toward)
+        const vn = bot.velX * (-nx) + bot.velZ * (-nz);
+        if (vn > 0) {
+          const impulse = vn * (1 + restitution);
+          bot.velX += nx * impulse;
+          bot.velZ += nz * impulse;
+        }
+      }
+    }
   }
 
   _buildSnapshots(): PlayerSnapshot[] {
@@ -1087,16 +1178,20 @@ export default class RocketBumpersServer implements Party.Server {
     return out;
   }
 
-  // ── Bot↔player collision damage (BUG 0 restore) ──────────────────────
+  // ── Bot↔player collision damage + physical separation ──────────────────
   //
-  // The host used to detect these via its local cannon world. Now the server
-  // owns bots, so we run a simple sphere overlap + approach-speed check on
-  // every tick. A small radius (1.8m) approximates the car AABB and
-  // pair-cooldown (1s) prevents re-applying damage while the entities stay
-  // in contact.
+  // Two distinct passes happen here every tick:
+  //   1) _detectBotCollisions: damage application (uses pair cooldown).
+  //   2) _resolveBotPhysicalCollisions: positional + velocity push-apart so
+  //      bots don't tunnel through each other or pile up on a target.
+  //
+  // _BOT_COLLIDE_RADIUS = 2.5 is "two cars touching" (two ~1.0u XZ half-
+  // extents plus a little slack). The previous 1.8 was tight enough that
+  // damage only fired on hard overlaps — explained why slow grazes never
+  // dealt damage.
 
-  readonly _BOT_COLLIDE_RADIUS = 1.8;
-  readonly _BOT_MIN_APPROACH = 3.0; // m/s — ignore glancing touches
+  readonly _BOT_COLLIDE_RADIUS = 2.5;
+  readonly _BOT_MIN_APPROACH = 3.0; // m/s — ignore glancing touches (matches client DAMAGE.MIN_SPEED)
 
   _detectBotCollisions(snapshots: PlayerSnapshot[], now: number) {
     for (const [, bot] of this._bots) {
@@ -1116,19 +1211,26 @@ export default class RocketBumpersServer implements Party.Server {
         const dist = Math.hypot(dx, dz);
         if (dist > this._BOT_COLLIDE_RADIUS || dist < 0.0001) continue;
 
-        // Net approach speed (>0 = closing)
+        // Approach speed along the line connecting the two centers. With
+        // dxn,dzn pointing FROM bot TO target, (bot.vel - target.vel) · n
+        // is positive when the gap is shrinking (bot moving toward target
+        // faster than target is moving away). NOTE: the previous version
+        // had `approachSpeed = -closureRate` which inverted the sign and
+        // caused this whole branch to never fire during a real approach —
+        // bots silently passed through each other and through humans.
         const dxn = dx / dist;
         const dzn = dz / dist;
-        // rate of change of |d| = (b.vel - p.vel) · d/|d| ; closing when <0.
-        const closureRate = (bot.velX - target.velX) * dxn + (bot.velZ - target.velZ) * dzn;
-        const approachSpeed = -closureRate;
+        const approachSpeed = (bot.velX - target.velX) * dxn + (bot.velZ - target.velZ) * dzn;
         if (approachSpeed < this._BOT_MIN_APPROACH) continue;
 
-        // Determine attacker = entity moving toward the other faster along
-        // the normal. Bot velocity projected along -n (toward target):
-        const botIn = -(bot.velX * dxn + bot.velZ * dzn);
-        const pIn   =  (target.velX * dxn + target.velZ * dzn);
-        const botIsAttacker = botIn >= pIn;
+        // Attacker = whoever is moving INTO the other faster. Bot's closing
+        // speed toward target = bot.vel · n. Target's closing speed toward
+        // bot = -(target.vel · n) (target's "approach direction" is -n).
+        // The previous version had this inverted as well — even when damage
+        // (rarely) fired, attacker/victim attribution was flipped.
+        const botClose = bot.velX * dxn + bot.velZ * dzn;
+        const targetClose = -(target.velX * dxn + target.velZ * dzn);
+        const botIsAttacker = botClose >= targetClose;
 
         const attacker = botIsAttacker ? botPlayer : this.players.get(target.id);
         const victim   = botIsAttacker ? this.players.get(target.id) : botPlayer;
