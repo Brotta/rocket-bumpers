@@ -175,6 +175,12 @@ export class Game {
     this._clock = new THREE.Clock();
     this._running = false;
     this._accumulator = 0; // fixed-timestep accumulator
+    // BUG 7 fix: only send network state when a fixed step has actually
+    // advanced the physics. A high-refresh monitor (120Hz/144Hz) can run
+    // render frames without any physics step — sending again would push
+    // an identical snapshot with a different timestamp, producing degenerate
+    // Hermite curves (same position, later time → apparent velocity spikes).
+    this._hasPendingNetworkState = false;
 
     // ── Event listeners ──
     this._listeners = {};
@@ -313,21 +319,21 @@ export class Game {
     await audioManager.preloadAll(getAllEngineSampleURLs());
     announcerSFX.preload(); // fire-and-forget: clips load in background
 
-    // Fill remaining slots with bots (skip in multiplayer if not host — host fills bots)
+    // Fill remaining slots with bots — ONLY in offline play.
+    // BUG 0 fix: in multiplayer, bots are simulated by the server. The client
+    // sees them as ordinary remote players via RemotePlayerManager, which
+    // keeps their pacing decoupled from any local render loop's frame jitter.
     this.botManager.removeAll();
     this.nameTags.clear();
-    if (!this.networkManager?.isMultiplayer || this.networkManager.isHost) {
+    if (!this.networkManager?.isMultiplayer) {
       await this.botManager.fillSlots();
     }
 
-    // Register bots in score manager (and on server if multiplayer host)
-    // Also set _abilityRef so the binary state protocol can encode ability flags for guests
+    // Register local bots (offline only) in score manager and set _abilityRef
+    // for state encoding.
     for (const bot of this.botManager.bots) {
       this.scoreManager.registerPlayer(bot.carBody.playerId, bot.carBody.nickname);
       bot.carBody._abilityRef = this.abilities.get(bot.carBody);
-      if (this.networkManager?.isMultiplayer && this.networkManager.isHost) {
-        this.networkManager.sendRegisterBot(bot.carBody.playerId, bot.carBody.nickname, bot.carBody.carType);
-      }
     }
 
     // Wire elimination callback on every car (catches ALL damage sources)
@@ -425,23 +431,16 @@ export class Game {
     }));
     this.scoreManager.syncFromServer(initialScores);
 
-    // If we ARE the host, register bots on the server now that connection is live
-    // (setPlayer() ran before connectMultiplayer, so sendRegisterBot was skipped)
-    if (this.networkManager.isHost) {
-      for (const bot of this.botManager.bots) {
-        this.networkManager.sendRegisterBot(bot.carBody.playerId, bot.carBody.nickname, bot.carBody.carType);
-      }
+    // BUG 0: bots are server-owned now. If setPlayer() spawned offline-style
+    // local bots before multiplayer connected, remove them — the server will
+    // broadcast PLAYER_JOINED for its own bots and they'll appear as remote
+    // players via RemotePlayerManager.
+    for (const bot of this.botManager.bots) {
+      this.nameTags.remove(bot.carBody);
+      this.healthBars.remove(bot.carBody);
+      this.scoreManager.removePlayer(bot.carBody.playerId);
     }
-
-    // If we are not the host, remove local bots + clean up their name tags/health bars
-    if (!this.networkManager.isHost) {
-      for (const bot of this.botManager.bots) {
-        this.nameTags.remove(bot.carBody);
-        this.healthBars.remove(bot.carBody);
-        this.scoreManager.removePlayer(bot.carBody.playerId);
-      }
-      this.botManager.removeAll();
-    }
+    this.botManager.removeAll();
 
     // ── Wire network events (store handlers for cleanup) ──
     // Clean up any existing handlers from a previous connection
@@ -452,9 +451,12 @@ export class Game {
       this._networkHandlers.push({ event, fn });
     };
 
-    // Remote player state updates (20Hz binary) — MUST be synchronous (no await)
-    // Unknown players are queued and created in the next frame by RemotePlayerManager
-    _on('remotePlayerState', ({ playerId, carType, state }) => {
+    // Remote player state updates (binary) — MUST be synchronous (no await).
+    // Unknown players are queued and created in the next frame by RemotePlayerManager.
+    // serverTime (when present, from batched packet) is forwarded so the
+    // interpolation buffer uses authoritative server-clock timestamps
+    // instead of arrival-jittered performance.now() (BUG 3+4).
+    _on('remotePlayerState', ({ playerId, carType, state, serverTime }) => {
       // Skip our own state
       if (playerId === serverPlayerId) return;
 
@@ -466,36 +468,20 @@ export class Game {
       }
 
       // Push state — if player doesn't exist yet, it gets queued for creation
-      this.remotePlayerManager.updatePlayerState(playerId, state, carType);
+      this.remotePlayerManager.updatePlayerState(playerId, state, carType, serverTime);
     });
 
-    // New player joined — fire-and-forget async (don't block message handler)
+    // New player joined — fire-and-forget async (don't block message handler).
+    // BUG 0: bots come from the server too, handled by the same path.
     _on('playerJoined', ({ id, nickname, carType }) => {
       this.remotePlayerManager.addPlayer(id, nickname, carType).then(() => {
         this.scoreManager.registerPlayer(id, nickname);
-        if (this.networkManager.isHost) {
-          const humanCount = this._countHumanPlayers();
-          this.botManager.adjustBotCount(humanCount);
-        }
       });
     });
 
-    // Player left
+    // Player left — always a remote entity in MP (no host-simulated bots).
     _on('playerLeft', ({ id }) => {
-      // If it's a local bot (host-simulated), remove from botManager directly
-      if (this.networkManager.isHost && id.startsWith('bot_')) {
-        const botIdx = this.botManager.bots.findIndex(b => b.carBody.playerId === id);
-        if (botIdx !== -1) {
-          const bot = this.botManager.bots[botIdx];
-          this.nameTags.remove(bot.carBody);
-          this.healthBars.remove(bot.carBody);
-          const cbIdx = this.carBodies.indexOf(bot.carBody);
-          if (cbIdx !== -1) this.carBodies.splice(cbIdx, 1);
-          this.botManager.bots.splice(botIdx, 1);
-        }
-      } else {
-        this.remotePlayerManager.removePlayer(id);
-      }
+      this.remotePlayerManager.removePlayer(id);
       this.scoreManager.removePlayer(id);
     });
 
@@ -632,22 +618,11 @@ export class Game {
       this.remotePlayerManager.respawnPlayer(playerId, carType, pos);
     });
 
-    // Host changed — fire-and-forget
-    _on('hostChanged', ({ newHostId }) => {
-      if (newHostId === this.networkManager.localPlayerId) {
-        // Guard against concurrent fillSlots calls
-        if (this._fillingSlotsPromise) return;
-        this._fillingSlotsPromise = this.botManager.fillSlots().then(() => {
-          for (const bot of this.botManager.bots) {
-            this.scoreManager.registerPlayer(bot.carBody.playerId, bot.carBody.nickname);
-            this.networkManager.sendRegisterBot(bot.carBody.playerId, bot.carBody.nickname, bot.carBody.carType);
-            bot.carBody.onEliminated = (e) => this._onEliminated(e);
-            bot.carBody._abilityRef = this.abilities.get(bot.carBody);
-          }
-        }).finally(() => {
-          this._fillingSlotsPromise = null;
-        });
-      }
+    // Host changed — no client action required. BUG 0 fix: bots live on the
+    // server now, so host migration no longer needs to transfer bot ownership.
+    _on('hostChanged', ({ newHostId: _newHostId }) => {
+      // Intentionally empty. The server already updated its own hostId and
+      // networkManager._hostId was updated when the message was received.
     });
 
     // Score updates from server
@@ -789,17 +764,27 @@ export class Game {
     requestAnimationFrame(this._animate);
 
     // ── Network send: runs at wall-clock rate, BEFORE any time scaling ──
-    // This ensures sends happen at consistent 30Hz regardless of hit-freeze,
-    // slowmo, or debug time scale.
-    if (this.networkManager?.isMultiplayer && this.localPlayer && !this.localPlayer.isEliminated) {
+    // Sends happen at consistent ~60Hz wall-clock regardless of hit-freeze,
+    // slowmo, or debug time scale. BUG 7 fix: also require that at least one
+    // fixed physics step has produced a new state since the last send;
+    // otherwise we'd re-send an identical snapshot with a later timestamp
+    // and corrupt the remote-side Hermite interpolation.
+    if (this.networkManager?.isMultiplayer && this.localPlayer && !this.localPlayer.isEliminated
+        && this._hasPendingNetworkState) {
       const didSend = this.networkManager.tickAndMaybeSend(this.localPlayer);
-      if (this.networkManager.isHost) {
-        this.networkManager.sendBotStates(this.botManager.bots, didSend);
+      if (didSend) {
+        // BUG 0 fix: bots are server-owned; no host-driven bot state upload.
+        this._hasPendingNetworkState = false;
       }
     }
 
     let frameDt = this._clock.getDelta();
     if (frameDt > MAX_DT) frameDt = MAX_DT;
+
+    // Wall-clock dt (before any game-time scaling). Used for visual smoothing
+    // of remote players so that slowmo/hit-freeze don't produce mesh lag that
+    // snaps when the time scale returns to 1.0 (see BUG 1 in review).
+    const unscaledFrameDt = frameDt;
 
     // Apply debug time scale
     frameDt *= this.debug.timeScale;
@@ -809,7 +794,7 @@ export class Game {
       this._hitFreezeTimer -= frameDt;
       // During freeze: still interpolate remote players and update VFX
       if (this.remotePlayerManager) {
-        this.remotePlayerManager.interpolateAll(frameDt, 0);
+        this.remotePlayerManager.interpolateAll(frameDt, 0, unscaledFrameDt);
       }
       this._updateImpactEffects(frameDt);
       this.nameTags.update(this.sceneManager.camera, window.innerWidth, window.innerHeight);
@@ -855,6 +840,8 @@ export class Game {
         }
         this._fixedUpdate(FIXED_DT);
         this._accumulator -= FIXED_DT;
+        // Mark that we have a fresh physics state to send (BUG 7 fix).
+        this._hasPendingNetworkState = true;
       }
     }
 
@@ -862,6 +849,9 @@ export class Game {
     const alpha = this.gameState.isPlaying
       ? this._accumulator / FIXED_DT
       : 0;
+    // Stash unscaled dt so _renderUpdate → interpolateAll can use wall-clock
+    // time for remote-player visual smoothing (see BUG 1 fix above).
+    this._lastUnscaledFrameDt = unscaledFrameDt;
     this._renderUpdate(frameDt, alpha);
   };
 
@@ -873,9 +863,10 @@ export class Game {
       this.localPlayer.applyControls(this.input, dt);
     }
 
-    // Update bot brains — only if offline or if we are the host
+    // Update bot brains — ONLY offline. In multiplayer, bots are simulated
+    // by the server (BUG 0 fix) and show up as remote players.
     const isMultiplayer = this.networkManager?.isMultiplayer;
-    if (!isMultiplayer || this.networkManager.isHost) {
+    if (!isMultiplayer) {
       this.botManager.update(dt);
     }
 
@@ -984,9 +975,12 @@ export class Game {
       // Filter remote entries — they don't have the tire smoke wheel data
       this.tireSmokeFX.update(frameDt, this.carBodies.filter(cb => !cb._isRemote));
 
-      // Interpolate remote players (multiplayer)
+      // Interpolate remote players (multiplayer) — pass unscaledFrameDt for
+      // visual smoothing so the mesh catches up to the interpolation target
+      // at wall-clock rate, not game-time rate (fixes BUG 1 — time-scale
+      // contamination of the visual smoothing layer during slowmo/hit-freeze).
       if (this.remotePlayerManager) {
-        this.remotePlayerManager.interpolateAll(frameDt, alpha);
+        this.remotePlayerManager.interpolateAll(frameDt, alpha, this._lastUnscaledFrameDt || frameDt);
       }
 
       // Stun visual FX (debris, stars, wobble, flash)

@@ -18,6 +18,11 @@ export const MSG = {
   PLAYER_STATE_BIN: 0x01,
 };
 
+// Server → Client binary message types
+export const BIN = {
+  PLAYER_STATE_BATCH: 0x02,
+};
+
 // Server → Client
 export const SRV = {
   ROOM_STATE: 'ROOM_STATE',
@@ -184,6 +189,65 @@ export function decodePlayerUpdate(buffer) {
   };
 
   return { playerId, carType: CAR_ORDER[carTypeIndex] || CAR_ORDER[0], state };
+}
+
+/**
+ * Decode one entry from a batched state packet.
+ *
+ * Layout (no leading msgType byte — the batch header already consumed it):
+ *   [idLen:1][id:N][carType:1][16 bytes float16][flags:1][hp:1]
+ *
+ * Returns { entryBytes, update } where entryBytes is the byte length
+ * consumed (so the caller can advance its cursor).
+ */
+function _decodeBatchEntry(buffer, offset) {
+  const view = new DataView(buffer);
+  const arr = new Uint8Array(buffer);
+  const idLen = view.getUint8(offset);
+  const idStart = offset + 1;
+  const playerId = _textDecoder.decode(arr.slice(idStart, idStart + idLen));
+  const s = idStart + idLen;
+  const carTypeIndex = view.getUint8(s);
+  const state = {
+    posX: readFloat16(view, s + 1),
+    posY: readFloat16(view, s + 3),
+    posZ: readFloat16(view, s + 5),
+    velX: readFloat16(view, s + 7),
+    velY: readFloat16(view, s + 9),
+    velZ: readFloat16(view, s + 11),
+    yaw: readFloat16(view, s + 13),
+    speed: readFloat16(view, s + 15),
+    flags: view.getUint8(s + 17),
+    hp: view.getUint8(s + 18),
+  };
+  return {
+    entryBytes: 1 + idLen + 19,
+    update: { playerId, carType: CAR_ORDER[carTypeIndex] || CAR_ORDER[0], state },
+  };
+}
+
+/**
+ * Decode a batched state packet from the server (msgType 0x02).
+ * Layout: [0x02:1][serverTime:u32 LE][count:u8][entry...]
+ *
+ * Returns { serverTime, updates: Array<{playerId, carType, state}> } or null.
+ */
+export function decodePlayerStateBatch(buffer) {
+  if (buffer.byteLength < 6) return null;
+  const view = new DataView(buffer);
+  if (view.getUint8(0) !== BIN.PLAYER_STATE_BATCH) return null;
+  const serverTime = view.getUint32(1, true);
+  const count = view.getUint8(5);
+  const updates = [];
+  let cursor = 6;
+  for (let i = 0; i < count; i++) {
+    if (cursor + 1 > buffer.byteLength) return null;
+    const { entryBytes, update } = _decodeBatchEntry(buffer, cursor);
+    if (cursor + entryBytes > buffer.byteLength) return null;
+    updates.push(update);
+    cursor += entryBytes;
+  }
+  return { serverTime, updates };
 }
 
 /**

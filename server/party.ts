@@ -1,6 +1,15 @@
 import type * as Party from 'partykit/server';
-import { MSG, SRV, GAME } from './protocol.js';
+import { MSG, SRV, BIN, GAME } from './protocol.js';
 import { calcDamage, getStreakMultiplier } from './damage.js';
+import {
+  BotPhysicsState, PlayerSnapshot, createBot, stepBot, encodeBotEntry, shouldUsePowerup,
+} from './botsim.js';
+import {
+  ServerProjectile, ServerTurret,
+  spawnMissile, spawnHomingMissile, spawnTurret, spawnTurretBullet,
+  stepProjectile, sweepProjectileHit, stepTurret,
+  MISSILE as PROJ_MISSILE, HOMING as PROJ_HOMING,
+} from './projectilesim.js';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -12,6 +21,13 @@ interface PlayerData {
   mass: number;
   isEliminated: boolean;
   isInvincible: boolean;
+  // Defensive power-up state, server-tracked so damage calculations stay
+  // consistent between human and bot actors. SHIELD halves all incoming
+  // damage for 5s (matches client _shieldDamageReduction=0.5 window).
+  // HOLO_EVADE doesn't reduce damage — instead it gives incoming homing
+  // missiles / turret shots a 50% chance to lock onto a decoy (miss).
+  hasShield: boolean;
+  holoEvadeActive: boolean;
   score: number;
   kills: number;
   deaths: number;
@@ -86,6 +102,20 @@ function randomPowerupType(): string {
 
 // ── Room ID sequencing (for matchmaking overflow) ─────────────────────
 
+// Half-precision float read (little-endian, matches client protocol.js).
+function _readFloat16(view: DataView, offset: number): number {
+  const h = view.getUint16(offset, true);
+  const sign = (h & 0x8000) >> 15;
+  const exp = (h & 0x7c00) >> 10;
+  const frac = h & 0x03ff;
+  if (exp === 0) {
+    if (frac === 0) return sign ? -0 : 0;
+    return (sign ? -1 : 1) * (frac / 1024) * Math.pow(2, -14);
+  }
+  if (exp === 31) return frac ? NaN : (sign ? -Infinity : Infinity);
+  return (sign ? -1 : 1) * Math.pow(2, exp - 15) * (1 + frac / 1024);
+}
+
 function _nextRoomId(currentRoom: string): string {
   // Rooms are named "arena-1", "arena-2", etc.
   const match = currentRoom.match(/^(.+?)-(\d+)$/);
@@ -126,6 +156,9 @@ export default class RocketBumpersServer implements Party.Server {
 
   // Invincibility timeout handles: playerId → timeout handle
   invincibilityTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  // SHIELD / HOLO_EVADE timers (separate so they don't clobber spawn invincibility).
+  shieldTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  holoEvadeTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
   // Interval IDs for cleanup
   _intervals: ReturnType<typeof setInterval>[] = [];
@@ -133,6 +166,21 @@ export default class RocketBumpersServer implements Party.Server {
   // Server tick: buffer latest binary state per entity, broadcast at 60Hz
   _stateBuffers: Map<string, { buffer: ArrayBuffer; senderId: string }> = new Map();
   readonly TICK_RATE_MS = 16; // ~60Hz — doubled from 30Hz for smooth interpolation
+
+  // ── Server-side bot simulation (BUG 0 fix) ──
+  // The server owns bot AI + physics so their pacing is decoupled from any
+  // host client's render loop. Bots are spawned automatically to backfill
+  // empty seats and their states ride in the same tick batch as humans.
+  _bots: Map<string, BotPhysicsState> = new Map();
+  _lastBotStep: number = 0;
+  readonly TARGET_PLAYERS = 8;
+  readonly MIN_BOTS = 3;
+  readonly MAX_BOTS = 7;
+
+  // Server-simulated projectiles and turrets fired by bots.
+  // Human-fired projectiles stay on the client-authoritative path (unchanged).
+  _botProjectiles: ServerProjectile[] = [];
+  _botTurrets: ServerTurret[] = [];
 
   constructor(readonly room: Party.Room) {}
 
@@ -149,8 +197,12 @@ export default class RocketBumpersServer implements Party.Server {
       });
     }
 
-    // Server tick loop: batch-broadcast all player states at 30Hz
-    this._intervals.push(setInterval(() => this._tickBroadcast(), this.TICK_RATE_MS));
+    // Server tick loop: simulate bots (BUG 0) + batch-broadcast all states at 60Hz
+    this._lastBotStep = Date.now();
+    this._intervals.push(setInterval(() => {
+      this._stepBots();
+      this._tickBroadcast();
+    }, this.TICK_RATE_MS));
 
     // Power-up respawn timer (check every second)
     this._intervals.push(setInterval(() => this._checkPowerupRespawns(), 1000));
@@ -189,6 +241,7 @@ export default class RocketBumpersServer implements Party.Server {
 
   onClose(conn: Party.Connection) {
     const playerId = conn.id;
+    const wasHuman = !playerId.startsWith('bot_');
     this.players.delete(playerId);
     this.rateLimits.delete(playerId);
     this._binaryRateLimit.delete(playerId); // entity-keyed rate limit
@@ -201,6 +254,10 @@ export default class RocketBumpersServer implements Party.Server {
     }
     const invTimer = this.invincibilityTimers.get(playerId);
     if (invTimer) { clearTimeout(invTimer); this.invincibilityTimers.delete(playerId); }
+    const shTimer = this.shieldTimers.get(playerId);
+    if (shTimer) { clearTimeout(shTimer); this.shieldTimers.delete(playerId); }
+    const heTimer = this.holoEvadeTimers.get(playerId);
+    if (heTimer) { clearTimeout(heTimer); this.holoEvadeTimers.delete(playerId); }
 
     // Remove from connection order
     const idx = this.connectionOrder.indexOf(playerId);
@@ -212,48 +269,20 @@ export default class RocketBumpersServer implements Party.Server {
       id: playerId,
     }));
 
-    // Host migration
+    // Host migration — bots are server-owned now (BUG 0), so migrating the
+    // host no longer disturbs bot state. We just pick the next human as host.
     if (playerId === this.hostId) {
-      // Clean up orphaned bot entries — bots are managed by the host client
-      // Preserve bot scores so new host can restore them
-      const botIds: string[] = [];
-      const botScores: Map<string, { score: number; kills: number; deaths: number; streak: number }> = new Map();
-      for (const [id, p] of this.players) {
-        if (id.startsWith('bot_')) {
-          botIds.push(id);
-          botScores.set(id, { score: p.score, kills: p.kills, deaths: p.deaths, streak: p.streak });
-        }
-      }
-      // Store bot scores for new host to reclaim
-      (this as any)._migratedBotScores = botScores;
-      for (const botId of botIds) {
-        this.players.delete(botId);
-        this._stateBuffers.delete(botId);
-        this._binaryRateLimit.delete(botId);
-        this.room.broadcast(JSON.stringify({
-          type: SRV.PLAYER_LEFT,
-          id: botId,
-        }));
-      }
-
       this.hostId = this.connectionOrder[0] || null;
       if (this.hostId) {
-        // Notify all clients of host change
         this.room.broadcast(JSON.stringify({
           type: SRV.HOST_CHANGED,
           newHostId: this.hostId,
         }));
-        // Tell the new host to fill bot slots
-        const newHostConn = this.room.getConnection(this.hostId);
-        if (newHostConn) {
-          newHostConn.send(JSON.stringify({
-            type: SRV.HOST_CHANGED,
-            newHostId: this.hostId,
-            shouldFillBots: true,
-          }));
-        }
       }
     }
+
+    // BUG 0: refresh bot population based on new human count.
+    if (wasHuman) this._rebalanceBots();
   }
 
   onError(conn: Party.Connection) {
@@ -391,6 +420,8 @@ export default class RocketBumpersServer implements Party.Server {
       mass: getCarMass(carType),
       isEliminated: false,
       isInvincible: true, // spawn invincibility
+      hasShield: false,
+      holoEvadeActive: false,
       score: 0,
       kills: 0,
       deaths: 0,
@@ -404,10 +435,15 @@ export default class RocketBumpersServer implements Party.Server {
       this.connectionOrder.push(playerId);
     }
 
-    // First player becomes host
+    // First player becomes host (the host role is now only used for
+    // administrative broadcasts — bots are server-simulated so the host no
+    // longer runs privileged physics).
     if (!this.hostId) {
       this.hostId = playerId;
     }
+
+    // BUG 0: refresh server-side bot population to fill the room.
+    this._rebalanceBots();
 
     // Send ROOM_STATE to the joining player
     const roomState = {
@@ -452,8 +488,10 @@ export default class RocketBumpersServer implements Party.Server {
     const idLen = view.getUint8(1);
     const entityId = new TextDecoder().decode(new Uint8Array(buffer, 2, idLen));
 
-    // Security: non-host can only send their own state
-    if (sender.id !== this.hostId && entityId !== sender.id) return;
+    // Security: each client can only upload its own state.
+    // Bots are server-simulated (BUG 0) — reject any client trying to spoof them.
+    if (entityId !== sender.id) return;
+    if (entityId.startsWith('bot_')) return;
 
     // Buffer latest state — will be batch-broadcast at 30Hz tick
     this._stateBuffers.set(entityId, { buffer: buffer.slice(0), senderId: sender.id });
@@ -514,40 +552,9 @@ export default class RocketBumpersServer implements Party.Server {
     if (now < cooldownExpiry) return;
     this.pairCooldowns.set(pairKey, now + GAME.PAIR_COOLDOWN_MS);
 
-    // Calculate damage
-    const damage = calcDamage(
-      approachSpeed,
-      attackerMass,
-      victimMass,
-      angleFactor,
-    );
+    const damage = calcDamage(approachSpeed, attackerMass, victimMass, angleFactor);
     if (damage <= 0) return;
-
-    // Apply damage
-    victim.hp = Math.max(0, victim.hp - damage);
-
-    // Score: credit attacker for hit
-    attacker.hits++;
-    const hitDelta = damage >= GAME.SCORE_BIG_HIT_THRESHOLD
-      ? GAME.SCORE_BIG_HIT : GAME.SCORE_SMALL_HIT;
-    const hitMult = getStreakMultiplier(attacker.streak);
-    attacker.score += hitDelta * hitMult;
-
-    // Broadcast damage (include newHp to prevent client desync)
-    this.room.broadcast(JSON.stringify({
-      type: SRV.DAMAGE_DEALT,
-      targetId,
-      amount: Math.round(damage * 10) / 10,
-      newHp: Math.round(victim.hp * 10) / 10,
-      sourceId: attackerId,
-      wasAbility: !!data.wasAbility,
-      scoreDelta: hitDelta * hitMult,
-    }));
-
-    // Check elimination
-    if (victim.hp <= 0) {
-      this._handleElimination(victim, attacker);
-    }
+    this._dealDamage(victim, damage, attacker, !!data.wasAbility);
   }
 
   _handleElimination(victim: PlayerData, killer: PlayerData | null) {
@@ -578,6 +585,60 @@ export default class RocketBumpersServer implements Party.Server {
 
     // Broadcast updated scores
     this._broadcastScores();
+
+    // BUG 0 fix: server owns bot respawn (humans respawn via PLAYER_RESPAWN
+    // message — handled elsewhere). Schedule a respawn after a short delay.
+    if (victim.id.startsWith('bot_')) {
+      this._scheduleBotRespawn(victim.id);
+    }
+  }
+
+  _scheduleBotRespawn(botId: string) {
+    setTimeout(() => {
+      const player = this.players.get(botId);
+      const botState = this._bots.get(botId);
+      if (!player || !botState) return; // bot was despawned in the meantime
+
+      // Reset bot state — clear all status effects so they don't carry over.
+      player.hp = GAME.MAX_HP;
+      player.isEliminated = false;
+      player.isInvincible = true;
+      player.hasShield = false;
+      player.holoEvadeActive = false;
+      const sh = this.shieldTimers.get(botId); if (sh) { clearTimeout(sh); this.shieldTimers.delete(botId); }
+      const he = this.holoEvadeTimers.get(botId); if (he) { clearTimeout(he); this.holoEvadeTimers.delete(botId); }
+      player.lastStateTime = Date.now();
+      this._setInvincibilityTimer(botId, 1500);
+
+      // Respawn at a new edge position facing center
+      const slot = Math.floor(Math.random() * 8);
+      const angle = (slot / 8) * Math.PI * 2;
+      const r = (ARENA_RADIUS * Math.cos(Math.PI / 8)) * 0.7;
+      botState.posX = Math.cos(angle) * r;
+      botState.posY = 0.6;
+      botState.posZ = Math.sin(angle) * r;
+      botState.velX = 0;
+      botState.velY = 0;
+      botState.velZ = 0;
+      botState.yaw = Math.atan2(-Math.sin(angle), -Math.cos(angle));
+      botState.speed = 0;
+      botState.targetId = null;
+      botState.nextRetargetAt = Date.now();
+      // Fresh bots don't keep their old inventory/status through death.
+      botState.heldPowerup = null;
+      botState.powerupReadyAt = Date.now() + 1000;
+      botState.powerupUseEarliest = 0;
+      botState.glitchExpireAt = 0;
+      botState.lastHitById = null;
+      botState.revengeExpireAt = 0;
+
+      this.room.broadcast(JSON.stringify({
+        type: SRV.PLAYER_RESPAWN,
+        playerId: botId,
+        carType: player.carType,
+        pos: [botState.posX, botState.posY, botState.posZ],
+      }));
+    }, 2000);
   }
 
   _onPlayerFell(data: any, sender: Party.Connection) {
@@ -590,33 +651,19 @@ export default class RocketBumpersServer implements Party.Server {
 
     const player = this.players.get(targetId);
     if (!player || player.isEliminated) return;
-
-    // Skip if invincible
     if (player.isInvincible) return;
 
-    // Apply fall damage
-    player.hp = Math.max(0, player.hp - GAME.FALL_DAMAGE);
+    // Resolve KO attribution BEFORE applying damage so _handleElimination
+    // (fired from _dealDamage) can credit the right killer. Falls still
+    // count as "environmental" with an optional attributed killer if they
+    // were hit recently enough.
+    const killerId = (typeof data.lastHitById === 'string') ? data.lastHitById : null;
+    const lastHitTime = (typeof data.lastHitTime === 'number') ? data.lastHitTime : 0;
+    const withinWindow = lastHitTime > 0 && (Date.now() - lastHitTime) < GAME.KO_ATTRIBUTION_WINDOW_MS;
+    const killer = (killerId && withinWindow) ? this.players.get(killerId) : null;
+    const attacker = (killer && !killer.isEliminated) ? killer : null;
 
-    this.room.broadcast(JSON.stringify({
-      type: SRV.DAMAGE_DEALT,
-      targetId,
-      amount: GAME.FALL_DAMAGE,
-      newHp: Math.round(player.hp * 10) / 10,
-      sourceId: null,
-      wasAbility: false,
-    }));
-
-    if (player.hp <= 0) {
-      // Validate lastHitBy attribution: must be a string, existing player, not eliminated,
-      // and the hit must have happened within the KO attribution window
-      const killerId = (typeof data.lastHitById === 'string') ? data.lastHitById : null;
-      const lastHitTime = (typeof data.lastHitTime === 'number') ? data.lastHitTime : 0;
-      const now = Date.now();
-      const withinWindow = lastHitTime > 0 && (now - lastHitTime) < GAME.KO_ATTRIBUTION_WINDOW_MS;
-      const killer = (killerId && withinWindow) ? this.players.get(killerId) : null;
-      // Only credit kill if the killer exists, isn't eliminated, and hit was recent
-      this._handleElimination(player, (killer && !killer.isEliminated) ? killer : null);
-    }
+    this._dealDamage(player, GAME.FALL_DAMAGE, attacker, false);
   }
 
   _onPickupPowerup(data: any, sender: Party.Connection) {
@@ -651,6 +698,38 @@ export default class RocketBumpersServer implements Party.Server {
     const pos = Array.isArray(data.pos) && data.pos.length === 3
       && data.pos.every((v: any) => typeof v === 'number' && isFinite(v))
       ? data.pos : null;
+
+    // Track defensive state so server-computed damage paths honor the
+    // player's protection. Durations match client PowerUpManager:
+    //   SHIELD     = 5.0s active, 0.5× damage reduction
+    //   HOLO_EVADE = 1.3s (1.0 active + 0.3 fade), homing/turret decoy roll
+    //   REPAIR_KIT = instant +30 HP
+    if (data.powerupType === 'SHIELD') {
+      player.hasShield = true;
+      this._setShieldTimer(sender.id, 5000);
+    } else if (data.powerupType === 'HOLO_EVADE') {
+      player.holoEvadeActive = true;
+      this._setHoloEvadeTimer(sender.id, 1300);
+    } else if (data.powerupType === 'REPAIR_KIT') {
+      // Keep the server's authoritative HP aligned with the client's
+      // optimistic heal so later damage events compute against the
+      // correct starting value.
+      player.hp = Math.min(GAME.MAX_HP, player.hp + 30);
+    } else if (data.powerupType === 'GLITCH_BOMB' && pos) {
+      // AOE disruption on bots: human-fired glitch bombs should scramble
+      // any bot inside the 18u blast radius (client parity). Damage itself
+      // is still reported via POWERUP_DAMAGE — we only apply the AI effect.
+      const now = Date.now();
+      const glitchUntil = now + 5000;
+      const r2 = 18 * 18;
+      for (const [id, bot] of this._bots) {
+        const dx = bot.posX - pos[0];
+        const dz = bot.posZ - pos[2];
+        if (dx * dx + dz * dz <= r2) {
+          bot.glitchExpireAt = glitchUntil;
+        }
+      }
+    }
 
     this.room.broadcast(JSON.stringify({
       type: SRV.POWERUP_USED,
@@ -688,21 +767,7 @@ export default class RocketBumpersServer implements Party.Server {
 
     const damage = typeof data.damage === 'number' ? Math.min(Math.max(data.damage, 0), GAME.MAX_DAMAGE) : 0;
     if (damage <= 0) return;
-
-    player.hp = Math.max(0, player.hp - damage);
-
-    this.room.broadcast(JSON.stringify({
-      type: SRV.DAMAGE_DEALT,
-      targetId: sender.id,
-      amount: Math.round(damage * 10) / 10,
-      newHp: Math.round(player.hp * 10) / 10,
-      sourceId: null,
-      wasAbility: false,
-    }));
-
-    if (player.hp <= 0) {
-      this._handleElimination(player, null);
-    }
+    this._dealDamage(player, damage, null, false);
   }
 
   _onPowerupDamage(data: any, sender: Party.Connection) {
@@ -724,28 +789,7 @@ export default class RocketBumpersServer implements Party.Server {
     const damage = typeof data.damage === 'number' && isFinite(data.damage)
       ? Math.min(Math.max(data.damage, 0), GAME.MAX_DAMAGE) : 0;
     if (damage <= 0) return;
-
-    victim.hp = Math.max(0, victim.hp - damage);
-
-    attacker.hits++;
-    const hitDelta = damage >= GAME.SCORE_BIG_HIT_THRESHOLD
-      ? GAME.SCORE_BIG_HIT : GAME.SCORE_SMALL_HIT;
-    const hitMult = getStreakMultiplier(attacker.streak);
-    attacker.score += hitDelta * hitMult;
-
-    this.room.broadcast(JSON.stringify({
-      type: SRV.DAMAGE_DEALT,
-      targetId,
-      amount: Math.round(damage * 10) / 10,
-      newHp: Math.round(victim.hp * 10) / 10,
-      sourceId: attackerId,
-      wasAbility: false,
-      scoreDelta: hitDelta * hitMult,
-    }));
-
-    if (victim.hp <= 0) {
-      this._handleElimination(victim, attacker);
-    }
+    this._dealDamage(victim, damage, attacker, true);
   }
 
   _onEnvDamage(data: any, sender: Party.Connection) {
@@ -762,71 +806,13 @@ export default class RocketBumpersServer implements Party.Server {
     const damage = typeof data.damage === 'number' && isFinite(data.damage)
       ? Math.min(Math.max(data.damage, 0), GAME.MAX_DAMAGE) : 0;
     if (damage <= 0) return;
-
-    player.hp = Math.max(0, player.hp - damage);
-
-    this.room.broadcast(JSON.stringify({
-      type: SRV.DAMAGE_DEALT,
-      targetId,
-      amount: Math.round(damage * 10) / 10,
-      newHp: Math.round(player.hp * 10) / 10,
-      sourceId: null,
-      wasAbility: false,
-    }));
-
-    if (player.hp <= 0) {
-      this._handleElimination(player, null);
-    }
+    this._dealDamage(player, damage, null, false);
   }
 
-  _onRegisterBot(data: any, sender: Party.Connection) {
-    // Only the host can register bots
-    if (sender.id !== this.hostId) return;
-    const { botId, nickname, carType } = data;
-    if (typeof botId !== 'string' || !botId.startsWith('bot_')) return;
-    if (!VALID_CAR_TYPES.has(String(carType))) return;
-
-    const existing = this.players.get(botId);
-    if (existing) {
-      // Re-registration = respawn: reset HP and elimination state, keep score
-      existing.hp = GAME.MAX_HP;
-      existing.isEliminated = false;
-      existing.isInvincible = true;
-      existing.carType = String(carType);
-      existing.mass = getCarMass(carType);
-      existing.lastStateTime = Date.now();
-      // Grant spawn invincibility (same as human players)
-      this._setInvincibilityTimer(botId, 1500);
-      return;
-    }
-
-    // Restore scores from host migration if available
-    const migrated = (this as any)._migratedBotScores?.get(botId);
-    const bot: PlayerData = {
-      id: botId,
-      nickname: String(nickname).slice(0, 12),
-      carType: String(carType),
-      hp: GAME.MAX_HP,
-      mass: getCarMass(carType),
-      isEliminated: false,
-      isInvincible: false,
-      score: migrated?.score ?? 0,
-      kills: migrated?.kills ?? 0,
-      deaths: migrated?.deaths ?? 0,
-      streak: migrated?.streak ?? 0,
-      hits: 0,
-      lastStateTime: Date.now(),
-    };
-    if (migrated) (this as any)._migratedBotScores.delete(botId);
-    this.players.set(botId, bot);
-
-    // Broadcast to non-host clients so they know bot nickname/carType
-    this.room.broadcast(JSON.stringify({
-      type: SRV.PLAYER_JOINED,
-      id: botId,
-      nickname: bot.nickname,
-      carType: bot.carType,
-    }), [sender.id]);
+  _onRegisterBot(_data: any, _sender: Party.Connection) {
+    // BUG 0 fix: bots are now server-simulated. Client REGISTER_BOT messages
+    // are ignored — the server spawns and owns bots via _rebalanceBots().
+    // Kept as a no-op handler to avoid breaking older clients during rollout.
   }
 
   _onObstacleDestroyed(data: any, sender: Party.Connection) {
@@ -861,6 +847,11 @@ export default class RocketBumpersServer implements Party.Server {
     player.hp = GAME.MAX_HP;
     player.isEliminated = false;
     player.isInvincible = true;
+    // Clear defensive power-up state so it doesn't persist across death.
+    player.hasShield = false;
+    player.holoEvadeActive = false;
+    const sh = this.shieldTimers.get(sender.id); if (sh) { clearTimeout(sh); this.shieldTimers.delete(sender.id); }
+    const he = this.holoEvadeTimers.get(sender.id); if (he) { clearTimeout(he); this.holoEvadeTimers.delete(sender.id); }
     if (data.carType && VALID_CAR_TYPES.has(String(data.carType))) {
       player.carType = String(data.carType);
       player.mass = getCarMass(player.carType);
@@ -889,16 +880,612 @@ export default class RocketBumpersServer implements Party.Server {
     this.invincibilityTimers.set(playerId, handle);
   }
 
+  /** Set or refresh the SHIELD reduction window for a player. */
+  _setShieldTimer(playerId: string, ms: number) {
+    const existing = this.shieldTimers.get(playerId);
+    if (existing) clearTimeout(existing);
+    const handle = setTimeout(() => {
+      this.shieldTimers.delete(playerId);
+      const p = this.players.get(playerId);
+      if (p) p.hasShield = false;
+    }, ms);
+    this.shieldTimers.set(playerId, handle);
+  }
+
+  /** Set or refresh the HOLO_EVADE decoy window for a player. */
+  _setHoloEvadeTimer(playerId: string, ms: number) {
+    const existing = this.holoEvadeTimers.get(playerId);
+    if (existing) clearTimeout(existing);
+    const handle = setTimeout(() => {
+      this.holoEvadeTimers.delete(playerId);
+      const p = this.players.get(playerId);
+      if (p) p.holoEvadeActive = false;
+    }, ms);
+    this.holoEvadeTimers.set(playerId, handle);
+  }
+
   // ── Server tick: batch-broadcast player states ──────────────────────
+  //
+  // BUG 2+3+4 fix: emit ONE binary packet per tick containing every entity's
+  // state plus a single server timestamp. The previous per-entity broadcast
+  // produced N separate WebSocket messages that arrived in the same JS task
+  // on the client — all collapsing to the same performance.now() timestamp,
+  // which broke Hermite bracketing. With a single serverTime stamp, every
+  // entry in the batch shares a precise authoritative time and the client
+  // interpolates in server-clock space (immune to arrival jitter).
 
   _tickBroadcast() {
-    if (this._stateBuffers.size === 0 || this.players.size === 0) return;
-
-    // Send each buffered state to all clients except the original sender
-    for (const [, { buffer, senderId }] of this._stateBuffers) {
-      this.room.broadcast(buffer, [senderId]);
+    // Build bot entries (BUG 0: server owns bot state).
+    const botEntries: ArrayBuffer[] = [];
+    for (const [botId, bot] of this._bots) {
+      const player = this.players.get(botId);
+      if (!player || player.isEliminated) continue;
+      // Flag layout (matches client/src/network/protocol.js::unpackFlags):
+      //   bit0 abilityActive, bit1 hasShield, bit2 hasRam, bit3 isStunned,
+      //   bit4 driftMode, bit5 isInvincible, bit6 holoEvadeActive.
+      // Server-simulated bots don't do drifts/stuns/abilities, so we only
+      // set the bits whose state we actually track.
+      let flags = 0;
+      if (player.hasShield)       flags |= 0x02;
+      if (player.isInvincible)    flags |= 0x20;
+      if (player.holoEvadeActive) flags |= 0x40;
+      botEntries.push(encodeBotEntry(bot, player.hp, flags));
     }
+
+    if (this._stateBuffers.size === 0 && botEntries.length === 0) return;
+    if (this.players.size === 0) return;
+
+    // Compute total payload size. Human entries: skip leading 0x01 (1 byte).
+    // Bot entries: already in batch-entry format (no leading msgType).
+    let payloadBytes = 0;
+    for (const [, { buffer }] of this._stateBuffers) {
+      payloadBytes += buffer.byteLength - 1;
+    }
+    for (const e of botEntries) payloadBytes += e.byteLength;
+
+    const headerBytes = 1 /*msgType*/ + 4 /*serverTime*/ + 1 /*count*/;
+    const out = new ArrayBuffer(headerBytes + payloadBytes);
+    const outView = new DataView(out);
+    const outArr = new Uint8Array(out);
+
+    outView.setUint8(0, BIN.PLAYER_STATE_BATCH);
+    // serverTime: low 32 bits of Date.now() (ms since 1970 mod 2^32 ≈ every 49.7 days).
+    // Client reads absolute value and only uses deltas, so rollover only matters
+    // if a single session spans >24 days — not a concern here.
+    outView.setUint32(1, Date.now() >>> 0, true);
+    outView.setUint8(5, this._stateBuffers.size + botEntries.length);
+
+    let cursor = headerBytes;
+    for (const [, { buffer }] of this._stateBuffers) {
+      const entryLen = buffer.byteLength - 1;
+      outArr.set(new Uint8Array(buffer, 1, entryLen), cursor);
+      cursor += entryLen;
+    }
+    for (const e of botEntries) {
+      outArr.set(new Uint8Array(e), cursor);
+      cursor += e.byteLength;
+    }
+
+    // Single broadcast to everyone. Each client filters out its own state
+    // by playerId in _handleBinaryMessage (already does this).
+    this.room.broadcast(out);
     this._stateBuffers.clear();
+  }
+
+  // ── Server-side bot simulation (BUG 0 fix) ──────────────────────────
+
+  _stepBots() {
+    const now = Date.now();
+    const dtMs = now - this._lastBotStep;
+    this._lastBotStep = now;
+    if (this._bots.size === 0 && this._botProjectiles.length === 0 && this._botTurrets.length === 0) {
+      return;
+    }
+
+    // Cap dt at 100ms in case the setInterval hiccups — otherwise bots
+    // can integrate huge steps and fly out of the arena.
+    const dt = Math.min(dtMs, 100) / 1000;
+
+    // Build one authoritative snapshot of every entity for this tick. Every
+    // AI/collision decision reads from the SAME snapshot so racing against
+    // the wire order of client uploads doesn't produce inconsistent results.
+    const snapshots = this._buildSnapshots();
+
+    // Step AI + physics for each bot. Track hunter counts so target
+    // selection naturally spreads bots across multiple victims (anti-gangup).
+    const hunterCounts = new Map<string, number>();
+    for (const [, bot] of this._bots) {
+      const player = this.players.get(bot.botId);
+      if (!player || player.isEliminated) continue;
+      stepBot(bot, dt, snapshots, now, hunterCounts);
+      player.lastStateTime = now;
+    }
+
+    // Bot↔player physical collisions — server-authoritative since bots have
+    // no local client running cannon for them.
+    this._detectBotCollisions(snapshots, now);
+
+    // Power-up pickup + situational use. Fires real projectiles into the
+    // server sim; damage (if any) comes from flight simulation, not a timer.
+    this._stepBotPowerups(snapshots, now);
+
+    // Step every active bot-fired projectile and turret. Hits are resolved
+    // via swept-sphere against current snapshots, so a target that just
+    // moved out of the way on their own client genuinely dodges.
+    this._stepBotProjectiles(dt, snapshots, now);
+    this._stepBotTurrets(dt, snapshots, now);
+  }
+
+  _buildSnapshots(): PlayerSnapshot[] {
+    const out: PlayerSnapshot[] = [];
+    for (const [, b] of this._bots) {
+      const player = this.players.get(b.botId);
+      out.push({
+        id: b.botId,
+        posX: b.posX, posY: b.posY, posZ: b.posZ,
+        velX: b.velX, velZ: b.velZ,
+        yaw: b.yaw,
+        mass: player?.mass ?? 5,
+        hp: player?.hp ?? GAME.MAX_HP,
+        maxHp: GAME.MAX_HP,
+        isEliminated: player?.isEliminated ?? false,
+        isInvincible: player?.isInvincible ?? false,
+        hasShield: player?.hasShield ?? false,
+        holoEvadeActive: player?.holoEvadeActive ?? false,
+        isBot: true,
+      });
+    }
+    const decoder = new TextDecoder();
+    for (const [, { buffer }] of this._stateBuffers) {
+      const view = new DataView(buffer);
+      const idLen = view.getUint8(1);
+      const id = decoder.decode(new Uint8Array(buffer, 2, idLen));
+      const s = 2 + idLen + 1; // skip [0x01][idLen][id][carType]
+      const posX = _readFloat16(view, s + 0);
+      const posY = _readFloat16(view, s + 2);
+      const posZ = _readFloat16(view, s + 4);
+      const velX = _readFloat16(view, s + 6);
+      const velZ = _readFloat16(view, s + 10);
+      const yaw  = _readFloat16(view, s + 12);
+      const player = this.players.get(id);
+      if (!player) continue;
+      out.push({
+        id, posX, posY, posZ, velX, velZ, yaw,
+        mass: player.mass,
+        hp: player.hp,
+        maxHp: GAME.MAX_HP,
+        isEliminated: player.isEliminated,
+        isInvincible: player.isInvincible,
+        hasShield: player.hasShield,
+        holoEvadeActive: player.holoEvadeActive,
+        isBot: false,
+      });
+    }
+    return out;
+  }
+
+  // ── Bot↔player collision damage (BUG 0 restore) ──────────────────────
+  //
+  // The host used to detect these via its local cannon world. Now the server
+  // owns bots, so we run a simple sphere overlap + approach-speed check on
+  // every tick. A small radius (1.8m) approximates the car AABB and
+  // pair-cooldown (1s) prevents re-applying damage while the entities stay
+  // in contact.
+
+  readonly _BOT_COLLIDE_RADIUS = 1.8;
+  readonly _BOT_MIN_APPROACH = 3.0; // m/s — ignore glancing touches
+
+  _detectBotCollisions(snapshots: PlayerSnapshot[], now: number) {
+    for (const [, bot] of this._bots) {
+      const botPlayer = this.players.get(bot.botId);
+      if (!botPlayer || botPlayer.isEliminated) continue;
+
+      for (const target of snapshots) {
+        if (target.id === bot.botId) continue;
+        if (target.isEliminated || target.isInvincible) continue;
+        // Bots CAN damage each other — matches original client-simulated
+        // behaviour. Only constraint is iteration order: each (a,b) pair
+        // is visited twice (once from a, once from b), but the shared
+        // pair-cooldown below dedupes the damage.
+
+        const dx = target.posX - bot.posX;
+        const dz = target.posZ - bot.posZ;
+        const dist = Math.hypot(dx, dz);
+        if (dist > this._BOT_COLLIDE_RADIUS || dist < 0.0001) continue;
+
+        // Net approach speed (>0 = closing)
+        const dxn = dx / dist;
+        const dzn = dz / dist;
+        // rate of change of |d| = (b.vel - p.vel) · d/|d| ; closing when <0.
+        const closureRate = (bot.velX - target.velX) * dxn + (bot.velZ - target.velZ) * dzn;
+        const approachSpeed = -closureRate;
+        if (approachSpeed < this._BOT_MIN_APPROACH) continue;
+
+        // Determine attacker = entity moving toward the other faster along
+        // the normal. Bot velocity projected along -n (toward target):
+        const botIn = -(bot.velX * dxn + bot.velZ * dzn);
+        const pIn   =  (target.velX * dxn + target.velZ * dzn);
+        const botIsAttacker = botIn >= pIn;
+
+        const attacker = botIsAttacker ? botPlayer : this.players.get(target.id);
+        const victim   = botIsAttacker ? this.players.get(target.id) : botPlayer;
+        if (!attacker || !victim) continue;
+        if (victim.isEliminated || victim.isInvincible) continue;
+
+        // Pair cooldown (shared with human-reported collisions).
+        const idA = attacker.id < victim.id ? attacker.id : victim.id;
+        const idB = attacker.id < victim.id ? victim.id : attacker.id;
+        const key = `${idA}-${idB}`;
+        if ((this.pairCooldowns.get(key) || 0) > now) continue;
+        this.pairCooldowns.set(key, now + GAME.PAIR_COOLDOWN_MS);
+
+        // Angle factor — matches client CollisionHandler._angleFactor.
+        // cos(angle between relative velocity and collision normal) scaled
+        // to [0.3 .. 1.0]. Head-on = 1.0 full damage; glancing = 0.3.
+        const relVelMag = Math.hypot(bot.velX - target.velX, bot.velZ - target.velZ);
+        const cosAngle = relVelMag > 0.01 ? Math.max(0, approachSpeed / relVelMag) : 1.0;
+        const angleFactor = GAME.ANGLE_MIN + (GAME.ANGLE_MAX - GAME.ANGLE_MIN) * cosAngle;
+
+        this._applyPvpDamage(attacker, victim, approachSpeed, angleFactor, false);
+      }
+    }
+  }
+
+  /**
+   * Shared pvp damage application — computes calcDamage from an approach
+   * speed and defers to _dealDamage for reduction/broadcast/elimination.
+   */
+  _applyPvpDamage(
+    attacker: PlayerData,
+    victim: PlayerData,
+    approachSpeed: number,
+    angleFactor: number,
+    wasAbility: boolean,
+  ) {
+    if (approachSpeed > GAME.MAX_VELOCITY * 1.5) return;
+    const damage = calcDamage(approachSpeed, attacker.mass, victim.mass, angleFactor);
+    if (damage <= 0) return;
+    this._dealDamage(victim, damage, attacker, wasAbility);
+  }
+
+  /**
+   * Single source of truth for applying damage to any victim.
+   *
+   *  - Applies SHIELD 50% reduction if the victim currently has shield up.
+   *  - Applies invincibility guard (zero damage, no broadcast).
+   *  - Updates HP, attacker hits/score/streak multiplier.
+   *  - Broadcasts DAMAGE_DEALT.
+   *  - Routes to _handleElimination if HP hit zero.
+   *
+   * Returns the final damage actually applied (0 when blocked).
+   *
+   * Every damage path on the server funnels through here so SHIELD
+   * reduction stays consistent whether the damage originated from a
+   * collision, a bot-fired missile, a human-reported power-up hit, the
+   * lava pool, or a fall.
+   */
+  _dealDamage(
+    victim: PlayerData,
+    rawDamage: number,
+    attacker: PlayerData | null,
+    wasAbility: boolean,
+  ): number {
+    if (victim.isEliminated) return 0;
+    if (victim.isInvincible) return 0;
+    if (rawDamage <= 0) return 0;
+
+    // SHIELD halves incoming damage (client constant _shieldDamageReduction=0.5).
+    let dmg = victim.hasShield ? rawDamage * 0.5 : rawDamage;
+    dmg = Math.min(dmg, GAME.MAX_DAMAGE);
+    dmg = Math.round(dmg * 10) / 10;
+    if (dmg <= 0) return 0;
+
+    victim.hp = Math.max(0, victim.hp - dmg);
+
+    // Feed revenge memory if the victim is a server bot and the attacker
+    // is a DIFFERENT live entity. Matches client BotBrain._lastHitBy
+    // tracking so bots pursue whoever wronged them for ~8s.
+    if (attacker && attacker.id !== victim.id) {
+      const victimBot = this._bots.get(victim.id);
+      if (victimBot) {
+        victimBot.lastHitById = attacker.id;
+        victimBot.revengeExpireAt = Date.now() + 8000;
+      }
+    }
+
+    let scoreDelta: number | undefined;
+    if (attacker && !attacker.isEliminated) {
+      attacker.hits++;
+      const hitDelta = dmg >= GAME.SCORE_BIG_HIT_THRESHOLD
+        ? GAME.SCORE_BIG_HIT : GAME.SCORE_SMALL_HIT;
+      const hitMult = getStreakMultiplier(attacker.streak);
+      scoreDelta = hitDelta * hitMult;
+      attacker.score += scoreDelta;
+    }
+
+    this.room.broadcast(JSON.stringify({
+      type: SRV.DAMAGE_DEALT,
+      targetId: victim.id,
+      amount: dmg,
+      newHp: Math.round(victim.hp * 10) / 10,
+      sourceId: attacker?.id ?? null,
+      wasAbility,
+      ...(scoreDelta !== undefined ? { scoreDelta } : {}),
+    }));
+
+    if (victim.hp <= 0) this._handleElimination(victim, attacker);
+    return dmg;
+  }
+
+  // ── Bot power-up pickup + situational use ────────────────────────────
+  //
+  // Pickup: opportunistic proximity (2.5m from pedestal). Use: NOT a random
+  // timer — the bot waits until the tactical situation warrants it (target
+  // in the forward cone for MISSILE, enemies nearby for AOE, low HP for
+  // REPAIR/SHIELD, etc.). There's still a short reaction delay after pickup
+  // so bots don't fire the instant they grab something.
+
+  readonly _BOT_PICKUP_RADIUS = 2.0; // matches client PICKUP_RADIUS constant
+
+  _stepBotPowerups(snapshots: PlayerSnapshot[], now: number) {
+    for (const [, bot] of this._bots) {
+      const botPlayer = this.players.get(bot.botId);
+      if (!botPlayer || botPlayer.isEliminated) continue;
+
+      // 1) Pickup — empty-handed and off cooldown: grab any pedestal in range.
+      if (!bot.heldPowerup && now >= bot.powerupReadyAt) {
+        for (const [id, pedestal] of this.powerups) {
+          if (!pedestal.type) continue;
+          const dx = pedestal.position[0] - bot.posX;
+          const dz = pedestal.position[2] - bot.posZ;
+          if (Math.hypot(dx, dz) > this._BOT_PICKUP_RADIUS) continue;
+
+          bot.heldPowerup = pedestal.type;
+          // Reaction delay scales inversely with aggression: aggressive
+          // bots react quickly (~350ms), cautious ones take their time (~900ms).
+          const reaction = 900 - Math.floor(bot.aggression * 550);
+          bot.powerupUseEarliest = now + reaction;
+          const type = pedestal.type;
+          pedestal.type = null;
+          pedestal.respawnAt = now + GAME.POWERUP_RESPAWN_MS;
+          this.room.broadcast(JSON.stringify({
+            type: SRV.POWERUP_TAKEN,
+            id,
+            playerId: bot.botId,
+            powerupType: type,
+          }));
+          break;
+        }
+      }
+
+      // 2) Use — only when the situation says so (not random timer).
+      if (bot.heldPowerup) {
+        if (shouldUsePowerup(bot, botPlayer.hp, GAME.MAX_HP, bot.heldPowerup, snapshots, now)) {
+          const type = bot.heldPowerup;
+          bot.heldPowerup = null;
+          bot.powerupReadyAt = now + 500;
+          this._useBotPowerup(bot, botPlayer, type, snapshots, now);
+        } else if (now - bot.powerupUseEarliest > 12000) {
+          // Safety valve: if we've been sitting on a power-up for 12s
+          // without a good moment, release it so the bot can grab something
+          // more situationally useful next time.
+          bot.heldPowerup = null;
+          bot.powerupReadyAt = now + 1500;
+        }
+      }
+    }
+  }
+
+  _useBotPowerup(
+    bot: BotPhysicsState,
+    botPlayer: PlayerData,
+    type: string,
+    _snapshots: PlayerSnapshot[],
+    now: number,
+  ) {
+    // Broadcast visual event to every client — they animate the effect
+    // from the fire point. Actual damage (for projectiles) is decided by
+    // the server-side flight sim that starts on the next tick.
+    this.room.broadcast(JSON.stringify({
+      type: SRV.POWERUP_USED,
+      playerId: bot.botId,
+      powerupType: type,
+      pos: [bot.posX, bot.posY, bot.posZ],
+    }));
+
+    switch (type) {
+      case 'REPAIR_KIT': {
+        // Instant heal matching client: +30 HP capped at max.
+        botPlayer.hp = Math.min(GAME.MAX_HP, botPlayer.hp + 30);
+        break;
+      }
+      case 'SHIELD': {
+        // SHIELD = 50% damage reduction for 5s (NOT invincibility).
+        // _dealDamage reads hasShield and halves incoming damage.
+        botPlayer.hasShield = true;
+        this._setShieldTimer(bot.botId, 5000);
+        break;
+      }
+      case 'HOLO_EVADE': {
+        // HOLO_EVADE = 1.3s decoy window (1.0s active + 0.3s fade).
+        // Does NOT grant invincibility — the real car still takes full
+        // damage. Only effect: incoming homing missiles / turret acquisition
+        // have a 50% chance to lock onto a decoy (see projectilesim.ts).
+        botPlayer.holoEvadeActive = true;
+        this._setHoloEvadeTimer(bot.botId, 1300);
+        break;
+      }
+      case 'MISSILE': {
+        this._botProjectiles.push(
+          spawnMissile(bot.botId, bot.posX, bot.posY + 0.6, bot.posZ, bot.yaw, bot.speed, now),
+        );
+        break;
+      }
+      case 'HOMING_MISSILE': {
+        this._botProjectiles.push(
+          spawnHomingMissile(bot.botId, bot.posX, bot.posY + 0.6, bot.posZ, bot.yaw, now),
+        );
+        break;
+      }
+      case 'AUTO_TURRET': {
+        this._botTurrets.push(
+          spawnTurret(bot.botId, bot.posX, bot.posY, bot.posZ, bot.yaw, now),
+        );
+        break;
+      }
+      case 'GLITCH_BOMB': {
+        // Instant AOE — matches client constants: 18u radius, 10 HP damage.
+        this._botDetonateGlitch(bot, botPlayer, now);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  _botDetonateGlitch(bot: BotPhysicsState, attacker: PlayerData, now: number) {
+    // Matches client constants: 18u radius, 10 HP light damage. Instant AOE.
+    // Victims that are bots get their AI scrambled for 5s (client parity
+    // with BotBrain._applyGlitchDisruption).
+    const snapshots = this._buildSnapshots();
+    const radius = 18;
+    const r2 = radius * radius;
+    const damage = 10;
+    const glitchUntil = now + 5000;
+    for (const s of snapshots) {
+      if (s.id === bot.botId) continue;
+      const dx = s.posX - bot.posX;
+      const dz = s.posZ - bot.posZ;
+      if (dx * dx + dz * dz > r2) continue;
+      const victim = this.players.get(s.id);
+      if (!victim) continue;
+      this._dealDamage(victim, damage, attacker, true);
+      // Disrupt any bot in the blast radius.
+      const victimBot = this._bots.get(s.id);
+      if (victimBot) victimBot.glitchExpireAt = glitchUntil;
+    }
+  }
+
+  // ── Bot projectile + turret stepping ─────────────────────────────────
+
+  _stepBotProjectiles(dt: number, snapshots: PlayerSnapshot[], now: number) {
+    if (this._botProjectiles.length === 0) return;
+    const kept: ServerProjectile[] = [];
+    for (const proj of this._botProjectiles) {
+      const alive = stepProjectile(proj, dt, snapshots, now);
+      if (!alive) continue;
+      const victim = sweepProjectileHit(proj, dt, snapshots, now);
+      if (victim) {
+        this._resolveProjectileHit(proj, victim);
+        // Projectile consumed on impact (matches client behavior).
+        continue;
+      }
+      kept.push(proj);
+    }
+    this._botProjectiles = kept;
+  }
+
+  _stepBotTurrets(dt: number, snapshots: PlayerSnapshot[], now: number) {
+    if (this._botTurrets.length === 0) return;
+    const kept: ServerTurret[] = [];
+    for (const t of this._botTurrets) {
+      const { alive, emit } = stepTurret(t, dt, snapshots, now);
+      if (emit) this._botProjectiles.push(emit);
+      if (alive) kept.push(t);
+    }
+    this._botTurrets = kept;
+  }
+
+  _resolveProjectileHit(proj: ServerProjectile, victim: PlayerSnapshot) {
+    const attacker = this.players.get(proj.attackerId);
+    const victimPlayer = this.players.get(victim.id);
+    if (!attacker || !victimPlayer) return;
+    // Reductions/guards all live in _dealDamage.
+    this._dealDamage(victimPlayer, proj.damage, attacker, true);
+  }
+
+  /**
+   * Ensure bot population matches current human count. Called when a human
+   * joins or leaves. Spawns bots in empty slots up to TARGET_PLAYERS and
+   * keeps at least MIN_BOTS if the room has any human.
+   */
+  _rebalanceBots() {
+    const humanCount = Array.from(this.players.values()).filter(p => !p.id.startsWith('bot_')).length;
+    if (humanCount === 0) {
+      // Empty room — despawn all bots to save compute.
+      for (const id of Array.from(this._bots.keys())) this._despawnBot(id);
+      return;
+    }
+    const targetBots = Math.min(
+      this.MAX_BOTS,
+      Math.max(this.MIN_BOTS, this.TARGET_PLAYERS - humanCount),
+    );
+
+    // Despawn excess first (prefer eliminated bots)
+    while (this._bots.size > targetBots) {
+      let victim: string | null = null;
+      for (const [id] of this._bots) {
+        const p = this.players.get(id);
+        if (p?.isEliminated) { victim = id; break; }
+      }
+      if (!victim) victim = this._bots.keys().next().value as string;
+      this._despawnBot(victim);
+    }
+
+    // Spawn new bots until we hit target
+    while (this._bots.size < targetBots) {
+      this._spawnBot();
+    }
+  }
+
+  _spawnBot() {
+    const names = ['ACE','BLITZ','NOVA','ORBIT','QUASAR','RAZOR','SABER','TITAN','VOLT','ZEPH'];
+    // Pick an unused name
+    let name = names[Math.floor(Math.random() * names.length)];
+    let i = 0;
+    while (this.players.has(`bot_${name}`) && i < 20) {
+      name = names[Math.floor(Math.random() * names.length)] + '_' + (Math.floor(Math.random() * 99));
+      i++;
+    }
+    const botId = `bot_${name}`;
+    const carTypes = Object.keys(CAR_STATS);
+    const carType = carTypes[Math.floor(Math.random() * carTypes.length)];
+    const slotIndex = this._bots.size;
+
+    this._bots.set(botId, createBot(botId, carType, slotIndex));
+    const bot: PlayerData = {
+      id: botId,
+      nickname: name,
+      carType,
+      hp: GAME.MAX_HP,
+      mass: getCarMass(carType),
+      isEliminated: false,
+      isInvincible: true,
+      hasShield: false,
+      holoEvadeActive: false,
+      score: 0, kills: 0, deaths: 0, streak: 0, hits: 0,
+      lastStateTime: Date.now(),
+    };
+    this.players.set(botId, bot);
+    this._setInvincibilityTimer(botId, 1500);
+
+    // Tell all clients the bot exists.
+    this.room.broadcast(JSON.stringify({
+      type: SRV.PLAYER_JOINED,
+      id: botId,
+      nickname: name,
+      carType,
+    }));
+  }
+
+  _despawnBot(botId: string) {
+    this._bots.delete(botId);
+    this.players.delete(botId);
+    this._binaryRateLimit.delete(botId);
+    this.room.broadcast(JSON.stringify({
+      type: SRV.PLAYER_LEFT,
+      id: botId,
+    }));
   }
 
   // ── Power-up respawns ────────────────────────────────────────────────

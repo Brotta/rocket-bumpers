@@ -24,28 +24,54 @@ export class InterpolationBuffer {
 
   /**
    * Push a new state snapshot from the network.
+   *
+   * BUG 3+4 fix: the caller passes the authoritative server timestamp (ms)
+   * when available. All timestamps in the buffer live in the same clock
+   * space — either server-clock (new batched protocol) or local-clock
+   * (legacy single-entity fallback). The sample() caller must use the
+   * matching `now` value.
+   *
    * @param {object} state — { posX, posY, posZ, velX, velY, velZ, yaw, speed, flags, hp }
+   * @param {number} [timestamp] — server-clock ms; defaults to performance.now()
    */
-  push(state) {
+  push(state, timestamp) {
     // Guard against NaN contamination — skip corrupted states
     if (isNaN(state.posX) || isNaN(state.posY) || isNaN(state.posZ) ||
         isNaN(state.velX) || isNaN(state.velY) || isNaN(state.velZ)) return;
 
-    const now = performance.now();
+    const t = (typeof timestamp === 'number' && isFinite(timestamp))
+      ? timestamp
+      : performance.now();
+
+    // Deduplicate: if the new timestamp collides with the most recent entry
+    // (e.g. two entries from the same server tick or fallback packets that
+    // collapse to the same performance.now()), keep the latest by overwriting.
+    // Without this, Hermite bracketing can pick a zero-duration interval.
+    const last = this._buffer[this._buffer.length - 1];
+    if (last && t <= last.time) {
+      last.time = t;
+      last.posX = state.posX; last.posY = state.posY; last.posZ = state.posZ;
+      last.velX = state.velX; last.velY = state.velY; last.velZ = state.velZ;
+      last.yaw = state.yaw; last.speed = state.speed;
+      last.flags = state.flags; last.hp = state.hp;
+      return;
+    }
 
     // Track inter-packet jitter to adapt interpolation delay
     if (this._lastPushTime > 0) {
-      const gap = now - this._lastPushTime;
-      this._jitterSamples.push(gap);
-      if (this._jitterSamples.length > this._maxJitterSamples) {
-        this._jitterSamples.shift();
+      const gap = t - this._lastPushTime;
+      if (gap > 0) {
+        this._jitterSamples.push(gap);
+        if (this._jitterSamples.length > this._maxJitterSamples) {
+          this._jitterSamples.shift();
+        }
+        this._updateAdaptiveDelay();
       }
-      this._updateAdaptiveDelay();
     }
-    this._lastPushTime = now;
+    this._lastPushTime = t;
 
     const entry = {
-      time: now,
+      time: t,
       ...state,
     };
     this._buffer.push(entry);
@@ -56,28 +82,42 @@ export class InterpolationBuffer {
 
   /**
    * Sample the interpolated state at the current render time.
+   *
+   * @param {number} [now] — current time in the SAME clock space as the
+   *   timestamps passed to push() (server-clock if using the batched
+   *   protocol). Defaults to performance.now() for legacy callers.
    * @returns {object|null} — interpolated state or null if no data
    */
-  sample() {
+  sample(now) {
+    if (typeof now !== 'number' || !isFinite(now)) now = performance.now();
     const len = this._buffer.length;
     if (len === 0) return null;
     if (len === 1) {
-      // Single snapshot — extrapolate using velocity for smooth motion
+      // Single snapshot — extrapolate using velocity for smooth motion.
+      // BUG 10 fix: apply exponential velocity decay (τ=0.2s) so the
+      // displacement integral converges — a network stall no longer sends
+      // the vehicle flying off at constant speed. At t→∞, displacement
+      // asymptotes to v0·τ = 0.2·v0, which is smooth to return from.
       const s = this._buffer[0];
-      const elapsed = (performance.now() - s.time) / 1000;
+      const elapsed = (now - s.time) / 1000;
       if (elapsed > 0 && elapsed < 0.35) {
+        const tau = 0.2;
+        const decayFactor = Math.exp(-elapsed / tau);
+        const displacement = tau * (1 - decayFactor);
         return {
-          posX: s.posX + s.velX * elapsed,
-          posY: s.posY + s.velY * elapsed,
-          posZ: s.posZ + s.velZ * elapsed,
-          velX: s.velX, velY: s.velY, velZ: s.velZ,
+          posX: s.posX + s.velX * displacement,
+          posY: s.posY + s.velY * displacement,
+          posZ: s.posZ + s.velZ * displacement,
+          velX: s.velX * decayFactor,
+          velY: s.velY * decayFactor,
+          velZ: s.velZ * decayFactor,
           yaw: s.yaw, speed: s.speed, flags: s.flags, hp: s.hp,
         };
       }
       return s;
     }
 
-    const renderTime = performance.now() - this._delay;
+    const renderTime = now - this._delay;
 
     // Find bracketing snapshots
     let i = 0;
@@ -89,14 +129,17 @@ export class InterpolationBuffer {
     const b = this._buffer[Math.min(i + 1, len - 1)];
 
     if (a === b) {
-      // Only one unique snapshot — extrapolate using its velocity
+      // Only one unique snapshot — extrapolate using its velocity (with decay).
       const elapsed = (renderTime - a.time) / 1000;
       if (elapsed > 0 && elapsed < 0.35) { // cap extrapolation at 350ms
+        const tau = 0.2;
+        const decayFactor = Math.exp(-elapsed / tau);
+        const displacement = tau * (1 - decayFactor);
         return {
-          posX: a.posX + a.velX * elapsed,
-          posY: a.posY + a.velY * elapsed,
-          posZ: a.posZ + a.velZ * elapsed,
-          velX: a.velX, velY: a.velY, velZ: a.velZ,
+          posX: a.posX + a.velX * displacement,
+          posY: a.posY + a.velY * displacement,
+          posZ: a.posZ + a.velZ * displacement,
+          velX: a.velX * decayFactor, velY: a.velY * decayFactor, velZ: a.velZ * decayFactor,
           yaw: a.yaw, speed: a.speed, flags: a.flags, hp: a.hp,
         };
       }
@@ -109,14 +152,18 @@ export class InterpolationBuffer {
     const rawT = (renderTime - a.time) / dt;
 
     // If t > 1, we've run past the latest snapshot — extrapolate gently
+    // with exponential velocity decay (BUG 10 fix).
     if (rawT > 1) {
       const overshoot = (renderTime - b.time) / 1000; // seconds past b
       if (overshoot > 0 && overshoot < 0.35) { // cap at 350ms
+        const tau = 0.2;
+        const decayFactor = Math.exp(-overshoot / tau);
+        const displacement = tau * (1 - decayFactor);
         return {
-          posX: b.posX + b.velX * overshoot,
-          posY: b.posY + b.velY * overshoot,
-          posZ: b.posZ + b.velZ * overshoot,
-          velX: b.velX, velY: b.velY, velZ: b.velZ,
+          posX: b.posX + b.velX * displacement,
+          posY: b.posY + b.velY * displacement,
+          posZ: b.posZ + b.velZ * displacement,
+          velX: b.velX * decayFactor, velY: b.velY * decayFactor, velZ: b.velZ * decayFactor,
           yaw: b.yaw, speed: b.speed, flags: b.flags, hp: b.hp,
         };
       }
@@ -152,6 +199,13 @@ export class InterpolationBuffer {
    * Adapt interpolation delay based on measured jitter.
    * Low jitter → smaller delay (more responsive).
    * High jitter → larger delay (smoother, avoids stalls).
+   *
+   * BUG 5 fix: the target delay is smoothed (low-pass EMA) instead of being
+   * set instantly. An instant change of 80ms shifts renderTime = now - _delay
+   * backward by 80ms on one frame, which produces a visible time-warp on
+   * every rendered remote player. The EMA converges in ~15–20 packets
+   * (~250–330ms at 60 Hz) — fast enough to track real jitter shifts, slow
+   * enough that the eye doesn't see the transition.
    */
   _updateAdaptiveDelay() {
     if (this._jitterSamples.length < 5) return;
@@ -168,8 +222,10 @@ export class InterpolationBuffer {
     // Delay = mean gap + 2× stddev, clamped between baseDelay and baseDelay*2.5.
     // Never go below baseDelay — doing so starves the buffer (< 3 samples)
     // and causes constant extrapolation stutter.
-    const desired = mean + 2 * stdDev;
-    this._delay = Math.max(this._baseDelay, Math.min(desired, this._baseDelay * 2.5));
+    const rawDesired = mean + 2 * stdDev;
+    const desired = Math.max(this._baseDelay, Math.min(rawDesired, this._baseDelay * 2.5));
+    // EMA smoothing (alpha=0.08 per packet ≈ 250ms time-constant at 60 Hz).
+    this._delay = this._delay * 0.92 + desired * 0.08;
   }
 
   /**

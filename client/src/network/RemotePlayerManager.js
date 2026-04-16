@@ -8,8 +8,12 @@ const _snapThresholdSq = NETWORK.snapThreshold * NETWORK.snapThreshold;
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
 // Visual smoothing rate — higher = more responsive, lower = smoother.
-// At 25, the mesh catches up ~87% in 5 frames (~83ms at 60fps).
-const VISUAL_SMOOTH_RATE = 25;
+// Raised from 25 → 60 (BUG 9 fix): the interpolation buffer already produces
+// smooth Hermite curves; stacking a slow exponential mesh-lerp on top just
+// added perceived lag (~40ms) and amplified jumps from adaptive-delay changes
+// and extrapolation rewinds. At 60 the mesh catches up ~86% in 2 frames
+// (~33ms at 60fps) — enough to absorb single-frame jitter without visible lag.
+const VISUAL_SMOOTH_RATE = 60;
 
 /**
  * RemotePlayerManager — manages visual representations of remote players.
@@ -133,6 +137,10 @@ export class RemotePlayerManager {
       maxSpeed: STAT_MAP.speed[carDef.stats.speed] || 20,
       // Flag to distinguish from real CarBody instances
       _isRemote: true,
+      // BUG 8 fix: snap only on explicit events (first appearance, respawn).
+      // Distance-threshold snaps fired spuriously during jitter-recovery when
+      // extrapolation had to rewind, causing visible mid-game teleports.
+      _needsSnap: true,
       // Stub methods that CollisionHandler or other systems might call
       takeDamage() { return 0; }, // damage handled by server
       resetState() {},
@@ -204,11 +212,14 @@ export class RemotePlayerManager {
   /**
    * Push a state snapshot. If the player exists, buffers it immediately.
    * If not, queues it for creation in the next processPendingAdds() call.
+   *
+   * @param {number} [serverTime] — authoritative server-clock timestamp
+   *   from the batched packet. Enables jitter-immune interpolation (BUG 3+4).
    */
-  updatePlayerState(playerId, state, carType) {
+  updatePlayerState(playerId, state, carType, serverTime) {
     const entry = this._players.get(playerId);
     if (entry) {
-      entry.buffer.push(state);
+      entry.buffer.push(state, serverTime);
       return;
     }
 
@@ -218,7 +229,7 @@ export class RemotePlayerManager {
       if (!arr) { arr = []; this._pendingStates.set(playerId, arr); }
       // Keep only the last 5 states to avoid memory growth
       if (arr.length >= 5) arr.shift();
-      arr.push(state);
+      arr.push({ state, serverTime });
       return;
     }
 
@@ -257,7 +268,7 @@ export class RemotePlayerManager {
         if (buffered) {
           const entry = this._players.get(playerId);
           if (entry) {
-            for (const s of buffered) entry.buffer.push(s);
+            for (const b of buffered) entry.buffer.push(b.state, b.serverTime);
           }
           this._pendingStates.delete(playerId);
         }
@@ -294,6 +305,8 @@ export class RemotePlayerManager {
       existing._eliminationHandled = false;
       existing.mesh.visible = true;
       existing.buffer.clear();
+      // Mark for snap on first post-respawn sample (BUG 8 fix)
+      existing._needsSnap = true;
       if (pos) existing.mesh.position.set(pos[0], pos[1], pos[2]);
     }
   }
@@ -301,6 +314,7 @@ export class RemotePlayerManager {
   // ── Physics body update (called every fixed update, before physics step) ──
 
   updatePhysicsBodies() {
+    const now = this._currentSampleTime();
     for (const [, entry] of this._players) {
       if (entry.isEliminated) continue;
       // If the interpolation buffer has data, skip — interpolateAll() is the
@@ -309,16 +323,35 @@ export class RemotePlayerManager {
       // (once here and once in interpolateAll), causing jitter.
       if (entry.buffer._buffer.length > 0) continue;
       // Fallback for players that just joined and have no buffered states yet
-      const state = entry.buffer.sample();
+      const state = entry.buffer.sample(now);
       if (!state) continue;
       entry.body.position.set(state.posX, state.posY, state.posZ);
       entry.body.velocity.set(state.velX, state.velY, state.velZ);
     }
   }
 
+  /**
+   * Pick the clock reference for sampling the interpolation buffer.
+   * - Server-clock when batched packets have arrived and offset is known.
+   * - Local performance.now() otherwise (legacy fallback + singleplayer-style
+   *   offline paths that don't touch the buffer).
+   */
+  _currentSampleTime() {
+    const net = this.game.networkManager;
+    if (net && typeof net.getServerNow === 'function') {
+      const srv = net.getServerNow();
+      if (typeof srv === 'number') return srv;
+    }
+    return performance.now();
+  }
+
   // ── Interpolation (called every render frame) ─────────────────────────
 
-  interpolateAll(frameDt, alpha) {
+  interpolateAll(frameDt, alpha, smoothDt) {
+    // smoothDt: wall-clock dt used for visual mesh smoothing only (BUG 1).
+    // Falls back to frameDt if caller didn't provide it (e.g. singleplayer).
+    const visualDt = (smoothDt !== undefined) ? smoothDt : frameDt;
+    const sampleTime = this._currentSampleTime();
     // Process any pending player creations first
     this.processPendingAdds();
 
@@ -328,7 +361,7 @@ export class RemotePlayerManager {
         continue;
       }
 
-      const state = entry.buffer.sample();
+      const state = entry.buffer.sample(sampleTime);
       if (!state) continue;
 
       const mesh = entry.mesh;
@@ -344,16 +377,21 @@ export class RemotePlayerManager {
       const dz = targetZ - mesh.position.z;
       const distSq = dx * dx + dy * dy + dz * dz;
 
-      if (distSq > _snapThresholdSq) {
-        // Snap on large distance (respawn, first appearance, long network stall)
+      // BUG 8 fix: snap only on explicit events (first appearance or respawn).
+      // Keep a safety emergency-snap at 10× the threshold for clearly-broken
+      // desyncs (buffer corruption, wild extrapolation after long stall).
+      const emergencySnap = distSq > _snapThresholdSq * 100;
+      if (entry._needsSnap || emergencySnap) {
         mesh.position.set(targetX, targetY, targetZ);
         entry._yaw = state.yaw;
         entry.buffer.clear();
         entry.buffer.push(state);
+        entry._needsSnap = false;
       } else {
         // Visual smoothing — mesh lerps toward the interpolated target.
-        // Eliminates micro-jitter at sample boundaries while staying responsive.
-        const t = 1 - Math.exp(-VISUAL_SMOOTH_RATE * frameDt);
+        // Uses wall-clock dt so slowmo/hit-freeze don't make the mesh lag
+        // and snap forward when time scale returns to 1.0 (BUG 1 fix).
+        const t = 1 - Math.exp(-VISUAL_SMOOTH_RATE * visualDt);
         mesh.position.x += dx * t;
         mesh.position.y += dy * t;
         mesh.position.z += dz * t;

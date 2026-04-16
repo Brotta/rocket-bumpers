@@ -17,8 +17,16 @@ export const MSG = {
   OBSTACLE_DESTROYED: 'OBSTACLE_DESTROYED',
   REGISTER_BOT: 'REGISTER_BOT',
 
-  // Binary message type byte
+  // Binary message type byte (client → server: per-entity state upload)
   PLAYER_STATE_BIN: 0x01,
+} as const;
+
+// Server → Client binary message types
+export const BIN = {
+  // Batch of all entity states for one server tick (BUG 2+3 fix).
+  // Layout: [0x02:u8][serverTimeLow:u32 LE][count:u8][entry...]
+  // Entry:  [idLen:u8][id:N][carType:u8][pos/vel/yaw/speed:16 bytes float16][flags:u8][hp:u8]
+  PLAYER_STATE_BATCH: 0x02,
 } as const;
 
 // Server → Client

@@ -1,5 +1,5 @@
 import PartySocket from 'partysocket';
-import { MSG, SRV, encodePlayerState, decodePlayerUpdate } from './protocol.js';
+import { MSG, SRV, BIN, encodePlayerState, decodePlayerUpdate, decodePlayerStateBatch } from './protocol.js';
 import { NETWORK } from '../core/Config.js';
 
 /**
@@ -31,6 +31,15 @@ export class NetworkManager {
 
     // Reconnection
     this._reconnectAttempts = 0;
+
+    // BUG 6 fix — clock offset estimator. The server stamps every state-batch
+    // with its own wall-clock time (Date.now() LSW). We store the EMA of
+    // (serverTime - localArrivalTime) so we can convert local performance.now()
+    // into server-clock coordinates for interpolation. Without this, each
+    // client drifts relative to the server over long sessions and packet
+    // jitter translates 1:1 into visual jitter.
+    this._clockOffsetMs = null; // null until first batch arrives
+    this._clockOffsetAlpha = 0.05; // EMA: converges in ~20 samples (~333ms @ 60Hz)
   }
 
   // ── Connection lifecycle ──────────────────────────────────────────────
@@ -157,6 +166,16 @@ export class NetworkManager {
   get localPlayerId() { return this._localPlayerId; }
   get roomId() { return this._roomId; }
   get isMultiplayer() { return this._connected; }
+
+  /**
+   * Current server time estimate in ms (server clock low-word).
+   * Returns null if no batch has arrived yet — callers should fall back to
+   * performance.now() for legacy single-entity packets. BUG 3+6.
+   */
+  getServerNow() {
+    if (this._clockOffsetMs === null) return null;
+    return performance.now() + this._clockOffsetMs;
+  }
 
   // ── Send methods (called by Game.js) ──────────────────────────────────
 
@@ -315,13 +334,42 @@ export class NetworkManager {
     // Don't process binary state before we know our own ID (ROOM_STATE not yet received)
     if (!this._localPlayerId) return;
 
+    if (buffer.byteLength < 1) return;
+    const msgType = new DataView(buffer).getUint8(0);
+
+    // Batched state from the server (new path — BUG 2+3+4 fix).
+    if (msgType === BIN.PLAYER_STATE_BATCH) {
+      const batch = decodePlayerStateBatch(buffer);
+      if (!batch) return;
+
+      // Update clock offset EMA. We use the arrival time of the batch as the
+      // reference point — this buckets all entries in this tick to the same
+      // local-time anchor, which is what we want for Hermite bracketing.
+      const localNow = performance.now();
+      const rawOffset = batch.serverTime - localNow;
+      if (this._clockOffsetMs === null) {
+        this._clockOffsetMs = rawOffset;
+      } else {
+        this._clockOffsetMs = this._clockOffsetMs * (1 - this._clockOffsetAlpha)
+          + rawOffset * this._clockOffsetAlpha;
+      }
+
+      for (const upd of batch.updates) {
+        if (upd.playerId === this._localPlayerId) continue;
+        // Attach authoritative server timestamp so the interpolation buffer
+        // stores snapshots in server-clock space (no arrival-jitter bias).
+        upd.serverTime = batch.serverTime;
+        this._emit('remotePlayerState', upd);
+      }
+      return;
+    }
+
+    // Legacy single-entity packet (kept for safety — no server emits this
+    // path anymore after BUG 2 fix, but tolerating it avoids hard breaks
+    // during rolling deploys).
     const update = decodePlayerUpdate(buffer);
     if (!update) return;
-
-    // Don't process our own state back
     if (update.playerId === this._localPlayerId) return;
-
-    // Emit: { playerId, carType, state }
     this._emit('remotePlayerState', update);
   }
 
