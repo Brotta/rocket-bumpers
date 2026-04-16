@@ -29,6 +29,15 @@ const ARENA_APOTHEM = ARENA_RADIUS * Math.cos(Math.PI / ARENA_SIDES);
 // a HORNET bot — the previous global MAX_SPEED=22 made every car identical
 // and let slow-class bots sprint at hornet speeds.
 const FRICTION = 0.985;
+// Lateral friction — matches client CAR_FEEL.lateralFriction. Each tick we
+// decompose velocity into longitudinal (aligned with bot.yaw) and lateral
+// (perpendicular) and damp the lateral component. Without this the bot
+// behaves like a hovercraft: the yaw rotates toward the target but the
+// velocity vector stays pointed wherever inertia carries it, producing
+// the "spinning on the spot while drifting sideways" look.
+// 0.94 is the client's BASE grip; matched here so server bots feel like
+// real cars.
+const LATERAL_FRICTION = 0.94;
 const RETARGET_MIN_MS = 900;
 const RETARGET_MAX_MS = 2400;
 const WANDER_JITTER = 0.25;
@@ -352,7 +361,12 @@ export function stepBot(
   // ~15% chance per step to lose target lock while glitched.
   if (glitched && bot.targetId && Math.random() < 0.15) bot.targetId = null;
 
-  const angularVel = Math.max(-bot.maxAngularVel, Math.min(bot.maxAngularVel, yawDiff * bot.turnRate));
+  // Speed-proportional steering — matches client model: real cars can't
+  // pivot in place. At zero speed the bot can only accelerate; turning
+  // gradually becomes available as speed builds. Without this scaling a
+  // bot spawned facing away from its target rotates 360° on the spot.
+  const speedFactor = Math.min(1, bot.speed / bot.maxSpeed);
+  const angularVel = Math.max(-bot.maxAngularVel, Math.min(bot.maxAngularVel, yawDiff * bot.turnRate)) * speedFactor;
   bot.yaw += angularVel * dt;
 
   // Throttle — aggressive bots push harder; glitched bots occasionally
@@ -367,6 +381,24 @@ export function stepBot(
   bot.velZ += Math.sin(bot.yaw) * bot.accel * throttle * dt;
   bot.velX *= FRICTION;
   bot.velZ *= FRICTION;
+
+  // Lateral friction (drift model — must mirror client CAR_FEEL behaviour).
+  // Project velocity onto the heading; preserve the longitudinal component
+  // and aggressively damp the lateral. This is what makes the velocity
+  // vector follow the car's facing instead of drifting sideways. The
+  // longitudinal component still loses energy to FRICTION above; this
+  // step ONLY kills sideways slip.
+  const headingX = Math.cos(bot.yaw);
+  const headingZ = Math.sin(bot.yaw);
+  const longComp = bot.velX * headingX + bot.velZ * headingZ;
+  const longVelX = headingX * longComp;
+  const longVelZ = headingZ * longComp;
+  const latVelX = bot.velX - longVelX;
+  const latVelZ = bot.velZ - longVelZ;
+  const lf = Math.pow(LATERAL_FRICTION, dt * 60);
+  bot.velX = longVelX + latVelX * lf;
+  bot.velZ = longVelZ + latVelZ * lf;
+
   const sp = Math.hypot(bot.velX, bot.velZ);
   if (sp > bot.maxSpeed) {
     const k = bot.maxSpeed / sp;
