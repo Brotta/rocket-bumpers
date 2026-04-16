@@ -7,14 +7,6 @@ import { NETWORK, COLLISION_GROUPS, STAT_MAP, CARS } from '../core/Config.js';
 const _snapThresholdSq = NETWORK.snapThreshold * NETWORK.snapThreshold;
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
-// Visual smoothing rate — higher = more responsive, lower = smoother.
-// Raised from 25 → 60 (BUG 9 fix): the interpolation buffer already produces
-// smooth Hermite curves; stacking a slow exponential mesh-lerp on top just
-// added perceived lag (~40ms) and amplified jumps from adaptive-delay changes
-// and extrapolation rewinds. At 60 the mesh catches up ~86% in 2 frames
-// (~33ms at 60fps) — enough to absorb single-frame jitter without visible lag.
-const VISUAL_SMOOTH_RATE = 60;
-
 /**
  * RemotePlayerManager — manages visual representations of remote players.
  *
@@ -389,24 +381,25 @@ export class RemotePlayerManager {
       // compute positions tens of meters off. Just snap the mesh; the buffer
       // stays coherent and future batches flow in naturally.
       const emergencySnap = distSq > _snapThresholdSq * 100;
+      // Set mesh position directly to the Hermite-interpolated state. The
+      // sample() output is already a C1-smooth curve in server-clock space;
+      // the previous `mesh.pos += dx * (1 - exp(-rate * visualDt))` filter
+      // produced a dt-variance lag (~3 cm at max speed) that oscillated at
+      // vsync rate (60 Hz), which is exactly the "tiny sub-frame jumps
+      // many times per second" the user observed. Removing the filter also
+      // eliminates the perceived lag (~17 ms) without introducing visible
+      // kinks: Hermite is C1, so segment boundaries don't snap.
+      mesh.position.set(targetX, targetY, targetZ);
+      // Yaw: take the FULL shortest-arc step. Tracking entry._yaw cumulatively
+      // (rather than just `entry._yaw = state.yaw`) preserves shortest-arc
+      // continuity across the ±π seam — without this, a wrap from +π to
+      // -π+ε would produce a visual ~360° spin in one frame.
+      let yawDiff = state.yaw - entry._yaw;
+      if (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+      if (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+      entry._yaw += yawDiff;
       if (entry._needsSnap || emergencySnap) {
-        mesh.position.set(targetX, targetY, targetZ);
-        entry._yaw = state.yaw;
         entry._needsSnap = false;
-      } else {
-        // Visual smoothing — mesh lerps toward the interpolated target.
-        // Uses wall-clock dt so slowmo/hit-freeze don't make the mesh lag
-        // and snap forward when time scale returns to 1.0 (BUG 1 fix).
-        const t = 1 - Math.exp(-VISUAL_SMOOTH_RATE * visualDt);
-        mesh.position.x += dx * t;
-        mesh.position.y += dy * t;
-        mesh.position.z += dz * t;
-
-        // Smooth yaw via shortest-arc lerp
-        let yawDiff = state.yaw - entry._yaw;
-        if (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
-        if (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
-        entry._yaw += yawDiff * t;
       }
 
       mesh.quaternion.setFromAxisAngle(_yAxis, entry._yaw);
