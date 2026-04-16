@@ -380,12 +380,18 @@ export class RemotePlayerManager {
       // BUG 8 fix: snap only on explicit events (first appearance or respawn).
       // Keep a safety emergency-snap at 10× the threshold for clearly-broken
       // desyncs (buffer corruption, wild extrapolation after long stall).
+      //
+      // CRITICAL: do NOT clear/re-push the buffer here. The buffer already
+      // holds the snapshot(s) we interpolated `state` from, timestamped in
+      // server-clock space. A `buffer.push(state)` without serverTime would
+      // insert an entry timestamped with performance.now() (local-clock),
+      // mixing two clock axes and making the next Hermite interpolation
+      // compute positions tens of meters off. Just snap the mesh; the buffer
+      // stays coherent and future batches flow in naturally.
       const emergencySnap = distSq > _snapThresholdSq * 100;
       if (entry._needsSnap || emergencySnap) {
         mesh.position.set(targetX, targetY, targetZ);
         entry._yaw = state.yaw;
-        entry.buffer.clear();
-        entry.buffer.push(state);
         entry._needsSnap = false;
       } else {
         // Visual smoothing — mesh lerps toward the interpolated target.
