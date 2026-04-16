@@ -374,12 +374,25 @@ export class CollisionHandler {
 
     if (isMultiplayer) {
       // ── Multiplayer: report collision to server, let server apply damage ──
-      // Only send if the attacker is locally-simulated (not remote) to avoid double-reports.
-      // When both cars are local (e.g. host + bot), send both directions.
-      // When one is remote, only the lower playerId sends to prevent duplicates.
+      // Only the locally-simulated attacker reports, to avoid double-counting.
+      //
+      // Dedup rules:
+      //  - Both local (host + own bot, offline-style): send both directions.
+      //  - One side is a SERVER-OWNED BOT (id starts with 'bot_'): always
+      //    send. The bot has no client to send on its behalf, so dropping
+      //    the message means the server only ever sees this collision via
+      //    its own _detectBotCollisions sweep — fine in theory but the
+      //    server pass costs a tick of latency and used to silently drop
+      //    via the sign-bug. Safer to always report.
+      //  - Otherwise (local human vs remote human): the lower playerId sends
+      //    so exactly one of the two clients reports per pair.
       const bothLocal = !carBody._isRemote && !otherCar._isRemote;
+      const otherIsBot = otherCar._isRemote && typeof otherCar.playerId === 'string'
+        && otherCar.playerId.startsWith('bot_');
+      const carIsBot = carBody._isRemote && typeof carBody.playerId === 'string'
+        && carBody.playerId.startsWith('bot_');
       if (dmgAtoB > 0 && !carBody._isRemote && carBody.playerId
-          && (bothLocal || carBody.playerId < otherCar.playerId)) {
+          && (bothLocal || otherIsBot || carBody.playerId < otherCar.playerId)) {
         this._networkManager.sendCollision(
           otherCar.playerId,
           approachA,
@@ -391,7 +404,7 @@ export class CollisionHandler {
         );
       }
       if (dmgBtoA > 0 && !otherCar._isRemote && otherCar.playerId
-          && (bothLocal || otherCar.playerId < carBody.playerId)) {
+          && (bothLocal || carIsBot || otherCar.playerId < carBody.playerId)) {
         this._networkManager.sendCollision(
           carBody.playerId,
           approachB,
