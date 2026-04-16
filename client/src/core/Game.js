@@ -469,17 +469,14 @@ export class Game {
     // interpolation buffer uses authoritative server-clock timestamps
     // instead of arrival-jittered performance.now() (BUG 3+4).
     _on('remotePlayerState', ({ playerId, carType, state, serverTime }) => {
-      // Skip our own state
+      // Skip our own state — server echoes it in the batch.
       if (playerId === serverPlayerId) return;
 
-      // Skip if this is a local bot (we're the host simulating it)
-      // Also skip bot-prefixed IDs while we're host (bots may still be loading)
-      if (this.networkManager.isHost) {
-        if (this._findLocalCarByPlayerId(playerId)) return;
-        if (playerId.startsWith('bot_')) return;
-      }
-
-      // Push state — if player doesn't exist yet, it gets queued for creation
+      // BUG 0 follow-up: do NOT special-case bot_ ids for the host. Bots are
+      // server-simulated; the host has no local copy to prefer. Earlier code
+      // dropped bot updates here when isHost, which left the host's bot
+      // buffers empty so bot meshes stayed pinned at origin (inside lava)
+      // while every other client rendered them correctly.
       this.remotePlayerManager.updatePlayerState(playerId, state, carType, serverTime);
     });
 
