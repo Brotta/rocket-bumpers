@@ -3,6 +3,7 @@ import { MSG, SRV, BIN, GAME } from './protocol.js';
 import { calcDamage, getStreakMultiplier } from './damage.js';
 import {
   BotPhysicsState, PlayerSnapshot, createBot, stepBot, encodeBotEntry, shouldUsePowerup,
+  markObstacleDestroyed,
 } from './botsim.js';
 import {
   ServerProjectile, ServerTurret,
@@ -838,6 +839,12 @@ export default class RocketBumpersServer implements Party.Server {
     const { x, y, z } = data;
     if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return;
     if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return;
+
+    // Reconcile the server's bot-collision obstacle list. Without this
+    // step, server-side bots keep colliding with rubble that no longer
+    // exists for any client (humans destroy a pillar, then watch a bot
+    // bounce off the empty air where it used to be).
+    markObstacleDestroyed(x, z);
 
     // Broadcast to all OTHER clients so they remove the obstacle too
     this.room.broadcast(JSON.stringify({

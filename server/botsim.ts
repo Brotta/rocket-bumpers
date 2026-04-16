@@ -24,14 +24,177 @@ const ARENA_RADIUS = 60;
 const ARENA_SIDES = 8;
 const ARENA_APOTHEM = ARENA_RADIUS * Math.cos(Math.PI / ARENA_SIDES);
 
-const MAX_SPEED = 22;
-const ACCEL = 28;
+// Global tunables that don't vary per car. maxSpeed / accel / turnRate /
+// maxAngularVel are PER-CAR (see CAR_PHYSICS) so a RHINO bot can't outrun
+// a HORNET bot — the previous global MAX_SPEED=22 made every car identical
+// and let slow-class bots sprint at hornet speeds.
 const FRICTION = 0.985;
-const TURN_RATE = 3.2;
-const MAX_ANGULAR_VEL = 2.6;
 const RETARGET_MIN_MS = 900;
 const RETARGET_MAX_MS = 2400;
 const WANDER_JITTER = 0.25;
+
+// ── Per-car physics table (must mirror client Config.js STAT_MAP) ──
+//
+// Client formula: STAT_MAP.speed[s]    = 35 * s / 10  (stat 2-8 → 7..28)
+//                 STAT_MAP.handling[s] = 5.5 * s / 10 (stat 2-8 → 1.1..4.4)
+// Cars carry { speed, mass, handling } stats — we derive the bot kinematic
+// limits from those so a heavy slow class stays heavy and slow even when
+// piloted by a server-side bot.
+//
+// accel uses a fixed time-to-max ratio (≈0.78s, matching the previous
+// global tuning of MAX_SPEED=22 / ACCEL=28). Angular vel cap is a fraction
+// of turn rate so tight steering doesn't cause oscillation.
+
+const STAT_BASE_SPEED = 35;
+const STAT_BASE_HANDLING = 5.5;
+const TIME_TO_MAX_SPEED = 0.78;       // seconds — same feel as old ACCEL=28
+const ANGULAR_VEL_RATIO = 0.85;       // bot.maxAngularVel = bot.turnRate * this
+
+interface CarStats { speed: number; handling: number; }
+const CAR_STATS: Record<string, CarStats> = {
+  FANG:    { speed: 6, handling: 4 },
+  HORNET:  { speed: 7, handling: 6 },
+  RHINO:   { speed: 3, handling: 4 },
+  VIPER:   { speed: 8, handling: 4 },
+  TOAD:    { speed: 4, handling: 5 },
+  LYNX:    { speed: 5, handling: 6 },
+  MAMMOTH: { speed: 4, handling: 4 },
+  GHOST:   { speed: 6, handling: 6 },
+};
+
+interface CarPhysics {
+  maxSpeed: number;
+  accel: number;
+  turnRate: number;
+  maxAngularVel: number;
+}
+function _physicsFor(carType: string): CarPhysics {
+  const s = CAR_STATS[carType] ?? CAR_STATS.FANG;
+  const maxSpeed = STAT_BASE_SPEED * s.speed / 10;
+  const turnRate = STAT_BASE_HANDLING * s.handling / 10;
+  return {
+    maxSpeed,
+    accel: maxSpeed / TIME_TO_MAX_SPEED,
+    turnRate,
+    maxAngularVel: turnRate * ANGULAR_VEL_RATIO,
+  };
+}
+
+// ── Static obstacles (must mirror client Config.js ARENA.rockObstacles) ──
+//
+// Bots used to phase straight through pillars and boulders because the
+// server had no notion of them — only the octagonal arena boundary. Now
+// every bot is collided against this list each tick: penetration is pushed
+// out and any inward velocity component is reflected (with a slight loss).
+//
+// Obstacles can be destroyed by missiles/etc. The client broadcasts the
+// position via OBSTACLE_DESTROYED; the server finds the matching entry by
+// closest-point match and flips `destroyed = true` so subsequent bot ticks
+// no longer collide with a rubble pile that visually no longer exists.
+
+interface Obstacle {
+  posX: number;
+  posZ: number;
+  radius: number;
+  destroyed: boolean;
+}
+
+function _buildObstacles(): Obstacle[] {
+  const out: Obstacle[] = [];
+  // Pillars (5)
+  const pillars = [
+    { angle: 0.4, dist: 16, baseRadius: 1.8 },
+    { angle: 1.6, dist: 18, baseRadius: 2.0 },
+    { angle: 2.8, dist: 15, baseRadius: 1.6 },
+    { angle: 4.2, dist: 17, baseRadius: 1.9 },
+    { angle: 5.5, dist: 19, baseRadius: 1.7 },
+  ];
+  for (const p of pillars) {
+    out.push({
+      posX: Math.cos(p.angle) * p.dist,
+      posZ: Math.sin(p.angle) * p.dist,
+      radius: p.baseRadius,
+      destroyed: false,
+    });
+  }
+  // Boulders (12)
+  const boulders = [
+    { angle: 0.9, dist: 28, radius: 2.0 },
+    { angle: 1.2, dist: 40, radius: 1.5 },
+    { angle: 2.1, dist: 35, radius: 2.5 },
+    { angle: 2.6, dist: 22, radius: 1.8 },
+    { angle: 3.3, dist: 45, radius: 1.4 },
+    { angle: 3.8, dist: 30, radius: 2.2 },
+    { angle: 4.5, dist: 38, radius: 1.6 },
+    { angle: 5.0, dist: 25, radius: 2.0 },
+    { angle: 5.8, dist: 42, radius: 1.3 },
+    { angle: 0.1, dist: 50, radius: 1.7 },
+    { angle: 1.8, dist: 48, radius: 1.9 },
+    { angle: 3.0, dist: 52, radius: 1.5 },
+  ];
+  for (const b of boulders) {
+    out.push({
+      posX: Math.cos(b.angle) * b.dist,
+      posZ: Math.sin(b.angle) * b.dist,
+      radius: b.radius,
+      destroyed: false,
+    });
+  }
+  return out;
+}
+
+const OBSTACLES: Obstacle[] = _buildObstacles();
+// Approximate car XZ half-extent — matches sweepProjectileHit's carR=1.4 and
+// the client's CarBody box (1.0, 0.6, 0.6) horizontal footprint.
+const BOT_OBSTACLE_RADIUS = 1.4;
+
+/**
+ * Mark the obstacle nearest to (x, z) as destroyed, so bots stop colliding
+ * with it. Called from party.ts when ANY client reports OBSTACLE_DESTROYED
+ * — we authoritatively reconcile against the static layout. A 4u match
+ * radius is generous enough to absorb client-side jitter without ever
+ * matching the wrong neighbour (closest pair in the layout is ~6u apart).
+ */
+export function markObstacleDestroyed(x: number, z: number): void {
+  let bestIdx = -1;
+  let bestD2 = 16; // 4u squared
+  for (let i = 0; i < OBSTACLES.length; i++) {
+    const o = OBSTACLES[i];
+    if (o.destroyed) continue;
+    const dx = o.posX - x;
+    const dz = o.posZ - z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 < bestD2) { bestD2 = d2; bestIdx = i; }
+  }
+  if (bestIdx >= 0) OBSTACLES[bestIdx].destroyed = true;
+}
+
+function _resolveObstacleCollisions(bot: BotPhysicsState): void {
+  for (const o of OBSTACLES) {
+    if (o.destroyed) continue;
+    const dx = bot.posX - o.posX;
+    const dz = bot.posZ - o.posZ;
+    const r = BOT_OBSTACLE_RADIUS + o.radius;
+    const d2 = dx * dx + dz * dz;
+    if (d2 >= r * r) continue;
+    const d = Math.sqrt(d2) || 0.0001;
+    const nx = dx / d;
+    const nz = dz / d;
+    const pen = r - d;
+    bot.posX += nx * pen;
+    bot.posZ += nz * pen;
+    // Reflect any inward velocity component with mild restitution. We damp
+    // (×0.6) so a bot that hits a pillar at speed slows down rather than
+    // bouncing back at full energy — matches the stunned/scuffed feel a
+    // real player car gets from cannon-es contact resolution.
+    const vn = bot.velX * nx + bot.velZ * nz;
+    if (vn < 0) {
+      const k = -vn * 1.6;
+      bot.velX += nx * k;
+      bot.velZ += nz * k;
+    }
+  }
+}
 
 // Target-scoring weights (mirror client BotBrain proportions).
 const SCORE_HUMAN_BONUS = 30;
@@ -45,6 +208,12 @@ const REVENGE_WINDOW_MS = 8000; // match client _revengeTimer (~6-10s spread)
 export interface BotPhysicsState {
   botId: string;
   carType: string;
+  // Per-car kinematic limits (resolved at spawn from CAR_STATS table).
+  // RHINO bots stay slow, HORNET bots stay zippy, etc.
+  maxSpeed: number;
+  accel: number;
+  turnRate: number;
+  maxAngularVel: number;
   posX: number;
   posY: number;
   posZ: number;
@@ -102,9 +271,14 @@ export interface PlayerSnapshot {
 export function createBot(botId: string, carType: string, slotIndex: number): BotPhysicsState {
   const angle = (slotIndex / 8) * Math.PI * 2;
   const r = ARENA_APOTHEM * 0.7;
+  const phys = _physicsFor(carType);
   return {
     botId,
     carType,
+    maxSpeed: phys.maxSpeed,
+    accel: phys.accel,
+    turnRate: phys.turnRate,
+    maxAngularVel: phys.maxAngularVel,
     posX: Math.cos(angle) * r,
     posY: 0.6,
     posZ: Math.sin(angle) * r,
@@ -178,7 +352,7 @@ export function stepBot(
   // ~15% chance per step to lose target lock while glitched.
   if (glitched && bot.targetId && Math.random() < 0.15) bot.targetId = null;
 
-  const angularVel = Math.max(-MAX_ANGULAR_VEL, Math.min(MAX_ANGULAR_VEL, yawDiff * TURN_RATE));
+  const angularVel = Math.max(-bot.maxAngularVel, Math.min(bot.maxAngularVel, yawDiff * bot.turnRate));
   bot.yaw += angularVel * dt;
 
   // Throttle — aggressive bots push harder; glitched bots occasionally
@@ -189,17 +363,17 @@ export function stepBot(
     if (r < 0.12) throttle = 0;            // freeze
     else if (r < 0.20) throttle = -0.5;    // reverse burst (0.12 + 0.08)
   }
-  bot.velX += Math.cos(bot.yaw) * ACCEL * throttle * dt;
-  bot.velZ += Math.sin(bot.yaw) * ACCEL * throttle * dt;
+  bot.velX += Math.cos(bot.yaw) * bot.accel * throttle * dt;
+  bot.velZ += Math.sin(bot.yaw) * bot.accel * throttle * dt;
   bot.velX *= FRICTION;
   bot.velZ *= FRICTION;
   const sp = Math.hypot(bot.velX, bot.velZ);
-  if (sp > MAX_SPEED) {
-    const k = MAX_SPEED / sp;
+  if (sp > bot.maxSpeed) {
+    const k = bot.maxSpeed / sp;
     bot.velX *= k;
     bot.velZ *= k;
   }
-  bot.speed = Math.min(sp, MAX_SPEED);
+  bot.speed = Math.min(sp, bot.maxSpeed);
 
   // Integrate
   bot.posX += bot.velX * dt;
@@ -227,6 +401,10 @@ export function stepBot(
       bot.velZ -= maxNz * vn * 1.6;
     }
   }
+
+  // Pillars + boulders. Run AFTER arena clamp so we never push the bot back
+  // out through the perimeter wall when an obstacle sits flush against it.
+  _resolveObstacleCollisions(bot);
 }
 
 /**
