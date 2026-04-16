@@ -420,6 +420,18 @@ export class Game {
       this.scoreManager.registerPlayer(p.id, p.nickname);
     }
 
+    // Sync current pedestal state from the server. Without this step the
+    // client-side PowerUpManager (which suppresses its own respawn loop in
+    // multiplayer) stays empty until each pedestal happens to be picked up
+    // and respawn — a joining player would see NO boxes for ~8s + RNG.
+    if (Array.isArray(roomState.powerups)) {
+      for (const p of roomState.powerups) {
+        if (p.type) {
+          this.powerUpManager.onNetworkSpawn(p.id, p.type, p.position);
+        }
+      }
+    }
+
     // Sync initial scores from ROOM_STATE so leaderboard is correct immediately
     const initialScores = roomState.players.map(p => ({
       playerId: p.id,
@@ -975,19 +987,21 @@ export class Game {
       // Filter remote entries — they don't have the tire smoke wheel data
       this.tireSmokeFX.update(frameDt, this.carBodies.filter(cb => !cb._isRemote));
 
-      // Interpolate remote players (multiplayer) — pass unscaledFrameDt for
-      // visual smoothing so the mesh catches up to the interpolation target
-      // at wall-clock rate, not game-time rate (fixes BUG 1 — time-scale
-      // contamination of the visual smoothing layer during slowmo/hit-freeze).
-      if (this.remotePlayerManager) {
-        this.remotePlayerManager.interpolateAll(frameDt, alpha, this._lastUnscaledFrameDt || frameDt);
-      }
-
       // Stun visual FX (debris, stars, wobble, flash)
       this.stunFX.update(frameDt);
 
       // Collision impact VFX (sparks, emissive flash, screen flash, shockwave)
       this._updateImpactEffects(frameDt);
+    }
+
+    // Interpolate remote players — ALWAYS run, not gated by local isPlaying.
+    // Other players live on the server regardless of our local LOADING → PLAYING
+    // transition; if we gate this, remotes sit at their initial spawn mesh
+    // position (origin = center of map, inside the lava pool) until our own
+    // startPlaying() fires. With server-authoritative bots the arena is
+    // already alive the moment we connect — we need to render it immediately.
+    if (this.remotePlayerManager) {
+      this.remotePlayerManager.interpolateAll(frameDt, alpha, this._lastUnscaledFrameDt || frameDt);
     }
 
     // Update audio systems (listener position = camera, engine crossfade, voice priorities)

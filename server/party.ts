@@ -370,6 +370,22 @@ export default class RocketBumpersServer implements Party.Server {
   // ── Handlers ─────────────────────────────────────────────────────────
 
   _onPlayerJoin(data: any, sender: Party.Connection) {
+    // Defensive: if onStart somehow didn't populate pedestals (hibernation
+    // edge cases, hot-reload weirdness), lazily initialize them so the
+    // joining player doesn't see an empty arena.
+    if (this.powerups.size === 0) {
+      const positions = buildPedestalPositions();
+      for (let i = 0; i < PEDESTAL_COUNT; i++) {
+        const id = `pu_${i}`;
+        this.powerups.set(id, {
+          id,
+          type: randomPowerupType(),
+          position: positions[i],
+          respawnAt: null,
+        });
+      }
+    }
+
     const playerId = sender.id;
     const { nickname, carType } = data;
 
