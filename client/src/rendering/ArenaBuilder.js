@@ -614,7 +614,10 @@ export class ArenaBuilder {
       const tx = ex / elen, tz = ez / elen;
       const mR = Math.hypot(mx, mz);
       const nx = -mx / mR, nz = -mz / mR;
-      const yaw = Math.atan2(tz, tx);
+      // See PhysicsWorld._buildEdgeBarriers for the sign derivation —
+      // right-handed Y-up rotation needs atan2(-tz, tx) so the box
+      // width axis aligns with the tangent, not its Z-reflection.
+      const yaw = Math.atan2(-tz, tx);
 
       for (let segIdx = 0; segIdx < cfg.segmentsPerEdge; segIdx++) {
         const frac = (segIdx + 0.5) / cfg.segmentsPerEdge - 0.5;
@@ -714,7 +717,7 @@ export class ArenaBuilder {
     const tx = ex / elen, tz = ez / elen;
     const mR = Math.hypot(mx, mz);
     const nx = -mx / mR, nz = -mz / mR;
-    const yaw = Math.atan2(tz, tx);
+    const yaw = Math.atan2(-tz, tx);
     const cfg = ARENA.edgeBarriers;
     const frac = (segIdx + 0.5) / cfg.segmentsPerEdge - 0.5;
     const cx = mx + tx * elen * frac + nx * cfg.inset;

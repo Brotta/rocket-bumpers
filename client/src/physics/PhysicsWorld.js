@@ -245,7 +245,13 @@ export class PhysicsWorld {
       const tx = ex / elen, tz = ez / elen;     // unit tangent
       const mR = Math.hypot(mx, mz);
       const nx = -mx / mR, nz = -mz / mR;       // unit inward normal
-      const yaw = Math.atan2(tz, tx);            // body rotation around Y
+      // Three.js/CANNON right-handed Y-up: R_y(yaw) maps local X to
+      // (cos yaw, 0, -sin yaw). To align the box's width axis with the
+      // tangent (tx, tz) we need sin(yaw) = -tz, hence atan2(-tz, tx).
+      // Using atan2(tz, tx) produced 90° perpendicular orientation on
+      // the diagonal edges (1,3,5,7) — the axis-aligned edges looked
+      // fine only because a box is symmetric under a 180° Y rotation.
+      const yaw = Math.atan2(-tz, tx);
 
       for (let segIdx = 0; segIdx < cfg.segmentsPerEdge; segIdx++) {
         // Segment center along the edge, inset inward from the face line.
