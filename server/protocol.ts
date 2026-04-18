@@ -47,6 +47,15 @@ export const SRV = {
   SCORE_UPDATE: 'SCORE_UPDATE',
   ROOM_FULL: 'ROOM_FULL',
   OBSTACLE_DESTROYED: 'OBSTACLE_DESTROYED',
+  // Broadcast when a destructible edge barrier regenerates after its
+  // respawn delay. Payload: { edgeIdx, segIdx } — the client uses these
+  // indices to rebuild the matching physics body + visual.
+  BARRIER_RESPAWN: 'BARRIER_RESPAWN',
+  // Emitted when the server detects a bot-involved car-to-car collision.
+  // Drives comic impact VFX/SFX on clients — the client collision handler
+  // never fires for remote-vs-remote bodies, so without this broadcast a
+  // bot↔bot crash produces no sparks, screen flash or POW text.
+  CAR_IMPACT: 'CAR_IMPACT',
 } as const;
 
 // ── Shared game constants (must match client Config.js) ────────────────

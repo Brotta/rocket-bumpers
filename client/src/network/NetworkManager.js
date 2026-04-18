@@ -387,6 +387,10 @@ export class NetworkManager {
         this._emit('damageDealt', data);
         break;
 
+      case SRV.CAR_IMPACT:
+        this._emit('carImpact', data);
+        break;
+
       case SRV.PLAYER_ELIMINATED:
         this._emit('playerEliminated', data);
         break;
@@ -425,6 +429,9 @@ export class NetworkManager {
         break;
       case SRV.OBSTACLE_DESTROYED:
         this._emit('obstacleDestroyed', data);
+        break;
+      case SRV.BARRIER_RESPAWN:
+        this._emit('barrierRespawn', data);
         break;
     }
   }

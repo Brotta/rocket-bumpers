@@ -41,6 +41,8 @@ export const SRV = {
   SCORE_UPDATE: 'SCORE_UPDATE',
   ROOM_FULL: 'ROOM_FULL',
   OBSTACLE_DESTROYED: 'OBSTACLE_DESTROYED',
+  BARRIER_RESPAWN: 'BARRIER_RESPAWN',
+  CAR_IMPACT: 'CAR_IMPACT',
 };
 
 // ── Float16 encoding/decoding ──────────────────────────────────────────

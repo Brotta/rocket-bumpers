@@ -1171,6 +1171,8 @@ export class PowerUpManager {
     const px = ob.position.x, py = ob.position.y, pz = ob.position.z;
     const radius = ob._obstacleRadius || 1.5;
     const type = ob._obstacleType || 'boulder';
+    const edgeIdx = ob._barrierEdgeIdx;
+    const segIdx = ob._barrierSegIdx;
 
     this.world.removeBody(ob);
     this.obstacleBodies.splice(obstacleIndex, 1);
@@ -1181,17 +1183,23 @@ export class PowerUpManager {
         const gp = og.group.position;
         const dx = gp.x - px, dz = gp.z - pz;
         if (dx * dx + dz * dz < (radius + 1) ** 2) {
+          const usesShared = og.type === 'barrier'; // barriers reuse shared geo/mat pools
           this._spawnShatterVFX(og.group.position, type);
           this.scene.remove(og.group);
-          og.group.traverse((c) => {
-            if (c.isMesh) {
-              c.geometry?.dispose();
-              if (c.material) {
-                if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
-                else c.material.dispose();
+          if (!usesShared) {
+            og.group.traverse((c) => {
+              if (c.isMesh) {
+                c.geometry?.dispose();
+                if (c.material) {
+                  if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+                  else c.material.dispose();
+                }
               }
-            }
-          });
+            });
+          } else if (og.crackMat) {
+            // Per-segment crack material is cloned — safe to dispose
+            og.crackMat.dispose();
+          }
           this.obstacleGroups.splice(i, 1);
           break;
         }
@@ -1201,22 +1209,34 @@ export class PowerUpManager {
     if (this._networkManager?.isMultiplayer) {
       this._networkManager.sendObstacleDestroyed(px, py, pz);
     }
-    this._emit('obstacle-destroyed', { type, x: px, y: py, z: pz });
+    this._emit('obstacle-destroyed', {
+      type, x: px, y: py, z: pz, edgeIdx, segIdx,
+    });
   }
 
   /** Remote obstacle destruction — find and remove by position (no network re-send). */
-  onNetworkObstacleDestroyed(x, y, z) {
+  onNetworkObstacleDestroyed(x, _y, z) {
     if (!this.obstacleBodies) return;
-    for (let i = this.obstacleBodies.length - 1; i >= 0; i--) {
+    // Match on XZ only (obstacle Y varies by type — pillars sit high,
+    // boulders sit low, barriers mid-wall — so a 3D match radius would
+    // require per-type tuning or a much larger budget).
+    let bestIdx = -1;
+    let bestD2 = Infinity;
+    for (let i = 0; i < this.obstacleBodies.length; i++) {
       const ob = this.obstacleBodies[i];
       const dx = ob.position.x - x;
-      const dy = ob.position.y - y;
       const dz = ob.position.z - z;
-      if (dx * dx + dy * dy + dz * dz < 4) { // within 2 units
-        this._destroyObstacleLocal(i);
-        return;
+      const d2 = dx * dx + dz * dz;
+      // Barriers cluster more tightly at octagon corners (~3u apart) so
+      // use the tighter 2.5u threshold for them. Pillars/boulders are
+      // ≥6u apart, 3u is safe.
+      const maxD2 = ob._obstacleType === 'barrier' ? 6.25 : 9;
+      if (d2 < maxD2 && d2 < bestD2) {
+        bestD2 = d2;
+        bestIdx = i;
       }
     }
+    if (bestIdx >= 0) this._destroyObstacleLocal(bestIdx);
   }
 
   /** Destroy obstacle locally only (no network message). Used by onNetworkObstacleDestroyed. */
@@ -1235,17 +1255,23 @@ export class PowerUpManager {
         const gp = og.group.position;
         const dx = gp.x - px, dz = gp.z - pz;
         if (dx * dx + dz * dz < (radius + 1) ** 2) {
+          const usesShared = og.type === 'barrier'; // barriers reuse shared geo/mat pools
           this._spawnShatterVFX(og.group.position, type);
           this.scene.remove(og.group);
-          og.group.traverse((c) => {
-            if (c.isMesh) {
-              c.geometry?.dispose();
-              if (c.material) {
-                if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
-                else c.material.dispose();
+          if (!usesShared) {
+            og.group.traverse((c) => {
+              if (c.isMesh) {
+                c.geometry?.dispose();
+                if (c.material) {
+                  if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+                  else c.material.dispose();
+                }
               }
-            }
-          });
+            });
+          } else if (og.crackMat) {
+            // Per-segment crack material is cloned — safe to dispose
+            og.crackMat.dispose();
+          }
           this.obstacleGroups.splice(i, 1);
           break;
         }
@@ -1254,23 +1280,27 @@ export class PowerUpManager {
   }
 
   _spawnShatterVFX(pos, type) {
-    // Fewer chunks (8 for pillar, 6 for boulder — down from 20/14)
-    const count = type === 'pillar' ? 8 : 6;
-    const geo = type === 'pillar' ? _sharedGeo.shatterChunkLarge : _sharedGeo.shatterChunkSmall;
+    // Fewer chunks (10 for barrier, 8 for pillar, 6 for boulder)
+    const count = type === 'barrier' ? 10 : type === 'pillar' ? 8 : 6;
+    const geo = type === 'boulder' ? _sharedGeo.shatterChunkSmall : _sharedGeo.shatterChunkLarge;
     const chunks = [];
 
+    const ySpread = type === 'pillar' ? 3 : type === 'barrier' ? 1.6 : 1.2;
     for (let i = 0; i < count; i++) {
       const mesh = new THREE.Mesh(geo, _sharedMat.shatterRock);
       mesh.position.copy(pos);
-      mesh.position.y += Math.random() * (type === 'pillar' ? 3 : 1.2);
+      mesh.position.y += Math.random() * ySpread;
       this.scene.add(mesh);
 
       const angle = Math.random() * Math.PI * 2;
+      // Barriers shatter with more upward thrust (like a wall exploding)
+      const hSpeed = type === 'barrier' ? 4 + Math.random() * 6 : 3 + Math.random() * 5;
+      const vSpeed = type === 'barrier' ? 4 + Math.random() * 5 : 2 + Math.random() * 4;
       chunks.push({
         mesh,
-        vx: Math.cos(angle) * (3 + Math.random() * 5),
-        vy: 2 + Math.random() * 4,
-        vz: Math.sin(angle) * (3 + Math.random() * 5),
+        vx: Math.cos(angle) * hSpeed,
+        vy: vSpeed,
+        vz: Math.sin(angle) * hSpeed,
         spin: (Math.random() - 0.5) * 8,
         life: 0.8 + Math.random() * 0.3,
       });

@@ -3,8 +3,10 @@ import { MSG, SRV, BIN, GAME } from './protocol.js';
 import { calcDamage, getStreakMultiplier } from './damage.js';
 import {
   BotPhysicsState, PlayerSnapshot, createBot, stepBot, encodeBotEntry, shouldUsePowerup,
-  markObstacleDestroyed,
+  markObstacleDestroyed, markBarrierRespawned, getDestroyedObstacles,
+  BARRIER_RESPAWN_DELAY_MS, resetBotAiState,
 } from './botsim.js';
+import { ThinkCtx, IncomingProjectile, PedestalSample } from './botbrain.js';
 import {
   ServerProjectile, ServerTurret,
   spawnMissile, spawnHomingMissile, spawnTurret, spawnTurretBullet,
@@ -70,7 +72,43 @@ function getCarMass(carType: string): number {
 
 const PEDESTAL_COUNT = 6;
 const ARENA_RADIUS = 60; // diameter/2
+const ARENA_APOTHEM = ARENA_RADIUS * Math.cos(Math.PI / 8); // ~55.4
+// Must match client/src/core/Config.js ARENA.lava.radius and LAVA_DPS.
+const LAVA_RADIUS = 10;
+const LAVA_DPS = 20;
+const SPAWN_MAX_XZ = ARENA_APOTHEM * 0.9; // ~49.9: safely inside the arena
+const SPAWN_MIN_Y = 0.3;
+const SPAWN_MAX_Y = 1.5;
 const PEDESTAL_DIST = ARENA_RADIUS * 0.65;
+
+/**
+ * Clamp a client-supplied spawn tuple to sane arena-interior coordinates.
+ * Returns a safe fallback when the input is malformed. Never trusts NaN /
+ * Infinity / non-numeric / out-of-bounds values.
+ *
+ * The fallback is deliberately placed on an inner-ring at r=35 (outside the
+ * central lava pool, radius ~10) in a random direction — returning the
+ * origin would respawn the player INSIDE the lava, killing them the moment
+ * the 1.5s spawn invincibility wore off.
+ */
+function _validateSpawnPos(raw: unknown): [number, number, number] {
+  if (Array.isArray(raw) && raw.length === 3) {
+    const [x, y, z] = raw as unknown[];
+    if (typeof x === 'number' && typeof y === 'number' && typeof z === 'number'
+        && isFinite(x) && isFinite(y) && isFinite(z)) {
+      const cx = Math.max(-SPAWN_MAX_XZ, Math.min(SPAWN_MAX_XZ, x));
+      const cy = Math.max(SPAWN_MIN_Y, Math.min(SPAWN_MAX_Y, y));
+      const cz = Math.max(-SPAWN_MAX_XZ, Math.min(SPAWN_MAX_XZ, z));
+      // Also push the clamped pos outside the lava pool if a malicious
+      // client tried to jam everything into the center.
+      const r = Math.hypot(cx, cz);
+      if (r >= 12) return [cx, cy, cz];
+    }
+  }
+  // Malformed or in-lava fallback: random point on the r=35 ring.
+  const a = Math.random() * Math.PI * 2;
+  return [Math.cos(a) * 35, 0.6, Math.sin(a) * 35];
+}
 
 function buildPedestalPositions(): [number, number, number][] {
   const positions: [number, number, number][] = [];
@@ -102,6 +140,20 @@ function randomPowerupType(): string {
 }
 
 // ── Room ID sequencing (for matchmaking overflow) ─────────────────────
+
+/**
+ * Extract [posX, posY, posZ] from a raw PLAYER_STATE_BIN buffer. Returns
+ * null on a malformed buffer. Used for server-side proximity validation
+ * of client-supplied pos fields (e.g. GLITCH_BOMB AOE center).
+ */
+function _readEntityPos(buffer: ArrayBuffer): [number, number, number] | null {
+  if (buffer.byteLength < 22) return null;
+  const view = new DataView(buffer);
+  const idLen = view.getUint8(1);
+  if (buffer.byteLength < 2 + idLen + 19) return null;
+  const s = 2 + idLen + 1; // skip [msg][idLen][id][carType]
+  return [_readFloat16(view, s + 0), _readFloat16(view, s + 2), _readFloat16(view, s + 4)];
+}
 
 // Half-precision float read (little-endian, matches client protocol.js).
 function _readFloat16(view: DataView, offset: number): number {
@@ -149,8 +201,14 @@ export default class RocketBumpersServer implements Party.Server {
   // Keyed per-entity (not per-connection) so the host can send states for
   // multiple entities (local player + bots) in the same tick without them
   // being rate-limited away.
+  //
+  // Lowered from 8ms to 4ms (~250 Hz). A 60 Hz client with normal frame-
+  // time jitter occasionally bunches two sends <8ms apart; the old gate
+  // silently dropped the second one, starving the broadcast batch and
+  // producing observable stutter for third-party viewers. At 4ms we still
+  // reject rogue spammers but never drop well-behaved clients.
   _binaryRateLimit: Map<string, number> = new Map();
-  readonly BINARY_MIN_INTERVAL_MS = 8; // ~120 messages/sec max per entity (headroom for 60Hz sends)
+  readonly BINARY_MIN_INTERVAL_MS = 4;
 
   // Per-player obstacle damage cooldown: playerId → expiry timestamp
   obstacleDamageCooldowns: Map<string, number> = new Map();
@@ -160,12 +218,26 @@ export default class RocketBumpersServer implements Party.Server {
   // SHIELD / HOLO_EVADE timers (separate so they don't clobber spawn invincibility).
   shieldTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   holoEvadeTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  // Barrier respawn timers, keyed by "edgeIdx:segIdx" so we can clean up on
+  // room teardown and avoid leaking if the party is hibernated / restarted.
+  barrierRespawnTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
   // Interval IDs for cleanup
   _intervals: ReturnType<typeof setInterval>[] = [];
 
-  // Server tick: buffer latest binary state per entity, broadcast at 60Hz
-  _stateBuffers: Map<string, { buffer: ArrayBuffer; senderId: string }> = new Map();
+  // Latest known binary state per entity, source of truth for both outgoing
+  // tick broadcasts AND the per-tick bot AI snapshot. NEVER cleared between
+  // ticks — only removed on disconnect. Previously this Map was drained
+  // after each broadcast, which meant that any human who hadn't sent a
+  // state during the last 16 ms was entirely MISSING from both the next
+  // broadcast (→ remote clients saw an interpolation stall and snapped
+  // back to the next sample) AND from `aiSnapshots` (→ bots pretended the
+  // human didn't exist, producing visible target-twitch). Keeping the
+  // latest sample persistent fixes both issues at the cost of rebroadcasting
+  // an unchanged state on ticks where no new one arrived — harmless because
+  // the client interpolates in server-clock space, so the updated
+  // serverTime on the outer batch advances the bracket correctly.
+  _latestHumanStates: Map<string, { buffer: ArrayBuffer; senderId: string }> = new Map();
   readonly TICK_RATE_MS = 16; // ~60Hz — doubled from 30Hz for smooth interpolation
 
   // ── Server-side bot simulation (BUG 0 fix) ──
@@ -247,11 +319,21 @@ export default class RocketBumpersServer implements Party.Server {
     this.rateLimits.delete(playerId);
     this._binaryRateLimit.delete(playerId); // entity-keyed rate limit
     this.obstacleDamageCooldowns.delete(playerId);
-    this._stateBuffers.delete(playerId);
+    this._latestHumanStates.delete(playerId);
 
-    // Clean up pair cooldowns referencing this player so reconnect gets a clean slate
+    // Clean up pair cooldowns referencing this player so reconnect gets a
+    // clean slate. MUST match exactly on one side of the sorted-pair key —
+    // `key.includes(playerId)` would wipe unrelated pairs when ids share
+    // prefixes (e.g. disconnecting `bot_ACE` would also drop cooldowns
+    // involving `bot_ACE_2`, produced by the name-retry suffix in
+    // `_spawnBot`). We split on '|' — the delimiter intentionally doesn't
+    // appear in PartyKit connection IDs (which are UUIDs containing '-').
     for (const key of this.pairCooldowns.keys()) {
-      if (key.includes(playerId)) this.pairCooldowns.delete(key);
+      const sep = key.indexOf('|');
+      if (sep < 0) continue;
+      const a = key.slice(0, sep);
+      const b = key.slice(sep + 1);
+      if (a === playerId || b === playerId) this.pairCooldowns.delete(key);
     }
     const invTimer = this.invincibilityTimers.get(playerId);
     if (invTimer) { clearTimeout(invTimer); this.invincibilityTimers.delete(playerId); }
@@ -288,6 +370,29 @@ export default class RocketBumpersServer implements Party.Server {
 
   onError(conn: Party.Connection) {
     this.onClose(conn);
+  }
+
+  // PartyKit lifecycle: called on room shutdown / hibernation. Clears all
+  // in-flight timers so callbacks never fire against a dead room. Without
+  // this hook, `_intervals` (60Hz tick, powerup respawn, score broadcast,
+  // stale-player detection) and every `setTimeout` (invincibility, shield,
+  // holoEvade, bot respawn) keep their handles live, leaking memory across
+  // hibernate/wake cycles and occasionally mutating newly-constructed
+  // instances that share the same room id.
+  onStop() {
+    for (const h of this._intervals) clearInterval(h);
+    this._intervals = [];
+    for (const t of this.invincibilityTimers.values()) clearTimeout(t);
+    this.invincibilityTimers.clear();
+    for (const t of this.shieldTimers.values()) clearTimeout(t);
+    this.shieldTimers.clear();
+    for (const t of this.holoEvadeTimers.values()) clearTimeout(t);
+    this.holoEvadeTimers.clear();
+    for (const t of this.barrierRespawnTimers.values()) clearTimeout(t);
+    this.barrierRespawnTimers.clear();
+    // In-flight bot respawn setTimeouts aren't stored in a map — they close
+    // over `this` so, once fired, they'll no-op via the `botState` null
+    // check. Not a leak, but the callback still runs once: acceptable.
   }
 
   // ── Message routing ──────────────────────────────────────────────────
@@ -406,17 +511,15 @@ export default class RocketBumpersServer implements Party.Server {
       }
 
       if (removedBotId) {
-        // Remove the bot from server state
-        this.players.delete(removedBotId);
-        this._binaryRateLimit.delete(removedBotId);
-        const orderIdx = this.connectionOrder.indexOf(removedBotId);
-        if (orderIdx !== -1) this.connectionOrder.splice(orderIdx, 1);
-
-        // Tell all clients to remove this bot
-        this.room.broadcast(JSON.stringify({
-          type: SRV.PLAYER_LEFT,
-          id: removedBotId,
-        }));
+        // Full cleanup: _despawnBot handles _bots, players, timers, pair
+        // cooldowns, in-flight projectiles, and the PLAYER_LEFT broadcast.
+        // Previously this path only cleared `players` + `_binaryRateLimit`,
+        // leaking the `_bots` entry so `stepBot` kept iterating a ghost
+        // entity and any shield/invincibility/holoEvade timers fired later
+        // against a freshly-spawned bot that reused the same generated id.
+        this._despawnBot(removedBotId);
+        // Bots never enter connectionOrder (only _onPlayerJoin adds), so
+        // no splice is needed here.
       } else {
         // No bots to remove — room is genuinely full with humans
         const currentRoom = this.room.id;
@@ -483,6 +586,10 @@ export default class RocketBumpersServer implements Party.Server {
         type: p.type,
         position: p.position,
       })),
+      // Obstacles currently destroyed (barriers + rocks). Late joiners
+      // need this so their client doesn't render walls that other
+      // clients have already shattered.
+      destroyedObstacles: getDestroyedObstacles(),
     };
     sender.send(JSON.stringify(roomState));
 
@@ -511,7 +618,7 @@ export default class RocketBumpersServer implements Party.Server {
     if (entityId.startsWith('bot_')) return;
 
     // Buffer latest state — will be batch-broadcast at 30Hz tick
-    this._stateBuffers.set(entityId, { buffer: buffer.slice(0), senderId: sender.id });
+    this._latestHumanStates.set(entityId, { buffer: buffer.slice(0), senderId: sender.id });
 
     // Update server-side state for the entity
     // State layout: [0x01][idLen:1][entityId:N][carTypeIndex:1][...16 bytes float16...][flags:1][hp:1]
@@ -525,17 +632,12 @@ export default class RocketBumpersServer implements Party.Server {
   }
 
   _onCollision(data: any, sender: Party.Connection) {
-    // Host can send collisions on behalf of bots via attackerId field
-    let attackerId = sender.id;
-    if (sender.id === this.hostId && typeof data.attackerId === 'string'
-        && data.attackerId.startsWith('bot_') && data.attackerId.length <= 64) {
-      attackerId = data.attackerId;
-    }
-
-    // Only accept collision reports from the attacker's connection
-    // (prevent double damage when both clients report the same collision).
-    // Non-host senders can only report collisions where they are the attacker.
-    if (sender.id !== this.hostId && attackerId !== sender.id) return;
+    // Bots are server-simulated — reject any attempt to report a collision
+    // on their behalf. The server's own _detectBotCollisions sweep is the
+    // single authoritative source for bot-involved crashes. Leaving the
+    // host-relay branch open enabled double-damage during host migration.
+    const attackerId = sender.id;
+    if (attackerId.startsWith('bot_')) return;
 
     const { targetId, approachSpeed } = data;
 
@@ -560,10 +662,13 @@ export default class RocketBumpersServer implements Party.Server {
     // Speed plausibility check
     if (approachSpeed > GAME.MAX_VELOCITY * 1.5) return;
 
-    // Per-pair cooldown
+    // Per-pair cooldown. Delimiter '|' is deliberate: PartyKit connection
+    // IDs are UUIDs containing hyphens, so splitting a '-'-joined key with
+    // split('-') destructures into the wrong pieces and the cleanup loops
+    // in onClose / _despawnBot fail to match.
     const idA = attackerId < targetId ? attackerId : targetId;
     const idB = attackerId < targetId ? targetId : attackerId;
-    const pairKey = `${idA}-${idB}`;
+    const pairKey = `${idA}|${idB}`;
     const now = Date.now();
     const cooldownExpiry = this.pairCooldowns.get(pairKey) || 0;
     if (now < cooldownExpiry) return;
@@ -571,7 +676,37 @@ export default class RocketBumpersServer implements Party.Server {
 
     const damage = calcDamage(approachSpeed, attackerMass, victimMass, angleFactor);
     if (damage <= 0) return;
-    this._dealDamage(victim, damage, attacker, !!data.wasAbility);
+    const applied = this._dealDamage(victim, damage, attacker, !!data.wasAbility);
+
+    // Broadcast comic-impact FX so third-party clients (humans not involved)
+    // see sparks + POW text on bot-involved collisions. The attacking client
+    // already fires local FX via its own CollisionHandler; server-side
+    // broadcast closes the gap for observers. We skip pure human↔human
+    // collisions because BOTH endpoints fire local FX and no observer path
+    // currently exists for them anyway.
+    const attackerIsBot = attackerId.startsWith('bot_');
+    const victimIsBot = targetId.startsWith('bot_');
+    if (applied > 0 && (attackerIsBot || victimIsBot)) {
+      const tier = applied >= 30 ? 'devastating' : applied >= 15 ? 'heavy' : 'light';
+      const snaps = this._buildSnapshots();
+      const a = snaps.find(p => p.id === attackerId);
+      const v = snaps.find(p => p.id === targetId);
+      if (a && v) {
+        const midX = (a.posX + v.posX) * 0.5;
+        const midY = (a.posY + v.posY) * 0.5;
+        const midZ = (a.posZ + v.posZ) * 0.5;
+        const sx = a.posX - v.posX, sz = a.posZ - v.posZ;
+        const sd = Math.hypot(sx, sz) || 1;
+        this.room.broadcast(JSON.stringify({
+          type: SRV.CAR_IMPACT,
+          tier,
+          x: midX, y: midY, z: midZ,
+          nx: sx / sd, nz: sz / sd,
+          attackerId, victimId: targetId,
+          approachSpeed,
+        }));
+      }
+    }
   }
 
   _handleElimination(victim: PlayerData, killer: PlayerData | null) {
@@ -648,6 +783,8 @@ export default class RocketBumpersServer implements Party.Server {
       botState.glitchExpireAt = 0;
       botState.lastHitById = null;
       botState.revengeExpireAt = 0;
+      // Clear FSM/dodge/stuck/mistake timers so the bot starts fresh.
+      resetBotAiState(botState, Date.now());
 
       this.room.broadcast(JSON.stringify({
         type: SRV.PLAYER_RESPAWN,
@@ -659,12 +796,11 @@ export default class RocketBumpersServer implements Party.Server {
   }
 
   _onPlayerFell(data: any, sender: Party.Connection) {
-    // Host can send falls on behalf of bots via playerId field
-    let targetId = sender.id;
-    if (sender.id === this.hostId && typeof data.playerId === 'string'
-        && data.playerId.startsWith('bot_') && data.playerId.length <= 64) {
-      targetId = data.playerId;
-    }
+    // Bots fall into lava as part of server physics (octagon + lava
+    // detection runs server-side); a host can no longer report falls on
+    // their behalf. Only the sender's own player can be marked as fallen.
+    const targetId = sender.id;
+    if (targetId.startsWith('bot_')) return;
 
     const player = this.players.get(targetId);
     if (!player || player.isEliminated) return;
@@ -685,6 +821,11 @@ export default class RocketBumpersServer implements Party.Server {
 
   _onPickupPowerup(data: any, sender: Party.Connection) {
     const { powerupId } = data;
+    // Validate id shape before echoing it back in PICKUP_DENIED. A non-string
+    // or oversized value would otherwise flow through the denial payload
+    // unchanged, letting a malicious client stash arbitrary JSON that other
+    // tools (logs, other clients if we ever broadcast it) would echo.
+    if (typeof powerupId !== 'string' || powerupId.length === 0 || powerupId.length > 32) return;
     const pedestal = this.powerups.get(powerupId);
     if (!pedestal || !pedestal.type) {
       // Deny: pedestal empty or doesn't exist
@@ -712,9 +853,34 @@ export default class RocketBumpersServer implements Party.Server {
     const player = this.players.get(sender.id);
     if (!player || player.isEliminated) return;
     if (typeof data.powerupType !== 'string' || data.powerupType.length > 32) return;
-    const pos = Array.isArray(data.pos) && data.pos.length === 3
+    let pos = Array.isArray(data.pos) && data.pos.length === 3
       && data.pos.every((v: any) => typeof v === 'number' && isFinite(v))
-      ? data.pos : null;
+      ? data.pos as [number, number, number] : null;
+    // Clamp pos to within ~4u of the player's last known server-side
+    // position. A malicious client could otherwise set pos to anywhere on
+    // the map and glitch-bomb distant bots from across the arena. If we
+    // don't have a recent state buffer for them, drop pos entirely.
+    if (pos) {
+      const senderState = this._latestHumanStates.get(sender.id);
+      if (!senderState) {
+        pos = null;
+      } else {
+        const sPos = _readEntityPos(senderState.buffer);
+        if (!sPos) {
+          pos = null;
+        } else {
+          const MAX_POS_DRIFT = 4;
+          const dx = pos[0] - sPos[0];
+          const dz = pos[2] - sPos[2];
+          if (Math.hypot(dx, dz) > MAX_POS_DRIFT) {
+            // Snap to the player's authoritative position rather than drop —
+            // the powerup would otherwise no-op for a legitimate user whose
+            // state lagged a tick.
+            pos = [sPos[0], pos[1], sPos[2]];
+          }
+        }
+      }
+    }
 
     // Track defensive state so server-computed damage paths honor the
     // player's protection. Durations match client PowerUpManager:
@@ -788,12 +954,11 @@ export default class RocketBumpersServer implements Party.Server {
   }
 
   _onPowerupDamage(data: any, sender: Party.Connection) {
-    // Host can send power-up damage on behalf of bots
-    let attackerId = sender.id;
-    if (sender.id === this.hostId && typeof data.attackerId === 'string'
-        && data.attackerId.startsWith('bot_') && data.attackerId.length <= 64) {
-      attackerId = data.attackerId;
-    }
+    // Bot-fired projectiles are server-simulated (see projectilesim.ts) —
+    // reject any client attempt to report damage on their behalf. Only the
+    // original attacker (always a human in this path) can report its hit.
+    const attackerId = sender.id;
+    if (attackerId.startsWith('bot_')) return;
     const attacker = this.players.get(attackerId);
     if (!attacker || attacker.isEliminated) return;
 
@@ -810,12 +975,11 @@ export default class RocketBumpersServer implements Party.Server {
   }
 
   _onEnvDamage(data: any, sender: Party.Connection) {
-    // Host can send env damage on behalf of bots via playerId field
-    let targetId = sender.id;
-    if (sender.id === this.hostId && typeof data.playerId === 'string'
-        && data.playerId.startsWith('bot_') && data.playerId.length <= 64) {
-      targetId = data.playerId;
-    }
+    // Env damage (lava tick damage) is self-reported by the victim. Bots
+    // take env damage from server-side lava detection — not from client
+    // relay — so reject any bot_* target.
+    const targetId = sender.id;
+    if (targetId.startsWith('bot_')) return;
 
     const player = this.players.get(targetId);
     if (!player || player.isEliminated || player.isInvincible) return;
@@ -835,22 +999,52 @@ export default class RocketBumpersServer implements Party.Server {
   _onObstacleDestroyed(data: any, sender: Party.Connection) {
     const player = this.players.get(sender.id);
     if (!player) return;
+    // Respawning / eliminated players cannot destroy obstacles.
+    if (player.isEliminated) return;
 
     const { x, y, z } = data;
     if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return;
     if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return;
+    // Bounds check — pillars/boulders live 15-52u out, edge barriers sit
+    // along the octagon rim (max ~57.3u). Float16 encoding can round
+    // positions by ~0.3u in this range, so allow +3u headroom to avoid
+    // rejecting legitimate destroy broadcasts at the far segments.
+    const r = Math.hypot(x, z);
+    if (r < 10 || r > ARENA_APOTHEM + 3) return;
 
-    // Reconcile the server's bot-collision obstacle list. Without this
-    // step, server-side bots keep colliding with rubble that no longer
-    // exists for any client (humans destroy a pillar, then watch a bot
-    // bounce off the empty air where it used to be).
-    markObstacleDestroyed(x, z);
+    // Reconcile the server's bot-collision obstacle list and capture
+    // the matched entry (so we know if we need to schedule a respawn
+    // for barrier-type obstacles).
+    const matched = markObstacleDestroyed(x, z);
 
     // Broadcast to all OTHER clients so they remove the obstacle too
     this.room.broadcast(JSON.stringify({
       type: SRV.OBSTACLE_DESTROYED,
       x, y, z,
     }), [sender.id]);
+
+    // Barriers regenerate on a server-authoritative timer. Pillars and
+    // boulders stay destroyed for the remainder of the session.
+    if (matched?.isBarrier && matched.edgeIdx != null && matched.segIdx != null) {
+      this._scheduleBarrierRespawn(matched.edgeIdx, matched.segIdx, matched.x, matched.z);
+    }
+  }
+
+  _scheduleBarrierRespawn(edgeIdx: number, segIdx: number, x: number, z: number) {
+    const key = `${edgeIdx}:${segIdx}`;
+    // Cancel any existing timer for this segment (shouldn't happen in
+    // normal flow, but defensive in case of duplicate broadcasts).
+    const prev = this.barrierRespawnTimers.get(key);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      this.barrierRespawnTimers.delete(key);
+      if (!markBarrierRespawned(edgeIdx, segIdx)) return;
+      this.room.broadcast(JSON.stringify({
+        type: SRV.BARRIER_RESPAWN,
+        edgeIdx, segIdx, x, z,
+      }));
+    }, BARRIER_RESPAWN_DELAY_MS);
+    this.barrierRespawnTimers.set(key, timer);
   }
 
   _onChangeCar(data: any, sender: Party.Connection) {
@@ -880,11 +1074,18 @@ export default class RocketBumpersServer implements Party.Server {
       player.mass = getCarMass(player.carType);
     }
 
+    // Validate + clamp pos. The client previously had full control over the
+    // broadcast respawn location, letting any ill-behaved build spawn
+    // through walls, outside the arena, or at NaN. If the payload is
+    // malformed we fall back to a safe inner-ring position. X/Z clamped to
+    // 90% of the apothem; Y clamped to driving height range.
+    const safePos = _validateSpawnPos(data?.pos);
+
     this.room.broadcast(JSON.stringify({
       type: SRV.PLAYER_RESPAWN,
       playerId: sender.id,
       carType: player.carType,
-      pos: data.pos,
+      pos: safePos,
     }));
 
     // Clear invincibility after 1.5s (cancel previous if any)
@@ -955,13 +1156,24 @@ export default class RocketBumpersServer implements Party.Server {
       botEntries.push(encodeBotEntry(bot, player.hp, flags));
     }
 
-    if (this._stateBuffers.size === 0 && botEntries.length === 0) return;
+    // Filter eliminated humans out of the broadcast. Previously the per-tick
+    // _stateBuffers.clear() hid this problem — now that state persists across
+    // ticks, an eliminated human would keep "ghosting" on other clients'
+    // screens and feed homing missiles a stale target.
+    const liveHumanEntries: ArrayBuffer[] = [];
+    for (const [entityId, { buffer }] of this._latestHumanStates) {
+      const p = this.players.get(entityId);
+      if (!p || p.isEliminated) continue;
+      liveHumanEntries.push(buffer);
+    }
+
+    if (liveHumanEntries.length === 0 && botEntries.length === 0) return;
     if (this.players.size === 0) return;
 
     // Compute total payload size. Human entries: skip leading 0x01 (1 byte).
     // Bot entries: already in batch-entry format (no leading msgType).
     let payloadBytes = 0;
-    for (const [, { buffer }] of this._stateBuffers) {
+    for (const buffer of liveHumanEntries) {
       payloadBytes += buffer.byteLength - 1;
     }
     for (const e of botEntries) payloadBytes += e.byteLength;
@@ -976,10 +1188,10 @@ export default class RocketBumpersServer implements Party.Server {
     // Client reads absolute value and only uses deltas, so rollover only matters
     // if a single session spans >24 days — not a concern here.
     outView.setUint32(1, Date.now() >>> 0, true);
-    outView.setUint8(5, this._stateBuffers.size + botEntries.length);
+    outView.setUint8(5, liveHumanEntries.length + botEntries.length);
 
     let cursor = headerBytes;
-    for (const [, { buffer }] of this._stateBuffers) {
+    for (const buffer of liveHumanEntries) {
       const entryLen = buffer.byteLength - 1;
       outArr.set(new Uint8Array(buffer, 1, entryLen), cursor);
       cursor += entryLen;
@@ -991,8 +1203,13 @@ export default class RocketBumpersServer implements Party.Server {
 
     // Single broadcast to everyone. Each client filters out its own state
     // by playerId in _handleBinaryMessage (already does this).
+    //
+    // Do NOT clear _latestHumanStates here — entries persist until disconnect
+    // so that a tick which arrives before any human send during that window
+    // still broadcasts the previous-known state (keeping remote interpolation
+    // smooth) and still feeds the bot AI snapshot (keeping aim/collision
+    // detection stable). Entries are removed in onClose/onError.
     this.room.broadcast(out);
-    this._stateBuffers.clear();
   }
 
   // ── Server-side bot simulation (BUG 0 fix) ──────────────────────────
@@ -1017,10 +1234,29 @@ export default class RocketBumpersServer implements Party.Server {
     // pre-step target.posX, producing false positives + false negatives.
     const aiSnapshots = this._buildSnapshots();
     const hunterCounts = new Map<string, number>();
+    // Think context built once per tick and reused across bots. Structural
+    // compatibility with ServerProjectile/PowerupPedestal shapes keeps this
+    // zero-copy except for the pedestal projection (position tuple → XZ).
+    const projectiles: IncomingProjectile[] = this._botProjectiles;
+    const pedestals: PedestalSample[] = [];
+    for (const [id, pu] of this.powerups) {
+      if (!pu.type) continue;
+      pedestals.push({ id, type: pu.type, posX: pu.position[0], posZ: pu.position[2] });
+    }
+    const hpLookup = (id: string) => this.players.get(id)?.hp ?? 0;
+    const ctx: ThinkCtx = {
+      players: aiSnapshots,
+      hpLookup,
+      maxHp: GAME.MAX_HP,
+      hunterCounts,
+      projectiles,
+      pedestals,
+      now,
+    };
     for (const [, bot] of this._bots) {
       const player = this.players.get(bot.botId);
       if (!player || player.isEliminated) continue;
-      stepBot(bot, dt, aiSnapshots, now, hunterCounts);
+      stepBot(bot, dt, aiSnapshots, now, hunterCounts, ctx);
       player.lastStateTime = now;
     }
 
@@ -1030,6 +1266,12 @@ export default class RocketBumpersServer implements Party.Server {
     // target converge into a stack and just sit there because nothing
     // pushes them apart.
     this._resolveBotPhysicalCollisions(aiSnapshots);
+
+    // Lava damage-over-time for bots sitting in the central pool. We do this
+    // server-side because bots are no longer client-simulated — without this
+    // pass bots would happily drive into lava and never die (the old host-
+    // relay path via _onEnvDamage is rejected now that bots are server-owned).
+    this._applyBotLavaDamage(dt, now);
 
     // Now build a fresh snapshot reflecting POST-step + POST-separation
     // positions. Every downstream collision/damage/pickup decision uses
@@ -1050,6 +1292,34 @@ export default class RocketBumpersServer implements Party.Server {
     // moved out of the way on their own client genuinely dodges.
     this._stepBotProjectiles(dt, snapshots, now);
     this._stepBotTurrets(dt, snapshots, now);
+  }
+
+  /**
+   * Per-tick lava damage for bots. Applies LAVA_DPS*dt damage while the bot
+   * is within LAVA_RADIUS of the arena center and not invincible. Routes
+   * through _dealDamage so the elimination + PLAYER_ELIMINATED broadcast
+   * path fires exactly as it would for a human fall.
+   *
+   * Attribution: if the bot was hit recently we credit whoever last hit it
+   * (same 3s attribution window humans enjoy via _onPlayerFell). Otherwise
+   * pure environmental damage with no attacker.
+   */
+  _applyBotLavaDamage(dt: number, now: number) {
+    const r2 = LAVA_RADIUS * LAVA_RADIUS;
+    const dmg = LAVA_DPS * dt;
+    if (dmg <= 0) return;
+    for (const [botId, bot] of this._bots) {
+      const player = this.players.get(botId);
+      if (!player || player.isEliminated || player.isInvincible) continue;
+      if (bot.posX * bot.posX + bot.posZ * bot.posZ > r2) continue;
+      let attacker: PlayerData | null = null;
+      if (bot.lastHitById && now < bot.revengeExpireAt
+          && (now - (bot.revengeExpireAt - 8000)) < GAME.KO_ATTRIBUTION_WINDOW_MS) {
+        const a = this.players.get(bot.lastHitById);
+        if (a && !a.isEliminated) attacker = a;
+      }
+      this._dealDamage(player, dmg, attacker, false);
+    }
   }
 
   // ── Bot↔* physical separation ────────────────────────────────────────
@@ -1150,7 +1420,7 @@ export default class RocketBumpersServer implements Party.Server {
       });
     }
     const decoder = new TextDecoder();
-    for (const [, { buffer }] of this._stateBuffers) {
+    for (const [, { buffer }] of this._latestHumanStates) {
       const view = new DataView(buffer);
       const idLen = view.getUint8(1);
       const id = decoder.decode(new Uint8Array(buffer, 2, idLen));
@@ -1223,14 +1493,21 @@ export default class RocketBumpersServer implements Party.Server {
         const approachSpeed = (bot.velX - target.velX) * dxn + (bot.velZ - target.velZ) * dzn;
         if (approachSpeed < this._BOT_MIN_APPROACH) continue;
 
-        // Attacker = whoever is moving INTO the other faster. Bot's closing
-        // speed toward target = bot.vel · n. Target's closing speed toward
-        // bot = -(target.vel · n) (target's "approach direction" is -n).
-        // The previous version had this inverted as well — even when damage
-        // (rarely) fired, attacker/victim attribution was flipped.
+        // Attacker = whoever contributed MORE to the approach. Previously we
+        // used `botClose >= targetClose`, which awarded the tie-break to the
+        // bot and mis-attributed scenarios where the approach is almost
+        // entirely driven by the human (e.g. human charges a near-stationary
+        // bot → botClose ≈ 0, targetClose large positive; bot wins only when
+        // it actually contributes more). We now also guarantee that a bot
+        // moving AWAY (`botClose <= 0`) is never credited as attacker —
+        // that case previously slipped through when targetClose was also
+        // negative (both moving in the same direction, bot just losing
+        // ground while reversing), which sometimes produced hits that were
+        // blamed on the fleeing bot.
         const botClose = bot.velX * dxn + bot.velZ * dzn;
         const targetClose = -(target.velX * dxn + target.velZ * dzn);
-        const botIsAttacker = botClose >= targetClose;
+        const ATTRIB_EPS = 0.5; // u/s margin to call it — avoids tie-based coin flips
+        const botIsAttacker = botClose > 0 && botClose > targetClose + ATTRIB_EPS;
 
         const attacker = botIsAttacker ? botPlayer : this.players.get(target.id);
         const victim   = botIsAttacker ? this.players.get(target.id) : botPlayer;
@@ -1240,7 +1517,7 @@ export default class RocketBumpersServer implements Party.Server {
         // Pair cooldown (shared with human-reported collisions).
         const idA = attacker.id < victim.id ? attacker.id : victim.id;
         const idB = attacker.id < victim.id ? victim.id : attacker.id;
-        const key = `${idA}-${idB}`;
+        const key = `${idA}|${idB}`;
         if ((this.pairCooldowns.get(key) || 0) > now) continue;
         this.pairCooldowns.set(key, now + GAME.PAIR_COOLDOWN_MS);
 
@@ -1251,7 +1528,27 @@ export default class RocketBumpersServer implements Party.Server {
         const cosAngle = relVelMag > 0.01 ? Math.max(0, approachSpeed / relVelMag) : 1.0;
         const angleFactor = GAME.ANGLE_MIN + (GAME.ANGLE_MAX - GAME.ANGLE_MIN) * cosAngle;
 
-        this._applyPvpDamage(attacker, victim, approachSpeed, angleFactor, false);
+        const dmg = this._applyPvpDamage(attacker, victim, approachSpeed, angleFactor, false);
+
+        // Broadcast comic impact so clients render sparks + POW text even
+        // when both cars are remote bots (CollisionHandler only fires for
+        // bodies in the local physics world, so bot↔bot crashes are
+        // otherwise silent visually).
+        if (dmg > 0) {
+          const tier = dmg >= 30 ? 'devastating' : dmg >= 15 ? 'heavy' : 'light';
+          const midX = (bot.posX + target.posX) * 0.5;
+          const midY = (bot.posY + target.posY) * 0.5;
+          const midZ = (bot.posZ + target.posZ) * 0.5;
+          this.room.broadcast(JSON.stringify({
+            type: SRV.CAR_IMPACT,
+            tier,
+            x: midX, y: midY, z: midZ,
+            nx: dxn, nz: dzn,
+            attackerId: attacker.id,
+            victimId: victim.id,
+            approachSpeed,
+          }));
+        }
       }
     }
   }
@@ -1266,11 +1563,11 @@ export default class RocketBumpersServer implements Party.Server {
     approachSpeed: number,
     angleFactor: number,
     wasAbility: boolean,
-  ) {
-    if (approachSpeed > GAME.MAX_VELOCITY * 1.5) return;
+  ): number {
+    if (approachSpeed > GAME.MAX_VELOCITY * 1.5) return 0;
     const damage = calcDamage(approachSpeed, attacker.mass, victim.mass, angleFactor);
-    if (damage <= 0) return;
-    this._dealDamage(victim, damage, attacker, wasAbility);
+    if (damage <= 0) return 0;
+    return this._dealDamage(victim, damage, attacker, wasAbility);
   }
 
   /**
@@ -1366,10 +1663,10 @@ export default class RocketBumpersServer implements Party.Server {
           if (Math.hypot(dx, dz) > this._BOT_PICKUP_RADIUS) continue;
 
           bot.heldPowerup = pedestal.type;
-          // Reaction delay scales inversely with aggression: aggressive
-          // bots react quickly (~350ms), cautious ones take their time (~900ms).
-          const reaction = 900 - Math.floor(bot.aggression * 550);
-          bot.powerupUseEarliest = now + reaction;
+          // Reaction delay driven by personality: Hothead 100ms, Survivor 280ms.
+          // Clamped so humans can't juke bots by spamming within the window.
+          const reactionSec = Math.min(0.35, bot.p.reactionDelay);
+          bot.powerupUseEarliest = now + Math.floor(reactionSec * 1000);
           const type = pedestal.type;
           pedestal.type = null;
           pedestal.respawnAt = now + GAME.POWERUP_RESPAWN_MS;
@@ -1607,6 +1904,31 @@ export default class RocketBumpersServer implements Party.Server {
     this._bots.delete(botId);
     this.players.delete(botId);
     this._binaryRateLimit.delete(botId);
+    this._latestHumanStates.delete(botId); // defensive — bots shouldn't be here
+    // Clear any pending timers so a stale callback doesn't fire later and
+    // mutate a freshly-spawned bot that reuses the id (name rerolls in
+    // _spawnBot can produce the same id across rebalances).
+    const inv = this.invincibilityTimers.get(botId);
+    if (inv) { clearTimeout(inv); this.invincibilityTimers.delete(botId); }
+    const sh = this.shieldTimers.get(botId);
+    if (sh) { clearTimeout(sh); this.shieldTimers.delete(botId); }
+    const he = this.holoEvadeTimers.get(botId);
+    if (he) { clearTimeout(he); this.holoEvadeTimers.delete(botId); }
+    // Clear pair cooldowns exactly matching this bot (sorted-pair keys
+    // "<idA>|<idB>") — substring-match would wipe unrelated pairs whose IDs
+    // happen to contain botId as a prefix (e.g. bot_NOVA vs bot_NOVA_2).
+    // Must use '|' delimiter to survive UUID-bearing human IDs.
+    for (const key of this.pairCooldowns.keys()) {
+      const sep = key.indexOf('|');
+      if (sep < 0) continue;
+      const a = key.slice(0, sep);
+      const b = key.slice(sep + 1);
+      if (a === botId || b === botId) this.pairCooldowns.delete(key);
+    }
+    // Remove any in-flight server-simulated projectiles/turrets owned by
+    // this bot so they don't outlive the despawn.
+    this._botProjectiles = this._botProjectiles.filter(p => p.attackerId !== botId);
+    this._botTurrets = this._botTurrets.filter(t => t.attackerId !== botId);
     this.room.broadcast(JSON.stringify({
       type: SRV.PLAYER_LEFT,
       id: botId,

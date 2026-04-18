@@ -2,23 +2,31 @@
  * Server-side bot simulator — owns bot AI + physics so pacing is decoupled
  * from any client's render loop (fixes BUG 0 jitter propagation).
  *
- * Physics is a simplified kinematic model (no wheel forces / suspension /
- * drift). Bots drive like smart hovers, not fully-simulated cars — acceptable
- * for arena combat since bot↔human physical collisions are detected both
- * server-side (here) and client-side (for human attacker), converging on the
- * same damage outcome via shared pair cooldowns.
+ * Since the human-feel refactor this file is a thin physics/orchestration
+ * layer: the interesting AI decisions (state machine, personality, dodge,
+ * flanking, stuck recovery) live in botbrain.ts. stepBot() runs three phases
+ * per tick:
+ *   1. sense()      — perception: hit, stuck, edge, dodge, threat.
+ *   2. maybeThink() — FSM transitions + cached desiredYaw/desiredThrottle
+ *                     (only every 150-260ms per bot, personality-scaled).
+ *   3. act          — steering/throttle integration using cached intents
+ *                     plus per-tick human-feel perturbations.
  *
  * Target selection mirrors the original client BotBrain:
  *   - Humans are preferred (large bonus).
  *   - Low-HP targets attract predators (+bonus).
  *   - Anti-gangup: targets already hunted by many bots are deprioritised.
- *   - Bots DO attack each other when no humans are nearby or when a bot has
- *     already accumulated too many hunters — matches the original semantics.
+ *   - Revenge: whoever last hit us is a strong pull (scaled by personality).
  *
  * Power-up use is situational, not timer-random: bots only fire a missile
  * when the target is actually in front of them and within range, only pop
  * SHIELD/HOLO_EVADE under threat, only heal when they took damage, etc.
  */
+
+import {
+  assignPersonality, sense, maybeThink, applyHumanFeel,
+  type BotState, type PersonalityParams, type ThinkCtx,
+} from './botbrain.js';
 
 const ARENA_RADIUS = 60;
 const ARENA_SIDES = 8;
@@ -106,7 +114,20 @@ interface Obstacle {
   posZ: number;
   radius: number;
   destroyed: boolean;
+  // Barrier-only metadata. `isBarrier` gates respawn + bounds handling.
+  isBarrier?: boolean;
+  edgeIdx?: number;
+  segIdx?: number;
 }
+
+// Mirror of client/src/core/Config.js ARENA.edgeBarriers. Kept inline
+// so the server doesn't depend on client source at runtime.
+const ARENA_R = 60;
+const BARRIER_SEGMENTS_PER_EDGE = 3;
+const BARRIER_WIDTH = 3.8;
+const BARRIER_THICKNESS = 0.55;
+const BARRIER_INSET = 0.25;
+export const BARRIER_RESPAWN_DELAY_MS = 22_000;
 
 function _buildObstacles(): Obstacle[] {
   const out: Obstacle[] = [];
@@ -149,6 +170,38 @@ function _buildObstacles(): Obstacle[] {
       destroyed: false,
     });
   }
+  // Edge barriers — 8 sides × 3 segments. Approximated as circles
+  // for bot collision since the server doesn't need pixel-perfect
+  // rotated-box tests (bots are already fence-clamped a bit inside
+  // the arena apothem).
+  const sides = 8;
+  for (let edgeIdx = 0; edgeIdx < sides; edgeIdx++) {
+    const a0 = (edgeIdx / sides) * Math.PI * 2 - Math.PI / 8;
+    const a1 = ((edgeIdx + 1) / sides) * Math.PI * 2 - Math.PI / 8;
+    const p1x = Math.cos(a0) * ARENA_R, p1z = Math.sin(a0) * ARENA_R;
+    const p2x = Math.cos(a1) * ARENA_R, p2z = Math.sin(a1) * ARENA_R;
+    const mx = (p1x + p2x) / 2, mz = (p1z + p2z) / 2;
+    const ex = p2x - p1x, ez = p2z - p1z;
+    const elen = Math.hypot(ex, ez);
+    const tx = ex / elen, tz = ez / elen;
+    const mR = Math.hypot(mx, mz);
+    const nx = -mx / mR, nz = -mz / mR;
+    const barrierRadius = Math.max(BARRIER_WIDTH / 2, BARRIER_THICKNESS / 2) + 0.3;
+    for (let segIdx = 0; segIdx < BARRIER_SEGMENTS_PER_EDGE; segIdx++) {
+      const frac = (segIdx + 0.5) / BARRIER_SEGMENTS_PER_EDGE - 0.5;
+      const cx = mx + tx * elen * frac + nx * BARRIER_INSET;
+      const cz = mz + tz * elen * frac + nz * BARRIER_INSET;
+      out.push({
+        posX: cx,
+        posZ: cz,
+        radius: barrierRadius,
+        destroyed: false,
+        isBarrier: true,
+        edgeIdx,
+        segIdx,
+      });
+    }
+  }
   return out;
 }
 
@@ -160,22 +213,62 @@ const BOT_OBSTACLE_RADIUS = 1.4;
 /**
  * Mark the obstacle nearest to (x, z) as destroyed, so bots stop colliding
  * with it. Called from party.ts when ANY client reports OBSTACLE_DESTROYED
- * — we authoritatively reconcile against the static layout. A 4u match
- * radius is generous enough to absorb client-side jitter without ever
- * matching the wrong neighbour (closest pair in the layout is ~6u apart).
+ * — we authoritatively reconcile against the static layout. Barriers use
+ * a tighter match (2.5u) because adjacent-edge segments cluster near the
+ * octagon vertices; pillars/boulders keep the looser 4u radius.
+ *
+ * Returns the matched entry metadata so the caller can schedule a
+ * respawn for barriers, or null if no match was found.
  */
-export function markObstacleDestroyed(x: number, z: number): void {
+export function markObstacleDestroyed(x: number, z: number):
+  { isBarrier: boolean; edgeIdx?: number; segIdx?: number; x: number; z: number } | null {
   let bestIdx = -1;
-  let bestD2 = 16; // 4u squared
+  let bestD2 = 16; // 4u squared — default match
   for (let i = 0; i < OBSTACLES.length; i++) {
     const o = OBSTACLES[i];
     if (o.destroyed) continue;
+    const maxD2 = o.isBarrier ? 6.25 : 16; // barriers: 2.5u, others: 4u
     const dx = o.posX - x;
     const dz = o.posZ - z;
     const d2 = dx * dx + dz * dz;
-    if (d2 < bestD2) { bestD2 = d2; bestIdx = i; }
+    if (d2 < maxD2 && d2 < bestD2) { bestD2 = d2; bestIdx = i; }
   }
-  if (bestIdx >= 0) OBSTACLES[bestIdx].destroyed = true;
+  if (bestIdx < 0) return null;
+  const o = OBSTACLES[bestIdx];
+  o.destroyed = true;
+  return {
+    isBarrier: !!o.isBarrier,
+    edgeIdx: o.edgeIdx,
+    segIdx: o.segIdx,
+    x: o.posX,
+    z: o.posZ,
+  };
+}
+
+/** Flip a barrier back to alive after its respawn timer elapses. */
+export function markBarrierRespawned(edgeIdx: number, segIdx: number): boolean {
+  for (const o of OBSTACLES) {
+    if (o.isBarrier && o.edgeIdx === edgeIdx && o.segIdx === segIdx && o.destroyed) {
+      o.destroyed = false;
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Snapshot of currently-destroyed obstacles (for ROOM_STATE to late-joiners). */
+export function getDestroyedObstacles(): Array<{ x: number; z: number; isBarrier: boolean; edgeIdx?: number; segIdx?: number }> {
+  const out: Array<{ x: number; z: number; isBarrier: boolean; edgeIdx?: number; segIdx?: number }> = [];
+  for (const o of OBSTACLES) {
+    if (!o.destroyed) continue;
+    out.push({
+      x: o.posX, z: o.posZ,
+      isBarrier: !!o.isBarrier,
+      edgeIdx: o.edgeIdx,
+      segIdx: o.segIdx,
+    });
+  }
+  return out;
 }
 
 function _resolveObstacleCollisions(bot: BotPhysicsState): void {
@@ -251,9 +344,45 @@ export interface BotPhysicsState {
   // for a short window so engagements feel like feuds, not random noise.
   lastHitById: string | null;
   revengeExpireAt: number;
-  // Personality — tuned at spawn to create behavioral variety.
-  aggression: number;   // 0..1 — higher = picks human + closes distance more
-  caution: number;      // 0..1 — higher = uses defensives earlier
+
+  // ── Personality (replaces legacy random aggression/caution) ────────────
+  personalityKey: string;             // 'Aggressive' | 'Hunter' | …
+  p: PersonalityParams;               // full tuning bundle (from botbrain.ts)
+  // Legacy scalars still read by shouldUsePowerup and _stepBotPowerups —
+  // kept in sync with personality on assign.
+  aggression: number;
+  caution: number;
+
+  // ── Finite state machine ──────────────────────────────────────────────
+  state: BotState;
+  stateEnterAt: number;
+  stateMinUntil: number;              // isteresi anti-flapping
+
+  // ── Think-rate separation from 60Hz physics ───────────────────────────
+  thinkIntervalMs: number;            // derived from reactionDelay
+  nextThinkAt: number;
+  desiredYaw: number;                 // cached between think ticks
+  desiredThrottle: number;            // −1..1 (negative = reverse)
+  steerBiasRad: number;               // flanking perpendicular bias
+  steerBiasRerollAt: number;          // next ms to re-pick flank direction
+
+  // ── Human imperfections ───────────────────────────────────────────────
+  hesitationUntil: number;
+  coastUntil: number;
+  mistakeUntil: number; mistakeDir: number;      // −1 | 0 | 1
+  overcorrectUntil: number; overcorrectDir: number;
+  panicActive: boolean;
+  hitRecoveryUntil: number; lastSpeedSample: number;
+
+  // ── Environment awareness ─────────────────────────────────────────────
+  threatLevel: number;                // 0..1
+  stuckSince: number;                 // 0 when not stuck, else timestamp of first stall
+  lastPosSampleX: number; lastPosSampleZ: number; lastPosSampleAt: number;
+  dodgeUntil: number; dodgeDir: number;
+  edgeDanger: boolean; predictedExitT: number;
+
+  // ── Powerup navigation ────────────────────────────────────────────────
+  pickupTargetId: string | null;
 }
 
 export interface PlayerSnapshot {
@@ -281,7 +410,8 @@ export function createBot(botId: string, carType: string, slotIndex: number): Bo
   const angle = (slotIndex / 8) * Math.PI * 2;
   const r = ARENA_APOTHEM * 0.7;
   const phys = _physicsFor(carType);
-  return {
+  const now = Date.now();
+  const bot: BotPhysicsState = {
     botId,
     carType,
     maxSpeed: phys.maxSpeed,
@@ -297,23 +427,112 @@ export function createBot(botId: string, carType: string, slotIndex: number): Bo
     yaw: Math.atan2(-Math.sin(angle), -Math.cos(angle)),
     speed: 0,
     targetId: null,
-    nextRetargetAt: Date.now(),
+    nextRetargetAt: now,
     wanderPhase: Math.random() * Math.PI * 2,
     heldPowerup: null,
     powerupUseEarliest: 0,
-    powerupReadyAt: Date.now(),
+    powerupReadyAt: now,
     glitchExpireAt: 0,
     lastHitById: null,
     revengeExpireAt: 0,
-    // Personality spread ≈ [0.3..1] so every bot feels a bit different.
-    aggression: 0.3 + Math.random() * 0.7,
-    caution: 0.3 + Math.random() * 0.7,
+    // Personality assigned below by assignPersonality.
+    personalityKey: '',
+    p: null as unknown as PersonalityParams,
+    aggression: 0.5,
+    caution: 0.5,
+    // FSM + think-rate
+    state: 'ROAM',
+    stateEnterAt: now,
+    stateMinUntil: now + 400,
+    thinkIntervalMs: 200,
+    nextThinkAt: now + Math.floor(Math.random() * 200),
+    desiredYaw: Math.atan2(-Math.sin(angle), -Math.cos(angle)),
+    desiredThrottle: 0.7,
+    steerBiasRad: 0,
+    steerBiasRerollAt: 0,
+    // Human feel
+    hesitationUntil: 0,
+    coastUntil: 0,
+    mistakeUntil: 0, mistakeDir: 0,
+    overcorrectUntil: 0, overcorrectDir: 0,
+    panicActive: false,
+    hitRecoveryUntil: 0, lastSpeedSample: 0,
+    // Environment
+    threatLevel: 0,
+    stuckSince: 0,
+    lastPosSampleX: Math.cos(angle) * r,
+    lastPosSampleZ: Math.sin(angle) * r,
+    // Delay first stuck sample to avoid spawn-invincibility false positives.
+    lastPosSampleAt: now + 1000,
+    dodgeUntil: 0, dodgeDir: 0,
+    edgeDanger: false, predictedExitT: 0,
+    // Powerup nav
+    pickupTargetId: null,
   };
+  assignPersonality(bot);
+  return bot;
 }
 
 /**
- * One simulation step at fixed dt. Also refreshes the target lock if stale
- * or invalid. Mutates bot in place.
+ * Reset all transient AI state on a bot respawn. Call from party's
+ * _scheduleBotRespawn so we don't carry stuck timers, dodge commits, or
+ * mistake windows across deaths.
+ */
+export function resetBotAiState(bot: BotPhysicsState, now: number): void {
+  bot.state = 'ROAM';
+  bot.stateEnterAt = now;
+  bot.stateMinUntil = now + 400;
+  bot.nextThinkAt = now + Math.floor(Math.random() * 200);
+  // Point the bot toward the arena centre on respawn so its first motion
+  // isn't a stale heading from the previous life.
+  bot.desiredYaw = Math.atan2(-bot.posZ, -bot.posX);
+  bot.desiredThrottle = 0.7;
+  bot.steerBiasRad = 0;
+  bot.steerBiasRerollAt = 0;
+  bot.hesitationUntil = 0;
+  bot.coastUntil = 0;
+  bot.mistakeUntil = 0; bot.mistakeDir = 0;
+  bot.overcorrectUntil = 0; bot.overcorrectDir = 0;
+  bot.panicActive = false;
+  bot.hitRecoveryUntil = 0; bot.lastSpeedSample = 0;
+  bot.threatLevel = 0;
+  bot.stuckSince = 0;
+  bot.lastPosSampleX = bot.posX;
+  bot.lastPosSampleZ = bot.posZ;
+  bot.lastPosSampleAt = now + 1000; // skip first sample while invincible
+  bot.dodgeUntil = 0; bot.dodgeDir = 0;
+  bot.edgeDanger = false; bot.predictedExitT = 0;
+  bot.pickupTargetId = null;
+  // Revenge/pickup inventory reset is handled by the caller (party.ts).
+  // Keep personality assignment — it's a "pilot" trait, not a status effect.
+}
+
+/**
+ * Backup drive behaviour when stepBot is called without a ThinkCtx (unit
+ * tests, legacy callers). Produces the pre-refactor "always charge the
+ * nearest target" look so nothing hangs.
+ */
+function _fallbackDrive(bot: BotPhysicsState, players: PlayerSnapshot[], dt: number): void {
+  const target = bot.targetId
+    ? players.find(p => p.id === bot.targetId && !p.isEliminated)
+    : undefined;
+  if (target) {
+    bot.desiredYaw = Math.atan2(target.posZ - bot.posZ, target.posX - bot.posX);
+    bot.desiredThrottle = 0.9;
+  } else {
+    bot.wanderPhase += dt * 0.8;
+    bot.desiredYaw = bot.yaw + Math.sin(bot.wanderPhase) * WANDER_JITTER;
+    bot.desiredThrottle = 0.5;
+  }
+}
+
+/**
+ * One simulation step at fixed dt. Orchestrates sense → think → act and
+ * integrates physics. Mutates bot in place.
+ *
+ * `ctx` carries per-tick world information (projectiles, pedestals, HP
+ * lookup) that higher-level AI needs. It's built once per tick in
+ * party.ts#_stepBots and shared across bots — no per-bot allocation.
  */
 export function stepBot(
   bot: BotPhysicsState,
@@ -321,8 +540,11 @@ export function stepBot(
   players: PlayerSnapshot[],
   now: number,
   hunterCounts: Map<string, number>,
+  ctx?: ThinkCtx,
 ): void {
-  // ── Target selection / refresh ──
+  // ── Target selection / refresh (kept here because hunterCounts anti-gangup
+  //    penalty + revenge scoring still live on this side). The FSM's
+  //    findTarget/findNearestEnemy work with bot.targetId set by us.
   const targetValid = bot.targetId
     ? players.some(p => p.id === bot.targetId && !p.isEliminated)
     : false;
@@ -332,51 +554,41 @@ export function stepBot(
   }
   if (bot.targetId) hunterCounts.set(bot.targetId, (hunterCounts.get(bot.targetId) || 0) + 1);
 
-  const target = bot.targetId
-    ? players.find(p => p.id === bot.targetId && !p.isEliminated)
-    : undefined;
-
-  // ── Glitch disruption ──
-  // If the bot is glitched its inputs get scrambled. We compute normal
-  // steering values first, then mutate them. Matches client BotBrain
-  // _applyGlitchDisruption probability distribution.
   const glitched = now < bot.glitchExpireAt;
 
-  // ── Steering ──
-  let desiredYaw = bot.yaw;
-  if (target) {
-    const dx = target.posX - bot.posX;
-    const dz = target.posZ - bot.posZ;
-    desiredYaw = Math.atan2(dz, dx);
+  // ── AI pipeline ── Sense + maybeThink update desiredYaw/desiredThrottle on
+  // the bot. Without ctx (legacy callers / tests) we fall back to a
+  // simplified straight-to-target drive so the server never hangs.
+  if (ctx) {
+    sense(bot, ctx);
+    maybeThink(bot, ctx);
   } else {
-    bot.wanderPhase += dt * 0.8;
-    desiredYaw = bot.yaw + Math.sin(bot.wanderPhase) * WANDER_JITTER;
+    _fallbackDrive(bot, players, dt);
   }
-  let yawDiff = desiredYaw - bot.yaw;
+
+  // ── Act ── compute effective steering/throttle for this tick.
+  const feel = ctx ? applyHumanFeel(bot, now) : { yawAdj: 0, throttleMul: 1 };
+
+  let yawDiff = bot.desiredYaw + feel.yawAdj - bot.yaw;
   while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
   while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
 
   if (glitched && Math.random() < 0.4) yawDiff = -yawDiff; // steering flip
-
-  // ~15% chance per step to lose target lock while glitched.
   if (glitched && bot.targetId && Math.random() < 0.15) bot.targetId = null;
 
-  // Speed-proportional steering — matches client model: real cars can't
-  // pivot in place. At zero speed the bot can only accelerate; turning
-  // gradually becomes available as speed builds. Without this scaling a
-  // bot spawned facing away from its target rotates 360° on the spot.
+  // Speed-proportional steering — cars can't pivot in place.
   const speedFactor = Math.min(1, bot.speed / bot.maxSpeed);
   const angularVel = Math.max(-bot.maxAngularVel, Math.min(bot.maxAngularVel, yawDiff * bot.turnRate)) * speedFactor;
   bot.yaw += angularVel * dt;
 
-  // Throttle — aggressive bots push harder; glitched bots occasionally
-  // freeze (no throttle) or reverse briefly.
-  let throttle = 0.8 + bot.aggression * 0.2;
+  let throttle = bot.desiredThrottle * feel.throttleMul;
   if (glitched) {
     const r = Math.random();
     if (r < 0.12) throttle = 0;            // freeze
-    else if (r < 0.20) throttle = -0.5;    // reverse burst (0.12 + 0.08)
+    else if (r < 0.20) throttle = -0.5;    // reverse burst
   }
+  // Hit-stun: applyHumanFeel already zeroes throttle when hitRecoveryUntil > now.
+
   bot.velX += Math.cos(bot.yaw) * bot.accel * throttle * dt;
   bot.velZ += Math.sin(bot.yaw) * bot.accel * throttle * dt;
   bot.velX *= FRICTION;
@@ -455,7 +667,7 @@ function selectBestTarget(
   let bestId: string | null = null;
   let bestScore = -Infinity;
   for (const p of players) {
-    if (p.id === bot.botId || p.isEliminated) continue;
+    if (p.id === bot.botId || p.isEliminated || p.isInvincible) continue;
     const dx = p.posX - bot.posX;
     const dz = p.posZ - bot.posZ;
     const dist = Math.hypot(dx, dz);
@@ -465,7 +677,9 @@ function selectBestTarget(
     if (p.hp <= p.maxHp * SCORE_LOW_HP_FRAC) score += SCORE_LOW_HP_BONUS;
     const hunters = hunterCounts.get(p.id) || 0;
     if (hunters > 0) score -= hunters * SCORE_GANGUP_PENALTY;
-    if (revengeActive && p.id === bot.lastHitById) score += SCORE_REVENGE_BONUS;
+    if (revengeActive && p.id === bot.lastHitById) {
+      score += SCORE_REVENGE_BONUS * bot.p.revengeWeight;
+    }
     if (score > bestScore) { bestScore = score; bestId = p.id; }
   }
   return bestId;
@@ -494,7 +708,15 @@ export function encodeBotEntry(bot: BotPhysicsState, hp: number, flags = 0): Arr
   _writeFloat16(view, s + 7, bot.velX);
   _writeFloat16(view, s + 9, bot.velY);
   _writeFloat16(view, s + 11, bot.velZ);
-  _writeFloat16(view, s + 13, bot.yaw);
+  // Yaw convention bridge: server bots use atan2-style heading where
+  //   facing = (cos(yaw), sin(yaw))     [yaw=0 → +X]
+  // Client CarBody (and therefore the remote-mesh renderer) uses
+  //   forward = (-sin(yaw), -cos(yaw))  [yaw=0 → -Z]
+  // Encoding bot.yaw raw made the mesh point 90°+ off from the actual
+  // motion direction (visually: car appears to drive sideways or
+  // backwards depending on heading). Solve (cos(S), sin(S)) =
+  // (-sin(C), -cos(C)) → C = -S - π/2, applied on the wire.
+  _writeFloat16(view, s + 13, -bot.yaw - Math.PI / 2);
   _writeFloat16(view, s + 15, bot.speed);
   view.setUint8(s + 17, flags & 0xff);
   view.setUint8(s + 18, Math.max(0, Math.min(255, Math.round(hp))));
@@ -578,21 +800,30 @@ export function shouldUsePowerup(
     }
   }
 
+  // abilityEagerness scales the effective engagement range for offensive
+  // powerups. Hothead (0.95) nearly doubles ranges → fires from further away;
+  // Survivor (0.35) shrinks them → only fires at point-blank.
+  const eager = bot.p.abilityEagerness;
+  const rangeScale = 0.7 + eager * 0.6;
+
   switch (type) {
     case 'MISSILE':
       // Fires straight from the nose — only worth it when a target is in
-      // the bot's forward cone at sensible range.
-      return !!nearestInFront && nearestInFrontDist <= 40;
+      // the bot's forward cone at sensible range AND we're in a committed
+      // attack state so we don't fire while swerving for a powerup.
+      if (!nearestInFront || nearestInFrontDist > 40 * rangeScale) return false;
+      return bot.state === 'CHARGE' || bot.state === 'HUNT' || bot.state === 'EVADE';
 
     case 'HOMING_MISSILE':
       // Client BotBrain fires homing when an enemy is within ~35u — tighter
       // than the missile's 80u seek radius so bots don't waste the pickup
       // on distant targets that might escape the lock.
-      return nearestDist <= 35;
+      return nearestDist <= 35 * rangeScale;
 
     case 'AUTO_TURRET':
       // Turret auto-aims; drop it when at least one enemy is in its range.
-      return enemiesMid >= 1;
+      // Eager bots deploy proactively even when no one's inside the tight ring.
+      return enemiesMid >= 1 || (enemiesFar >= 1 && eager > 0.7);
 
     case 'GLITCH_BOMB':
       // Client BotBrain: fire when 2+ enemies within 20u OR 3+ within 30u
@@ -611,7 +842,10 @@ export function shouldUsePowerup(
 
     case 'HOLO_EVADE': {
       const lowHp = botHp < botMaxHp * 0.5;
-      return lowHp || !!charger;
+      // Fire holo during active panic (EVADE/FLEE, or an incoming projectile
+      // dodge commit) — matches "use when threatened" BotBrain behaviour.
+      const panicking = bot.state === 'EVADE' || bot.state === 'FLEE' || now < bot.dodgeUntil;
+      return lowHp || !!charger || panicking;
     }
 
     default:

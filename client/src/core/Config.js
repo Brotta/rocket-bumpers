@@ -180,6 +180,23 @@ export const ARENA = {
     ],
   },
 
+  // Destructible edge barriers — volcanic rock walls on the 8 octagon sides
+  // that prevent cars from falling off. Destroyed by missiles (1-shot) or
+  // high-speed ram (≥ rammingDestroySpeed). Respawn after respawnDelaySec.
+  edgeBarriers: {
+    segmentsPerEdge: 3,
+    width: 3.8,                    // length along the edge
+    height: 1.8,
+    thickness: 0.55,
+    inset: 0.25,                   // pulled inward from the octagon edge line
+    rammingDestroySpeed: 18,       // ram >= this destroys on contact (boost territory)
+    crackThresholdRamSpeed: 8,     // ram in [this, rammingDestroySpeed) shows progressive cracks
+    maxCrackHits: 3,               // visual crack stages (local-only, no sync)
+    respawnDelaySec: 22,
+    respawnRiseTimeSec: 1.0,
+    respawnSafeDistance: 4.5,      // reschedule if a car is within this radius
+  },
+
   // Lava eruptions (radial shockwave from center)
   eruption: {
     interval: 20,        // seconds between eruptions
@@ -417,7 +434,8 @@ export const DAMAGE = {
   LAVA_DPS: 20,            // damage per second in lava pool
   GEYSER_DAMAGE: 15,       // instant damage from geyser eruption
   FALL_DAMAGE: 25,         // damage from falling off edge (+ respawn)
-  OBSTACLE_DAMAGE: 5,      // damage from pillar/boulder impact
+  OBSTACLE_DAMAGE: 5,            // damage from pillar/boulder impact
+  BARRIER_RAM_DESTROY_DAMAGE: 8, // self-damage when sfondi una barriera con ram
 
   // Ability damage
   TRAIL_DAMAGE: 12,        // VIPER trail fire (single touch)

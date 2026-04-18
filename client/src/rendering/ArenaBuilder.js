@@ -68,6 +68,7 @@ export class ArenaBuilder {
     this._buildLavaFireEffect();
     this._buildEdgeLines();
     this._buildRockObstacles();
+    this._buildEdgeBarriers();
     this._buildGeyserSlots();
     // Boost pads removed — replaced by portal launch ramps in PortalSystem
     this._buildSurfaceDetails();
@@ -347,15 +348,10 @@ export class ArenaBuilder {
   // ── Rock Obstacles (pillars + boulders — physics in PhysicsWorld) ────
   _buildRockObstacles() {
     const { pillars, boulders } = ARENA.rockObstacles;
-    const texLoader = new THREE.TextureLoader();
-
-    // Load volcano floor texture — shared across ALL rocky elements (no clones)
-    const rockTex = texLoader.load('/assets/textures/volcano_floor.png');
-    rockTex.wrapS = rockTex.wrapT = THREE.RepeatWrapping;
-    rockTex.colorSpace = THREE.SRGBColorSpace;
-
-    const rockNormal = texLoader.load('/assets/textures/lava_normal.png');
-    rockNormal.wrapS = rockNormal.wrapT = THREE.RepeatWrapping;
+    // Lazy-init shared rock textures (reused by _buildEdgeBarriers)
+    this._ensureRockTextures();
+    const rockTex = this._rockTex;
+    const rockNormal = this._rockNormal;
 
     // Shared materials (2 instead of ~17 cloned per-obstacle)
     const pillarMat = new THREE.MeshStandardMaterial({
@@ -532,6 +528,218 @@ export class ArenaBuilder {
       group.rotation.y = Math.random() * Math.PI * 2;
       this.scene.add(group);
       this.obstacleGroups.push({ group, type: 'boulder', config: b });
+    }
+  }
+
+  // Lazy-load and cache the shared volcanic-rock textures used by both
+  // _buildRockObstacles and _buildEdgeBarriers. Called from either site;
+  // whoever runs first triggers the HTTP fetch, the other reuses the
+  // cached THREE.Texture — no duplicate GPU uploads.
+  _ensureRockTextures() {
+    if (this._rockTex) return;
+    const texLoader = new THREE.TextureLoader();
+    this._rockTex = texLoader.load('/assets/textures/volcano_floor.png');
+    this._rockTex.wrapS = this._rockTex.wrapT = THREE.RepeatWrapping;
+    this._rockTex.colorSpace = THREE.SRGBColorSpace;
+    this._rockNormal = texLoader.load('/assets/textures/lava_normal.png');
+    this._rockNormal.wrapS = this._rockNormal.wrapT = THREE.RepeatWrapping;
+  }
+
+  // ── Destructible Edge Barriers (volcanic rock walls) ────────────────
+  // 8 edges × N segments. Dark rock body + emissive magma crack overlay
+  // whose intensity grows with accumulated ram damage. Fully destroyed
+  // segments spawn shatter VFX and (in multiplayer) respawn after a
+  // server-driven timer with a rise-up animation.
+  _buildEdgeBarriers() {
+    const cfg = ARENA.edgeBarriers;
+    if (!cfg) return;
+
+    const R = ARENA.diameter / 2;
+    const sides = 8;
+
+    // Reuse cached textures from _buildRockObstacles (or load lazily
+    // if _buildEdgeBarriers happens to run first).
+    this._ensureRockTextures();
+    const rockTex = this._rockTex;
+    const rockNormal = this._rockNormal;
+
+    this._barrierRockMat = new THREE.MeshStandardMaterial({
+      map: rockTex,
+      normalMap: rockNormal,
+      normalScale: new THREE.Vector2(1.6, 1.6),
+      roughness: 0.92,
+      metalness: 0.05,
+      emissive: 0x2a0a00,
+      emissiveIntensity: 0.2,
+    });
+    // Single crack material — per-segment emissiveIntensity is managed
+    // via a userData-driven per-mesh material? No — we need per-segment
+    // state, so each segment gets its own instance. Cheap clones (same
+    // shader program, only uniforms differ).
+    this._barrierCrackBaseColor = 0x661100;
+    this._barrierCrackEmissive = 0xff4400;
+
+    // Shared geometries: main box + crack overlay (slight outward
+    // scale to avoid Z-fighting) + crown rim geometry.
+    const boxGeo = new THREE.BoxGeometry(cfg.width, cfg.height, cfg.thickness);
+    const crackGeo = new THREE.BoxGeometry(
+      cfg.width * 1.005, cfg.height * 1.005, cfg.thickness * 1.02,
+    );
+    const rimGeo = new THREE.BoxGeometry(cfg.width * 1.02, 0.12, cfg.thickness * 1.25);
+
+    const rimMat = new THREE.MeshStandardMaterial({
+      color: 0x1a0500,
+      emissive: 0xff3300,
+      emissiveIntensity: 0.9,
+      roughness: 0.7,
+      metalness: 0.2,
+    });
+
+    // Save shared refs so respawn can reuse without recreating.
+    this._barrierShared = {
+      boxGeo, crackGeo, rimGeo,
+      rockMat: this._barrierRockMat,
+      rimMat,
+      cfg,
+    };
+
+    for (let edgeIdx = 0; edgeIdx < sides; edgeIdx++) {
+      const a0 = (edgeIdx / sides) * Math.PI * 2 - Math.PI / 8;
+      const a1 = ((edgeIdx + 1) / sides) * Math.PI * 2 - Math.PI / 8;
+      const p1x = Math.cos(a0) * R, p1z = Math.sin(a0) * R;
+      const p2x = Math.cos(a1) * R, p2z = Math.sin(a1) * R;
+      const mx = (p1x + p2x) / 2, mz = (p1z + p2z) / 2;
+      const ex = p2x - p1x, ez = p2z - p1z;
+      const elen = Math.hypot(ex, ez);
+      const tx = ex / elen, tz = ez / elen;
+      const mR = Math.hypot(mx, mz);
+      const nx = -mx / mR, nz = -mz / mR;
+      const yaw = Math.atan2(tz, tx);
+
+      for (let segIdx = 0; segIdx < cfg.segmentsPerEdge; segIdx++) {
+        const frac = (segIdx + 0.5) / cfg.segmentsPerEdge - 0.5;
+        const cx = mx + tx * elen * frac + nx * cfg.inset;
+        const cz = mz + tz * elen * frac + nz * cfg.inset;
+        const segConfig = { edgeIdx, segIdx, x: cx, z: cz, yaw };
+        this._spawnBarrierVisual(segConfig, { rising: false });
+      }
+    }
+  }
+
+  _spawnBarrierVisual(segConfig, { rising }) {
+    const { boxGeo, crackGeo, rimGeo, rockMat, rimMat, cfg } = this._barrierShared;
+    const group = new THREE.Group();
+
+    const body = new THREE.Mesh(boxGeo, rockMat);
+    body.castShadow = true;
+    body.receiveShadow = true;
+    group.add(body);
+
+    // Per-segment crack material (cloned so emissiveIntensity is independent).
+    const crackMat = new THREE.MeshStandardMaterial({
+      color: this._barrierCrackBaseColor,
+      emissive: this._barrierCrackEmissive,
+      emissiveIntensity: 0,
+      transparent: true,
+      opacity: 0,
+      roughness: 0.6,
+      metalness: 0.0,
+    });
+    const crack = new THREE.Mesh(crackGeo, crackMat);
+    group.add(crack);
+
+    // Top rim — thin emissive stripe crowning each segment.
+    const rim = new THREE.Mesh(rimGeo, rimMat);
+    rim.position.y = cfg.height / 2 + 0.02;
+    group.add(rim);
+
+    const finalY = cfg.height / 2;
+    group.position.set(segConfig.x, rising ? -cfg.height : finalY, segConfig.z);
+    group.rotation.y = segConfig.yaw;
+    this.scene.add(group);
+
+    const entry = {
+      group,
+      type: 'barrier',
+      config: segConfig,
+      crackMat,
+      crackHits: 0,
+      // Animation state for respawn rise-up
+      rising: rising
+        ? { t: 0, duration: cfg.respawnRiseTimeSec, fromY: -cfg.height, toY: finalY }
+        : null,
+    };
+    this.obstacleGroups.push(entry);
+    return entry;
+  }
+
+  /**
+   * Increment crack level on a given barrier segment (visual only).
+   * Called from Game.js when a car rams a barrier below the destroy
+   * threshold but above the crack threshold. No network sync — purely
+   * local feedback that the wall is under stress.
+   */
+  damageBarrierVisual(edgeIdx, segIdx) {
+    const cfg = ARENA.edgeBarriers;
+    for (const og of this.obstacleGroups) {
+      if (og.type !== 'barrier') continue;
+      if (og.config.edgeIdx !== edgeIdx || og.config.segIdx !== segIdx) continue;
+      og.crackHits = Math.min(og.crackHits + 1, cfg.maxCrackHits);
+      const t = og.crackHits / cfg.maxCrackHits;
+      og.crackMat.emissiveIntensity = 0.6 + t * 2.0;
+      og.crackMat.opacity = 0.25 + t * 0.55;
+      return;
+    }
+  }
+
+  /**
+   * Rebuild a destroyed barrier with a rise-up animation. Idempotent —
+   * if the segment is already present the call is a no-op.
+   */
+  respawnBarrierVisual(edgeIdx, segIdx) {
+    for (const og of this.obstacleGroups) {
+      if (og.type === 'barrier'
+        && og.config.edgeIdx === edgeIdx
+        && og.config.segIdx === segIdx) return;
+    }
+    const R = ARENA.diameter / 2;
+    const sides = 8;
+    const a0 = (edgeIdx / sides) * Math.PI * 2 - Math.PI / 8;
+    const a1 = ((edgeIdx + 1) / sides) * Math.PI * 2 - Math.PI / 8;
+    const p1x = Math.cos(a0) * R, p1z = Math.sin(a0) * R;
+    const p2x = Math.cos(a1) * R, p2z = Math.sin(a1) * R;
+    const mx = (p1x + p2x) / 2, mz = (p1z + p2z) / 2;
+    const ex = p2x - p1x, ez = p2z - p1z;
+    const elen = Math.hypot(ex, ez);
+    const tx = ex / elen, tz = ez / elen;
+    const mR = Math.hypot(mx, mz);
+    const nx = -mx / mR, nz = -mz / mR;
+    const yaw = Math.atan2(tz, tx);
+    const cfg = ARENA.edgeBarriers;
+    const frac = (segIdx + 0.5) / cfg.segmentsPerEdge - 0.5;
+    const cx = mx + tx * elen * frac + nx * cfg.inset;
+    const cz = mz + tz * elen * frac + nz * cfg.inset;
+    this._spawnBarrierVisual({ edgeIdx, segIdx, x: cx, z: cz, yaw }, { rising: true });
+  }
+
+  /** Advance rise-up animations for barriers currently respawning. */
+  _updateBarrierRise(dt) {
+    const cfg = ARENA.edgeBarriers;
+    if (!cfg) return;
+    for (const og of this.obstacleGroups) {
+      if (og.type !== 'barrier' || !og.rising) continue;
+      og.rising.t += dt;
+      const t = Math.min(og.rising.t / og.rising.duration, 1);
+      // Ease-out with a small overshoot bounce at the end
+      const eased = 1 - Math.pow(1 - t, 3);
+      const overshoot = t > 0.85 ? Math.sin((t - 0.85) / 0.15 * Math.PI) * 0.15 : 0;
+      og.group.position.y = og.rising.fromY
+        + (og.rising.toY - og.rising.fromY) * eased
+        + overshoot;
+      if (t >= 1) {
+        og.group.position.y = og.rising.toY;
+        og.rising = null;
+      }
     }
   }
 
@@ -1033,6 +1241,9 @@ export class ArenaBuilder {
     if (this._lavaMaterial && this._lavaMaterial.uniforms) {
       this._lavaMaterial.uniforms.uTime.value = elapsed;
     }
+
+    // Barrier rise-up animation (respawn)
+    this._updateBarrierRise(dt);
 
     // Decorative pulse animations (throttled to every other frame — imperceptible)
     if (++this._decorFrameSkip >= 2) {

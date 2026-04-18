@@ -23,9 +23,15 @@ export class PhysicsWorld {
     this.lavaBody = null;
     this.obstacleBodies = [];
 
+    // Lookup: `${edgeIdx}:${segIdx}` → { config } used by respawn path.
+    // Config-only (not the live body) so we can always rebuild after
+    // destruction regardless of array ordering.
+    this._barrierRegistry = new Map();
+
     this._buildFloor();
     this._buildLavaFloor();
     this._buildRockObstacles();
+    this._buildEdgeBarriers();
 
     this._fixedTimeStep = 1 / 60;
   }
@@ -215,6 +221,104 @@ export class PhysicsWorld {
     }
   }
 
+  // ── Destructible edge barriers (8 edges × N segments) ───────────────
+  // Volcanic-rock walls lining the octagon perimeter. Added to
+  // obstacleBodies so the existing pipeline (missile sweep, obstacle
+  // damage, debug overlay) handles them for free.
+  _buildEdgeBarriers() {
+    const cfg = ARENA.edgeBarriers;
+    if (!cfg) return;
+
+    const R = ARENA.diameter / 2;
+    const sides = 8;
+    for (let edgeIdx = 0; edgeIdx < sides; edgeIdx++) {
+      const a0 = (edgeIdx / sides) * Math.PI * 2 - Math.PI / 8;
+      const a1 = ((edgeIdx + 1) / sides) * Math.PI * 2 - Math.PI / 8;
+      const p1x = Math.cos(a0) * R, p1z = Math.sin(a0) * R;
+      const p2x = Math.cos(a1) * R, p2z = Math.sin(a1) * R;
+
+      // Edge midpoint + tangent + inward normal
+      const mx = (p1x + p2x) / 2;
+      const mz = (p1z + p2z) / 2;
+      const ex = p2x - p1x, ez = p2z - p1z;
+      const elen = Math.hypot(ex, ez);
+      const tx = ex / elen, tz = ez / elen;     // unit tangent
+      const mR = Math.hypot(mx, mz);
+      const nx = -mx / mR, nz = -mz / mR;       // unit inward normal
+      const yaw = Math.atan2(tz, tx);            // body rotation around Y
+
+      for (let segIdx = 0; segIdx < cfg.segmentsPerEdge; segIdx++) {
+        // Segment center along the edge, inset inward from the face line.
+        const frac = (segIdx + 0.5) / cfg.segmentsPerEdge - 0.5; // -0.33, 0, 0.33
+        const cx = mx + tx * elen * frac + nx * cfg.inset;
+        const cz = mz + tz * elen * frac + nz * cfg.inset;
+        const config = {
+          edgeIdx, segIdx,
+          x: cx, z: cz, yaw,
+          width: cfg.width, height: cfg.height, thickness: cfg.thickness,
+        };
+        this._barrierRegistry.set(`${edgeIdx}:${segIdx}`, config);
+        this._spawnBarrierBody(config);
+      }
+    }
+  }
+
+  _spawnBarrierBody(config) {
+    const cfg = ARENA.edgeBarriers;
+    const shape = new CANNON.Box(new CANNON.Vec3(
+      config.width / 2, config.height / 2, config.thickness / 2,
+    ));
+    const body = new CANNON.Body({
+      mass: 0,
+      shape,
+      material: this._arenaMaterial,
+      collisionFilterGroup: COLLISION_GROUPS.ARENA,
+      collisionFilterMask: COLLISION_GROUPS.CAR,
+    });
+    body.position.set(config.x, config.height / 2, config.z);
+    body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), config.yaw);
+    // For the circle-phase filter in enforceObstacleOverlaps (coarse pass
+    // that rejects far-away pairs) use the half-diagonal; the real test
+    // is done in the box branch below so no false-negative risk.
+    body._obstacleRadius = Math.hypot(config.width, config.thickness) / 2 + 0.3;
+    body._obstacleType = 'barrier';
+    body._barrierEdgeIdx = config.edgeIdx;
+    body._barrierSegIdx = config.segIdx;
+    body._barrierHalfW = config.width / 2;
+    body._barrierHalfT = config.thickness / 2;
+    body._barrierYaw = config.yaw;
+    body._barrierConfig = config;
+    this.world.addBody(body);
+    this.obstacleBodies.push(body);
+    return body;
+  }
+
+  /** Rebuild a previously destroyed barrier. Returns body or null. */
+  respawnBarrier(edgeIdx, segIdx) {
+    const key = `${edgeIdx}:${segIdx}`;
+    const config = this._barrierRegistry.get(key);
+    if (!config) return null;
+    // Already live? Skip.
+    for (const b of this.obstacleBodies) {
+      if (b._obstacleType === 'barrier'
+        && b._barrierEdgeIdx === edgeIdx
+        && b._barrierSegIdx === segIdx) {
+        return b;
+      }
+    }
+    return this._spawnBarrierBody(config);
+  }
+
+  /** Lookup barrier body by (edgeIdx, segIdx), or null if destroyed. */
+  findBarrierBody(edgeIdx, segIdx) {
+    for (const b of this.obstacleBodies) {
+      if (b._obstacleType === 'barrier'
+        && b._barrierEdgeIdx === edgeIdx
+        && b._barrierSegIdx === segIdx) return b;
+    }
+    return null;
+  }
+
   /**
    * Per-frame overlap enforcement: pushes any car body that overlaps
    * an obstacle out of it. This is a safety net — the physics engine
@@ -238,44 +342,74 @@ export class PhysicsWorld {
         const oz = ob.position.z;
         const dx = cx - ox;
         const dz = cz - oz;
-        const dist = Math.sqrt(dx * dx + dz * dz);
 
-        // Minimum allowed distance: obstacle radius + car half-width + margin
-        const minDist = ob._obstacleRadius + carHalfWidth + 0.15;
+        let nx, nz, penetration;
 
-        if (dist < minDist && dist > 0.01) {
-          // Car is overlapping — push it out
-          const nx = dx / dist;
-          const nz = dz / dist;
-          const penetration = minDist - dist;
-
-          cb.body.position.x += nx * penetration;
-          cb.body.position.z += nz * penetration;
-
-          // Also correct the smooth visual position
-          cb._smoothPosX += nx * penetration;
-          cb._smoothPosZ += nz * penetration;
-
-          // Redirect velocity outward (remove inward component)
-          const velDot = cb.body.velocity.x * nx + cb.body.velocity.z * nz;
-          if (velDot < 0) {
-            cb.body.velocity.x -= velDot * nx;
-            cb.body.velocity.z -= velDot * nz;
-            cb._internalVelX = cb.body.velocity.x;
-            cb._internalVelZ = cb.body.velocity.z;
-            cb._lastSetVelX = cb.body.velocity.x;
-            cb._lastSetVelZ = cb.body.velocity.z;
+        if (ob._obstacleType === 'barrier') {
+          // Rotated-box test: rotate (dx,dz) into the barrier local frame,
+          // clamp to [±halfW+carHalf, ±halfT+carHalf]. The axis with
+          // smallest |delta - clamp| determines the push-out direction.
+          const cosY = Math.cos(-ob._barrierYaw);
+          const sinY = Math.sin(-ob._barrierYaw);
+          const lx = dx * cosY - dz * sinY;     // local-X (along wall)
+          const lz = dx * sinY + dz * cosY;     // local-Z (through wall)
+          const halfXExp = ob._barrierHalfW + carHalfWidth;
+          const halfZExp = ob._barrierHalfT + carHalfWidth + 0.15;
+          const penX = halfXExp - Math.abs(lx);
+          const penZ = halfZExp - Math.abs(lz);
+          if (penX <= 0 || penZ <= 0) continue;   // no overlap
+          // Resolve on axis with smallest penetration (shortest push-out)
+          let localNx, localNz;
+          if (penZ <= penX) {
+            localNx = 0;
+            localNz = lz >= 0 ? 1 : -1;
+            penetration = penZ;
+          } else {
+            localNx = lx >= 0 ? 1 : -1;
+            localNz = 0;
+            penetration = penX;
           }
+          // Rotate local normal back to world frame
+          const cosY2 = Math.cos(ob._barrierYaw);
+          const sinY2 = Math.sin(ob._barrierYaw);
+          nx = localNx * cosY2 - localNz * sinY2;
+          nz = localNx * sinY2 + localNz * cosY2;
+        } else {
+          // Circular obstacle (pillar/boulder)
+          const dist = Math.sqrt(dx * dx + dz * dz);
+          const minDist = ob._obstacleRadius + carHalfWidth + 0.15;
+          if (!(dist < minDist && dist > 0.01)) continue;
+          nx = dx / dist;
+          nz = dz / dist;
+          penetration = minDist - dist;
+        }
 
-          // If car is not already stunned/immune, report as a new hit
-          if (!cb._isStunned && cb._stunImmunityTimer <= 0) {
-            const speed = Math.sqrt(
-              cb.body.velocity.x * cb.body.velocity.x +
-              cb.body.velocity.z * cb.body.velocity.z,
-            ) + Math.abs(cb._currentSpeed) * 0.5;
-            if (speed > 2) { // ignore trivial contacts
-              newHits.push({ carBody: cb, obstacleBody: ob, speed, nx, nz });
-            }
+        cb.body.position.x += nx * penetration;
+        cb.body.position.z += nz * penetration;
+
+        // Also correct the smooth visual position
+        cb._smoothPosX += nx * penetration;
+        cb._smoothPosZ += nz * penetration;
+
+        // Redirect velocity outward (remove inward component)
+        const velDot = cb.body.velocity.x * nx + cb.body.velocity.z * nz;
+        if (velDot < 0) {
+          cb.body.velocity.x -= velDot * nx;
+          cb.body.velocity.z -= velDot * nz;
+          cb._internalVelX = cb.body.velocity.x;
+          cb._internalVelZ = cb.body.velocity.z;
+          cb._lastSetVelX = cb.body.velocity.x;
+          cb._lastSetVelZ = cb.body.velocity.z;
+        }
+
+        // If car is not already stunned/immune, report as a new hit
+        if (!cb._isStunned && cb._stunImmunityTimer <= 0) {
+          const speed = Math.sqrt(
+            cb.body.velocity.x * cb.body.velocity.x +
+            cb.body.velocity.z * cb.body.velocity.z,
+          ) + Math.abs(cb._currentSpeed) * 0.5;
+          if (speed > 2) { // ignore trivial contacts
+            newHits.push({ carBody: cb, obstacleBody: ob, speed, nx, nz });
           }
         }
       }

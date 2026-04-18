@@ -240,6 +240,7 @@ export class Game {
     // ── Wire power-up damage events (missiles, turrets, glitch bomb) ──
     this.powerUpManager.on('damage', (e) => this._onDamage(e));
     this.powerUpManager.on('powerup-hit', (e) => this._onPowerupHit(e));
+    this.powerUpManager.on('obstacle-destroyed', (e) => this._onObstacleDestroyed(e));
 
     // ── Wire hazard damage/elimination events ──
     this.dynamicHazards.on('damage', (e) => this._onDamage(e));
@@ -432,6 +433,16 @@ export class Game {
       }
     }
 
+    // Sync already-destroyed obstacles so late joiners don't render a
+    // wall/pillar that other clients have shattered. Y-coordinate isn't
+    // sent by the server (obstacles are flat on XZ) — any positive Y
+    // satisfies the client's 2u XYZ match radius.
+    if (Array.isArray(roomState.destroyedObstacles)) {
+      for (const d of roomState.destroyedObstacles) {
+        this.powerUpManager.onNetworkObstacleDestroyed(d.x, 0.9, d.z);
+      }
+    }
+
     // Sync initial scores from ROOM_STATE so leaderboard is correct immediately
     const initialScores = roomState.players.map(p => ({
       playerId: p.id,
@@ -560,6 +571,29 @@ export class Game {
       }
     });
 
+    // Server-authoritative car-to-car impact FX. Fires when the server
+    // detects a bot-involved collision — without this, remote-vs-remote
+    // bots would collide silently (no sparks, no POW text) because the
+    // client collision handler only runs for bodies in the local physics
+    // world, which doesn't include other clients' remote entities.
+    _on('carImpact', ({ tier, x, y, z, nx, nz, attackerId, victimId }) => {
+      // Skip if this involves the local player — CollisionHandler already
+      // fired the VFX locally via its own physics callback.
+      const localId = this.networkManager.localPlayerId;
+      if (attackerId === localId || victimId === localId) return;
+      // Resolve a victim mesh (remote or local-host bot) for emissive flash.
+      const victim = this._findCarByPlayerId(victimId) || null;
+      this.collisionImpactFX.trigger({
+        tier, x, y, z, nx, nz, victim, isLocalPlayer: false,
+      });
+      playCollisionSFX(tier, x, z);
+      const word = this._pickImpactWord('car', tier);
+      if (word) {
+        this.impactText.show({ word, tier, x, y: y || 1.0, z });
+        announcerSFX.play(word);
+      }
+    });
+
     // Server-authoritative elimination
     _on('playerEliminated', ({ playerId, killerId }) => {
       if (playerId === this.networkManager.localPlayerId) {
@@ -614,6 +648,11 @@ export class Game {
     // Remote obstacle destruction
     _on('obstacleDestroyed', ({ x, y, z }) => {
       this.powerUpManager.onNetworkObstacleDestroyed(x, y, z);
+    });
+
+    // Server-driven barrier respawn (22s after destruction)
+    _on('barrierRespawn', ({ edgeIdx, segIdx }) => {
+      this._onBarrierRespawn({ edgeIdx, segIdx });
     });
 
     // Ability used by remote player
@@ -949,6 +988,13 @@ export class Game {
     const localCarsForOverlap = this.carBodies.filter(cb => !cb._isRemote);
     const overlapHits = this.physicsWorld.enforceObstacleOverlaps(localCarsForOverlap);
     for (const hit of overlapHits) {
+      // Barriers have special behavior: high-speed ram destroys them,
+      // softer hits accumulate visual cracks. Everything else falls
+      // through to the standard stun pipeline.
+      if (hit.obstacleBody._obstacleType === 'barrier') {
+        const destroyed = this._handleBarrierRamHit(hit);
+        if (destroyed) continue; // no stun — car sails through the gap
+      }
       this._applyOverlapStun(hit);
     }
 
@@ -1231,6 +1277,85 @@ export class Game {
       hitX, hitY, hitZ,
       normalX: nx, normalZ: nz,
     });
+  }
+
+  // ── Barrier ram hit (destroys at high speed, cracks at medium) ──────
+  //
+  // Returns true if the barrier was destroyed (caller should skip the
+  // default stun so the car can ride through the newly opened gap).
+  // Damage is NOT applied here — CollisionHandler's standard OBSTACLE_DAMAGE
+  // pipeline already fired for this contact via cannon-es. Re-sending
+  // would just be squelched by the server-side 500ms cooldown.
+  _handleBarrierRamHit({ carBody, obstacleBody, speed }) {
+    const cfg = ARENA.edgeBarriers;
+    if (!cfg) return false;
+
+    // High-speed ram — destroy the segment and let the car sail through.
+    if (speed >= cfg.rammingDestroySpeed) {
+      const idx = this.physicsWorld.obstacleBodies.indexOf(obstacleBody);
+      if (idx >= 0) this.powerUpManager._destroyObstacle(idx);
+      // Small upward kick for visual drama + preserve forward velocity
+      // (stun is skipped so the car keeps moving through the gap).
+      carBody.body.velocity.y = Math.max(carBody.body.velocity.y, 2);
+      return true;
+    }
+
+    // Medium ram — progressive cracks (local visual only, no sync).
+    if (speed >= cfg.crackThresholdRamSpeed) {
+      this.sceneManager.arena.damageBarrierVisual(
+        obstacleBody._barrierEdgeIdx, obstacleBody._barrierSegIdx,
+      );
+    }
+    return false;
+  }
+
+  // Remote/server respawn handler — rebuild physics body + visual.
+  _onBarrierRespawn({ edgeIdx, segIdx }) {
+    this.physicsWorld.respawnBarrier(edgeIdx, segIdx);
+    this.sceneManager.arena.respawnBarrierVisual(edgeIdx, segIdx);
+  }
+
+  // Triggered when PowerUpManager destroys any obstacle. In single-player,
+  // we schedule a barrier respawn locally; in multiplayer the server is
+  // authoritative and will broadcast BARRIER_RESPAWN when the timer fires.
+  _onObstacleDestroyed(e) {
+    if (e.type !== 'barrier') return;
+    if (this.networkManager?.isMultiplayer) return; // server drives respawn
+    const cfg = ARENA.edgeBarriers;
+    if (!cfg || e.edgeIdx == null || e.segIdx == null) return;
+    setTimeout(() => {
+      // Re-check mode at fire time: if the player connected to MP mid-
+      // timer, hand the respawn off to the server to avoid a local
+      // rebuild that the server state doesn't know about.
+      if (this.networkManager?.isMultiplayer) return;
+      // Ensure a car isn't sitting inside the respawn volume — reschedule
+      // if so to avoid dropping a wall on top of someone.
+      const cars = this.carBodies;
+      const R = ARENA.diameter / 2;
+      const sides = 8;
+      const a0 = (e.edgeIdx / sides) * Math.PI * 2 - Math.PI / 8;
+      const a1 = ((e.edgeIdx + 1) / sides) * Math.PI * 2 - Math.PI / 8;
+      const mx = (Math.cos(a0) + Math.cos(a1)) / 2 * R;
+      const mz = (Math.sin(a0) + Math.sin(a1)) / 2 * R;
+      const ex = Math.cos(a1) * R - Math.cos(a0) * R;
+      const ez = Math.sin(a1) * R - Math.sin(a0) * R;
+      const elen = Math.hypot(ex, ez);
+      const frac = (e.segIdx + 0.5) / cfg.segmentsPerEdge - 0.5;
+      const cx = mx + (ex / elen) * elen * frac - mx / Math.hypot(mx, mz) * cfg.inset;
+      const cz = mz + (ez / elen) * elen * frac - mz / Math.hypot(mx, mz) * cfg.inset;
+      const safe = cars.every(cb => {
+        if (cb._isRemote) return true;
+        const ddx = cb.body.position.x - cx;
+        const ddz = cb.body.position.z - cz;
+        return ddx * ddx + ddz * ddz > cfg.respawnSafeDistance * cfg.respawnSafeDistance;
+      });
+      if (!safe) {
+        // Reschedule 2s later
+        setTimeout(() => this._onObstacleDestroyed(e), 2000);
+        return;
+      }
+      this._onBarrierRespawn({ edgeIdx: e.edgeIdx, segIdx: e.segIdx });
+    }, cfg.respawnDelaySec * 1000);
   }
 
   // ── Obstacle hit (stun) ────────────────────────────────────────────
