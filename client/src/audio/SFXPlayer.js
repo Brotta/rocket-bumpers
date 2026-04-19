@@ -93,14 +93,48 @@ class SFXPlayerSingleton {
    * @param {number} [opts.playbackRate=1.0] - Pitch/speed (1.0 = normal)
    */
   play(name, opts = {}) {
-    if (!audioManager.isInitialized) return;
+    // DEBUG: diagnose silent SFX in multiplayer. Logs once per failure
+    // mode so we can see whether the context, bus, or sample loading
+    // is the blocker. Remove once the MP audio bug is understood.
+    if (!this._diagLogged) this._diagLogged = new Set();
+    const diag = (tag, extra) => {
+      if (this._diagLogged.has(tag)) return;
+      this._diagLogged.add(tag);
+      console.warn(`[SFXPlayer] ${tag}`, extra);
+    };
+
+    if (!audioManager.isInitialized) {
+      diag('not-initialized', { name });
+      return;
+    }
 
     const buffer = this._samples.get(name);
-    if (!buffer) return;
+    if (!buffer) {
+      diag('sample-missing:' + name, {
+        name,
+        registeredCount: this._samples.size,
+        sampleNames: [...this._samples.keys()].slice(0, 10),
+      });
+      return;
+    }
 
     const ctx = audioManager.ctx;
     const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
-    if (!ctx || !sfxBus) return;
+    if (!ctx || !sfxBus) {
+      diag('no-ctx-or-bus', { hasCtx: !!ctx, hasBus: !!sfxBus });
+      return;
+    }
+
+    if (!this._diagLogged.has('first-play-ok')) {
+      this._diagLogged.add('first-play-ok');
+      console.info('[SFXPlayer] first play ok', {
+        name,
+        ctxState: ctx.state,
+        sfxBusGain: sfxBus.gain.value,
+        masterGain: audioManager._master?.gain?.value,
+        sampleRate: ctx.sampleRate,
+      });
+    }
 
     // Defensive resume — browsers sometimes auto-suspend the AudioContext
     // after multi-second gaps of no audio activity (e.g. the WebSocket
