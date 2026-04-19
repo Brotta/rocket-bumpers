@@ -3,7 +3,7 @@ import * as CANNON from 'cannon-es';
 import { buildCar, animateWheels } from '../rendering/CarFactory.js';
 import { InterpolationBuffer } from './InterpolationBuffer.js';
 import { unpackFlags } from './protocol.js';
-import { NETWORK, COLLISION_GROUPS, STAT_MAP, CARS } from '../core/Config.js';
+import { NETWORK, COLLISION_GROUPS, STAT_MAP, CARS, DAMAGE, CAR_FEEL } from '../core/Config.js';
 const _snapThresholdSq = NETWORK.snapThreshold * NETWORK.snapThreshold;
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
@@ -102,7 +102,8 @@ export class RemotePlayerManager {
       nickname,
       playerId,
       buffer: new InterpolationBuffer(10, NETWORK.interpolationBuffer),
-      hp: 100,
+      hp: DAMAGE.MAX_HP,
+      maxHp: DAMAGE.MAX_HP,
       isEliminated: false,
       _eliminationEmitted: false,
       _eliminationHandled: false,
@@ -127,6 +128,7 @@ export class RemotePlayerManager {
       _isFalling: false,
       lastHitBy: null,
       maxSpeed: STAT_MAP.speed[carDef.stats.speed] || 20,
+      handling: STAT_MAP.handling[carDef.stats.handling] || 3.5,
       // Flag to distinguish from real CarBody instances
       _isRemote: true,
       // BUG 8 fix: snap only on explicit events (first appearance, respawn).
@@ -412,6 +414,23 @@ export class RemotePlayerManager {
       entry._currentSpeed = state.speed;
       entry._internalVelX = state.velX;
       entry._internalVelZ = state.velZ;
+
+      // Derive a virtual _steerAngle from yaw rate so wheel-steer animation
+      // and tire-smoke FX behave the same as for the local player. Inverse
+      // of CarBody's heading update: yawDelta = steer * speedRatio * sign * dt * 60.
+      const effMax = entry.maxSpeed * entry.speedMultiplier;
+      const speedRatio = Math.min(Math.abs(state.speed) / Math.max(effMax, 1), 1);
+      let virtualSteer = 0;
+      if (speedRatio > 0.05 && visualDt > 0) {
+        const sign = state.speed >= 0 ? 1 : -1;
+        virtualSteer = yawDiff / (speedRatio * sign * visualDt * 60);
+        const steerCap = CAR_FEEL.maxSteerAngle * (entry.driftMode ? CAR_FEEL.driftSteerMultiplier : 1) * 1.2;
+        if (virtualSteer > steerCap) virtualSteer = steerCap;
+        else if (virtualSteer < -steerCap) virtualSteer = -steerCap;
+      }
+      // Smooth toward the derived value to absorb interpolation jitter
+      const steerBlend = Math.min(1, visualDt * 12);
+      entry._steerAngle += (virtualSteer - entry._steerAngle) * steerBlend;
 
       // Update flags
       const flags = unpackFlags(state.flags);

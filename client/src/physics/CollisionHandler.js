@@ -1,4 +1,5 @@
 import {
+  CARS,
   DAMAGE,
   COLLISION_GROUPS,
   PHYSICS,
@@ -47,6 +48,11 @@ export class CollisionHandler {
     // Per-pair damage cooldown: "idA-idB" → timestamp when cooldown expires
     this._pairCooldowns = new Map();
 
+    // Deferred RAM-obstacle destructions (collected during the CANNON step,
+    // drained after the step to avoid mutating the world mid-integration).
+    this._pendingRamObstacles = [];
+    this._pendingRamSeen = new Set();
+
     // Multiplayer: reference to NetworkManager (set by Game.connectMultiplayer)
     this._networkManager = null;
 
@@ -77,6 +83,15 @@ export class CollisionHandler {
 
   update() {
     this._processedPairs.clear();
+
+    // Drain deferred RAM-obstacle destructions collected during the last step.
+    // The listener is responsible for checking the body is still alive.
+    if (this._pendingRamObstacles.length > 0) {
+      const pending = this._pendingRamObstacles;
+      this._pendingRamObstacles = [];
+      this._pendingRamSeen.clear();
+      for (const entry of pending) this._emit('ram-obstacle', entry);
+    }
 
     const carBodies = this.getCarBodies();
 
@@ -182,8 +197,8 @@ export class CollisionHandler {
    * Determine hit tier for VFX feedback based on damage dealt.
    */
   _hitTier(damage) {
-    if (damage >= 30) return 'devastating';
-    if (damage >= 15) return 'heavy';
+    if (damage >= DAMAGE.TIER_DEVASTATING) return 'devastating';
+    if (damage >= DAMAGE.TIER_HEAVY) return 'heavy';
     return 'light';
   }
 
@@ -202,6 +217,19 @@ export class CollisionHandler {
         && !otherPhysBody._isLava && otherPhysBody !== this._floorBody) {
       const contact = event.contact;
       if (!contact) return;
+
+      // RAM mushroom mode: plow through obstacles. No stun, no self-damage,
+      // no "are-you-dumb" SFX — the obstacle is pulverized and the car keeps
+      // its momentum so it can keep mowing through the arena. Defer the
+      // actual destruction to the next collisionHandler.update() so we don't
+      // mutate the world mid-step.
+      if (carBody.hasRam && !carBody._isRemote) {
+        if (!this._pendingRamSeen.has(otherPhysBody.id)) {
+          this._pendingRamSeen.add(otherPhysBody.id);
+          this._pendingRamObstacles.push({ carBody, obstacleBody: otherPhysBody });
+        }
+        return;
+      }
 
       // Remote players: emit VFX only (sparks, stun animation), no local damage
       if (carBody._isRemote) {
@@ -362,10 +390,20 @@ export class CollisionHandler {
     const wasAbilityA = carBody.hasRam;
     const wasAbilityB = otherCar.hasRam;
 
-    // A attacks B (only if A is approaching B)
-    const dmgAtoB = this._calcDamage(carBody, otherCar, approachA);
-    // B attacks A (only if B is approaching A)
-    const dmgBtoA = this._calcDamage(otherCar, carBody, approachB);
+    // RAM mushroom mode:
+    //  - Outgoing: any contact deals MAX_DAMAGE ("ogni hit massimo").
+    //  - Incoming: the RAM car is immune to car-to-car damage (missiles,
+    //    lava, fall etc. route through takeDamage directly, unaffected).
+    const dmgAtoB = wasAbilityA && approachA > 0
+      ? DAMAGE.MAX_DAMAGE
+      : wasAbilityB
+        ? 0
+        : this._calcDamage(carBody, otherCar, approachA);
+    const dmgBtoA = wasAbilityB && approachB > 0
+      ? DAMAGE.MAX_DAMAGE
+      : wasAbilityA
+        ? 0
+        : this._calcDamage(otherCar, carBody, approachB);
 
     const tierAtoB = this._hitTier(dmgAtoB);
     const tierBtoA = this._hitTier(dmgBtoA);
@@ -457,7 +495,8 @@ export class CollisionHandler {
     // ── Emit car-impact event for VFX/SFX (once per collision, uses max damage of the two) ──
     const maxDmg = Math.max(dmgAtoB, dmgBtoA);
     if (maxDmg > 0) {
-      const impactTier = maxDmg >= 30 ? 'devastating' : maxDmg >= 15 ? 'heavy' : 'light';
+      const impactTier = maxDmg >= DAMAGE.TIER_DEVASTATING ? 'devastating'
+        : maxDmg >= DAMAGE.TIER_HEAVY ? 'heavy' : 'light';
       const midX = (carBody.body.position.x + otherCar.body.position.x) * 0.5;
       const midY = (carBody.body.position.y + otherCar.body.position.y) * 0.5;
       const midZ = (carBody.body.position.z + otherCar.body.position.z) * 0.5;
@@ -479,23 +518,25 @@ export class CollisionHandler {
     const sepDist = Math.sqrt(sepX * sepX + sepZ * sepZ) || 1;
     const bnx = sepX / sepDist;
     const bnz = sepZ / sepDist;
-    const bounce = DAMAGE.BOUNCE_IMPULSE;
+    const base = DAMAGE.BOUNCE_IMPULSE;
+    // RAM mushroom mode: victim is hurled much further; the rammer only
+    // feels a normal separation nudge so it keeps its momentum.
+    const ramMul = CARS.RHINO.ability.bounceMultiplier || 4;
+    const bounceA = wasAbilityB ? base * ramMul : base;
+    const bounceB = wasAbilityA ? base * ramMul : base;
 
-    carBody.body.velocity.x += bnx * bounce;
-    carBody.body.velocity.z += bnz * bounce;
-    carBody._internalVelX += bnx * bounce;
-    carBody._internalVelZ += bnz * bounce;
+    carBody.body.velocity.x += bnx * bounceA;
+    carBody.body.velocity.z += bnz * bounceA;
+    carBody._internalVelX += bnx * bounceA;
+    carBody._internalVelZ += bnz * bounceA;
     carBody.body._justBounced = true;
 
     if (!otherCar._isRemote) {
       otherCar.body._justBounced = true;
-    }
-
-    if (!otherCar._isRemote) {
-      otherCar.body.velocity.x -= bnx * bounce;
-      otherCar.body.velocity.z -= bnz * bounce;
-      otherCar._internalVelX -= bnx * bounce;
-      otherCar._internalVelZ -= bnz * bounce;
+      otherCar.body.velocity.x -= bnx * bounceB;
+      otherCar.body.velocity.z -= bnz * bounceB;
+      otherCar._internalVelX -= bnx * bounceB;
+      otherCar._internalVelZ -= bnz * bounceB;
     }
 
     // Check eliminations after both damages are applied (single player only)

@@ -55,10 +55,19 @@ export class BotManager {
       [availableNames[i], availableNames[j]] = [availableNames[j], availableNames[i]];
     }
 
+    // Reserve "littlestjeff1" as one guaranteed bot (exactly one, no suffix).
+    const RESERVED = 'littlestjeff1';
+    const hasReserved = this.bots.some(b => b.carBody.nickname === RESERVED);
+    const namesToUse = [];
+    if (!hasReserved && slotsToFill > 0) namesToUse.push(RESERVED);
+    for (let i = namesToUse.length; i < slotsToFill; i++) {
+      namesToUse.push(availableNames[(i - namesToUse.length) % availableNames.length]);
+    }
+
     const promises = [];
     const startSlot = this.carBodies.length;
     for (let i = 0; i < slotsToFill; i++) {
-      const name = availableNames[i % availableNames.length];
+      const name = namesToUse[i];
       const carType = CAR_KEYS[Math.floor(Math.random() * CAR_KEYS.length)];
       promises.push(this._spawnBot(name, carType, startSlot + i));
     }

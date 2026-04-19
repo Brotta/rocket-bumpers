@@ -63,9 +63,11 @@ export const CARS = {
     stats: { speed: 3, mass: 8, handling: 4 },
     ability: {
       name: 'RAM',
-      description: '2s of infinite mass + slight speed boost',
-      duration: 2,
+      description: '6s mushroom mode: 5× size, infinite mass, destroys obstacles',
+      duration: 6,
       infiniteMass: 999,
+      scale: 5,
+      bounceMultiplier: 4,
       cooldown: 8,
     },
     color: 0x6e7b8b, // Gunmetal Grey
@@ -414,11 +416,11 @@ export const THEME = {
 
 // ── Damage / HP System ──────────────────────────────────────────────
 export const DAMAGE = {
-  BASE_DAMAGE: 8,          // base damage per collision
+  BASE_DAMAGE: 16,         // base damage per collision (doubled — crashes felt too soft)
   REF_SPEED: 15,           // reference relative speed (u/s) — at 15 u/s velocityFactor = 1.0
   MIN_SPEED: 3,            // below this relative speed: zero damage
   MIN_DAMAGE: 2,           // minimum damage if speed threshold is met
-  MAX_DAMAGE: 45,          // cap per single hit (prevents one-shots)
+  MAX_DAMAGE: 80,          // cap per single hit (raised w/ BASE_DAMAGE so big hits can actually land)
 
   // Impact angle multiplier range
   ANGLE_MIN: 0.3,          // glancing blow (90°)
@@ -442,12 +444,13 @@ export const DAMAGE = {
   PULSE_DAMAGE: 8,         // TOAD radial knockback
   LEAP_DAMAGE: 15,         // MAMMOTH landing shockwave
 
-  // Hit tier thresholds (for VFX feedback, not scoring)
-  hitThresholds: {
-    light: 3,              // min relative speed for any damage
-    heavy: 12,             // heavy hit VFX
-    devastating: 25,       // devastating hit VFX
-  },
+  // Hit tier thresholds — measured in DAMAGE points actually applied.
+  // Drives SFX volume, screen shake, hit-freeze, chromatic aberration, and
+  // impact text. Tuned so a max-speed FANG-vs-FANG head-on lands as
+  // 'devastating', a solid mid-speed hit lands as 'heavy', and only weak
+  // glancing taps stay 'light'.
+  TIER_HEAVY: 10,
+  TIER_DEVASTATING: 25,
 
   // Per-pair damage cooldown (prevents continuous damage when pushing)
   PAIR_COOLDOWN: 1.0,      // seconds — same pair can't deal damage again for this long
@@ -854,6 +857,13 @@ export const CAR_FEEL = {
     baseFOV: 40,
     maxFOVBoost: 8,
     fovSmoothing: 4,
+
+    // Gear-shift FOV kick: smooth sinusoidal pulse on upshift.
+    // Shape is sin(phase*π) — symmetric, with zero derivative at both ends, so
+    // there's no perceptible snap on entry or exit. Reads as a "breathing"
+    // zoom-in rather than a punch.
+    gearShiftFOVDrop: 6,        // peak degrees subtracted from FOV at the apex of the pulse
+    gearShiftDuration: 0.5,      // total pulse length (seconds) — peak reached at half this
 
     steerOffsetMax: 2.5,
     steerOffsetSmoothing: 5,

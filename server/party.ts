@@ -30,6 +30,10 @@ interface PlayerData {
   // HOLO_EVADE doesn't reduce damage — instead it gives incoming homing
   // missiles / turret shots a 50% chance to lock onto a decoy (miss).
   hasShield: boolean;
+  // RHINO's RAM "mushroom" mode — reported by the client via the state bit.
+  // While true, the car is immune to car-to-car damage (missiles/hazards
+  // still route through their own damage paths and ignore this flag).
+  hasRam: boolean;
   holoEvadeActive: boolean;
   score: number;
   kills: number;
@@ -541,6 +545,7 @@ export default class RocketBumpersServer implements Party.Server {
       isEliminated: false,
       isInvincible: true, // spawn invincibility
       hasShield: false,
+      hasRam: false,
       holoEvadeActive: false,
       score: 0,
       kills: 0,
@@ -628,6 +633,11 @@ export default class RocketBumpersServer implements Party.Server {
       player.lastStateTime = Date.now();
       // Don't trust client HP — server is authoritative for HP.
       // Only update lastStateTime for stale detection.
+      // Trust hasRam flag so RAM-mushroom immunity applies server-side too
+      // (bots + remote human collisions both route through the server).
+      // Bit layout matches encodePlayerState in protocol.js.
+      const flags = view.getUint8(2 + idLen + 17);
+      player.hasRam = (flags & 0x04) !== 0;
     }
   }
 
@@ -651,6 +661,8 @@ export default class RocketBumpersServer implements Party.Server {
     // Validate
     if (victim.isEliminated || victim.isInvincible) return;
     if (attacker.isEliminated) return;
+    // RAM mushroom mode: victim is immune to car-to-car damage.
+    if (victim.hasRam) return;
     if (typeof approachSpeed !== 'number' || !isFinite(approachSpeed) || approachSpeed < 0) return;
 
     // Use server-authoritative mass — never trust client-provided values
@@ -687,7 +699,8 @@ export default class RocketBumpersServer implements Party.Server {
     const attackerIsBot = attackerId.startsWith('bot_');
     const victimIsBot = targetId.startsWith('bot_');
     if (applied > 0 && (attackerIsBot || victimIsBot)) {
-      const tier = applied >= 30 ? 'devastating' : applied >= 15 ? 'heavy' : 'light';
+      const tier = applied >= GAME.TIER_DEVASTATING ? 'devastating'
+        : applied >= GAME.TIER_HEAVY ? 'heavy' : 'light';
       const snaps = this._buildSnapshots();
       const a = snaps.find(p => p.id === attackerId);
       const v = snaps.find(p => p.id === targetId);
@@ -756,6 +769,7 @@ export default class RocketBumpersServer implements Party.Server {
       player.isEliminated = false;
       player.isInvincible = true;
       player.hasShield = false;
+      player.hasRam = false;
       player.holoEvadeActive = false;
       const sh = this.shieldTimers.get(botId); if (sh) { clearTimeout(sh); this.shieldTimers.delete(botId); }
       const he = this.holoEvadeTimers.get(botId); if (he) { clearTimeout(he); this.holoEvadeTimers.delete(botId); }
@@ -1066,6 +1080,7 @@ export default class RocketBumpersServer implements Party.Server {
     player.isInvincible = true;
     // Clear defensive power-up state so it doesn't persist across death.
     player.hasShield = false;
+    player.hasRam = false;
     player.holoEvadeActive = false;
     const sh = this.shieldTimers.get(sender.id); if (sh) { clearTimeout(sh); this.shieldTimers.delete(sender.id); }
     const he = this.holoEvadeTimers.get(sender.id); if (he) { clearTimeout(he); this.holoEvadeTimers.delete(sender.id); }
@@ -1513,6 +1528,8 @@ export default class RocketBumpersServer implements Party.Server {
         const victim   = botIsAttacker ? this.players.get(target.id) : botPlayer;
         if (!attacker || !victim) continue;
         if (victim.isEliminated || victim.isInvincible) continue;
+        // RAM mushroom mode: victim is immune to car-to-car damage.
+        if (victim.hasRam) continue;
 
         // Pair cooldown (shared with human-reported collisions).
         const idA = attacker.id < victim.id ? attacker.id : victim.id;
@@ -1535,7 +1552,8 @@ export default class RocketBumpersServer implements Party.Server {
         // bodies in the local physics world, so bot↔bot crashes are
         // otherwise silent visually).
         if (dmg > 0) {
-          const tier = dmg >= 30 ? 'devastating' : dmg >= 15 ? 'heavy' : 'light';
+          const tier = dmg >= GAME.TIER_DEVASTATING ? 'devastating'
+            : dmg >= GAME.TIER_HEAVY ? 'heavy' : 'light';
           const midX = (bot.posX + target.posX) * 0.5;
           const midY = (bot.posY + target.posY) * 0.5;
           const midZ = (bot.posZ + target.posZ) * 0.5;
@@ -1862,12 +1880,18 @@ export default class RocketBumpersServer implements Party.Server {
 
   _spawnBot() {
     const names = ['ACE','BLITZ','NOVA','ORBIT','QUASAR','RAZOR','SABER','TITAN','VOLT','ZEPH'];
-    // Pick an unused name
-    let name = names[Math.floor(Math.random() * names.length)];
-    let i = 0;
-    while (this.players.has(`bot_${name}`) && i < 20) {
-      name = names[Math.floor(Math.random() * names.length)] + '_' + (Math.floor(Math.random() * 99));
-      i++;
+    // Reserve "littlestjeff1" as one guaranteed bot (exactly one, no suffix).
+    const RESERVED = 'littlestjeff1';
+    let name: string;
+    if (!this.players.has(`bot_${RESERVED}`)) {
+      name = RESERVED;
+    } else {
+      name = names[Math.floor(Math.random() * names.length)];
+      let i = 0;
+      while (this.players.has(`bot_${name}`) && i < 20) {
+        name = names[Math.floor(Math.random() * names.length)] + '_' + (Math.floor(Math.random() * 99));
+        i++;
+      }
     }
     const botId = `bot_${name}`;
     const carTypes = Object.keys(CAR_STATS);
@@ -1884,6 +1908,7 @@ export default class RocketBumpersServer implements Party.Server {
       isEliminated: false,
       isInvincible: true,
       hasShield: false,
+      hasRam: false,
       holoEvadeActive: false,
       score: 0, kills: 0, deaths: 0, streak: 0, hits: 0,
       lastStateTime: Date.now(),

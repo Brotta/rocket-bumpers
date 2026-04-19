@@ -6,6 +6,7 @@ import { preloadCarModels } from './rendering/CarFactory.js';
 import { menuMusic } from './audio/MenuMusic.js';
 import { arenaMusic } from './audio/ArenaMusic.js';
 import { sampleEngineAudio } from './audio/SampleEngineAudio.js';
+import { sfxPlayer } from './audio/SFXPlayer.js';
 
 // ── URL params detection ─────────────────────────────────────────────
 const urlParams = new URLSearchParams(window.location.search);
@@ -535,6 +536,7 @@ function showStreakNotification(streak, multiplier) {
   streakDiv.textContent = `${multiplier}× KILL STREAK!`;
   streakDiv.style.display = 'block';
   streakDiv.style.opacity = '1';
+  sfxPlayer.play('multi-kill', { priority: 10, volume: 1.0, effect: 'announcer', announcerOverride: true });
   setTimeout(() => {
     streakDiv.style.opacity = '0';
     setTimeout(() => { streakDiv.style.display = 'none'; }, 500);

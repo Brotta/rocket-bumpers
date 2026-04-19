@@ -134,6 +134,11 @@ export class DebugMode {
     // ── Power-up spawner ──
     this._selectedPowerupType = 'RANDOM';
 
+    // ── 99-missile debug mode (per ammo type) ──
+    this._debugAmmoLeft = { MISSILE: 0, HOMING_MISSILE: 0 };
+    this._debugAmmoBtns = { MISSILE: null, HOMING_MISSILE: null };
+    this._debugAmmoListenerInstalled = false;
+
     // ── Audio debug ──
     this._audioDebugActive = false;
     this._audioDebugHUD = null;
@@ -403,6 +408,24 @@ export class DebugMode {
       }
     });
 
+    // ── 99 Missiles ──
+    this._addSection(panel, 'MISSILE DEBUG');
+    for (const ammoType of ['MISSILE', 'HOMING_MISSILE']) {
+      const btn = document.createElement('button');
+      btn.style.cssText = `
+        display:block;width:100%;margin:3px 0;padding:4px 8px;
+        background:#0f02;color:#0f0;border:1px solid #0f04;
+        border-radius:3px;cursor:pointer;font:11px 'Courier New',monospace;
+        text-align:left;
+      `;
+      btn.addEventListener('mouseenter', () => { btn.style.background = '#0f04'; });
+      btn.addEventListener('mouseleave', () => { btn.style.background = '#0f02'; });
+      btn.addEventListener('click', () => this._giveNinetyNineMissiles(ammoType));
+      this._debugAmmoBtns[ammoType] = btn;
+      this._updateMissileBtnLabel(ammoType);
+      panel.appendChild(btn);
+    }
+
     // ── Instant Elimination / Respawn ──
     this._addSection(panel, 'ELIMINATION / RESPAWN');
     this._addButton(panel, 'Eliminate Player', () => {
@@ -667,6 +690,42 @@ export class DebugMode {
       onChange(cb.checked);
     });
     parent.appendChild(row);
+  }
+
+  _updateMissileBtnLabel(type) {
+    const btn = this._debugAmmoBtns[type];
+    if (!btn) return;
+    const n = this._debugAmmoLeft[type];
+    const label = type === 'HOMING_MISSILE' ? 'Homing Missiles' : 'Missiles';
+    btn.textContent = n > 0
+      ? `99 ${label}: ON (${n} left) — click to refill`
+      : `Give 99 ${label} to Player`;
+  }
+
+  _giveNinetyNineMissiles(type = 'MISSILE') {
+    const lp = this.game.localPlayer;
+    const pm = this.game.powerUpManager;
+    if (!lp || !pm) return;
+
+    this._debugAmmoLeft[type] = 99;
+    pm._held.set(lp, type);
+    pm._emit('pickup', { car: lp, type, pedestalIndex: -1 });
+
+    if (!this._debugAmmoListenerInstalled) {
+      pm.on('used', ({ car, type: usedType }) => {
+        if (car !== this.game.localPlayer) return;
+        if (!(usedType in this._debugAmmoLeft)) return;
+        if (this._debugAmmoLeft[usedType] <= 0) return;
+        this._debugAmmoLeft[usedType]--;
+        if (this._debugAmmoLeft[usedType] > 0) {
+          pm._held.set(car, usedType);
+          pm._emit('pickup', { car, type: usedType, pedestalIndex: -1 });
+        }
+        this._updateMissileBtnLabel(usedType);
+      });
+      this._debugAmmoListenerInstalled = true;
+    }
+    this._updateMissileBtnLabel(type);
   }
 
   _addButton(parent, label, onClick) {

@@ -92,7 +92,7 @@ export class BotBrain {
 
     // ── Hit recovery ──
     this._hitRecoveryTimer = 0;
-    this._lastVelocityMag = 0;
+    this._lastProcessedHitTime = 0;
 
     // ── Ground sensing ──
     this._groundAhead = true;
@@ -127,7 +127,7 @@ export class BotBrain {
     this._threatLevel = 0;
     this._combatTimer = 0;
     this._hitRecoveryTimer = 0;
-    this._lastVelocityMag = 0;
+    this._lastProcessedHitTime = 0;
     this._groundAhead = true;
     this._groundLeft = true;
     this._groundRight = true;
@@ -197,25 +197,27 @@ export class BotBrain {
   // ── Collision detection ────────────────────────────────────────────
 
   _detectCollisionHit() {
-    const vel = this.carBody.body.velocity;
-    const curMag = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
-    const delta = Math.abs(curMag - this._lastVelocityMag);
-    this._lastVelocityMag = curMag;
+    if (this._hitRecoveryTimer > 0) return;
 
-    if (delta > 10 && this._hitRecoveryTimer <= 0) {
-      // Recovery time scales with personality — Kamikaze shrugs it off, Defensive freezes longer
-      const baseRecovery = 0.2 + Math.random() * 0.35;
-      this._hitRecoveryTimer = baseRecovery * (1.0 + this.p.evadeThreshold);
-      this.carBody._currentSpeed = curMag * 0.5;
-      this._driveTimer = 0;
+    // Trigger off ACTUAL damage taken, not raw velocity delta. The previous
+    // delta-based check (>10 m/s in one frame) also fired when the bot LANDED
+    // its own ramming attack — the bounce impulse + collision dampening drop
+    // the attacker's velocity sharply. The bot then "stunned" itself on impact,
+    // looking like it braked the instant before hitting the player.
+    const hit = this.carBody.lastHitBy;
+    if (!hit || !hit.source || hit.source === this.carBody) return;
+    if (hit.time === this._lastProcessedHitTime) return;
+    if (performance.now() - hit.time > 200) return; // stale
+    this._lastProcessedHitTime = hit.time;
 
-      // Track who hit us for revenge
-      if (this.carBody.lastHitBy && this.carBody.lastHitBy.source) {
-        this._lastHitBy = this.carBody.lastHitBy.source;
-        this._lastHitTime = performance.now();
-        this._revengeTimer = 6 + Math.random() * 4; // remember for 6-10s
-      }
-    }
+    // Recovery time scales with personality — Kamikaze shrugs it off, Defensive freezes longer
+    const baseRecovery = 0.2 + Math.random() * 0.35;
+    this._hitRecoveryTimer = baseRecovery * (1.0 + this.p.evadeThreshold);
+    this._driveTimer = 0;
+
+    this._lastHitBy = hit.source;
+    this._lastHitTime = performance.now();
+    this._revengeTimer = 6 + Math.random() * 4; // remember for 6-10s
   }
 
   // ── Threat assessment ──────────────────────────────────────────────

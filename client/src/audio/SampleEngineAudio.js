@@ -361,6 +361,14 @@ class SampleEngineAudioManager {
   }
 
   /**
+   * Read-only access to a car's voice (gearSim, profile, etc.).
+   * Returns undefined if the car has no engine entry yet (audio not loaded).
+   */
+  getEngine(carBody) {
+    return this._engines.get(carBody);
+  }
+
+  /**
    * Reset a car's gear simulator (e.g., on respawn).
    */
   resetCar(carBody) {

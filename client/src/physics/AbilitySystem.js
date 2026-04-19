@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { CARS, COLLISION_GROUPS, DAMAGE } from '../core/Config.js';
+import { playRamGrowSFX, playRamShrinkSFX } from '../audio/AbilitySFX.js';
 
 // Reusable objects for leap landing raycast (avoid per-frame allocations)
 const _leapFrom = new CANNON.Vec3();
@@ -109,6 +110,10 @@ export class AbilitySystem {
       this._checkLeapLanding();
     }
 
+    // RAM mushroom grow/shrink animation — runs across active+cooldown so
+    // the shrink can finish after _deactivateRam flips state to 'cooldown'.
+    if (this._ramAnimMode) this._tickRamAnim(dt);
+
     // Trail object lifetime
     this._updateTrailObjects(dt);
   }
@@ -122,6 +127,8 @@ export class AbilitySystem {
     this.isLeaping = false;
     this._wasInAir = false;
     this._trailSpawnTimer = 0;
+    this._ramShapeBackup = null; // CarBody.resetState already restored shape/scale
+    this._ramAnimMode = null;
     this._clearVfx();
   }
 
@@ -250,8 +257,40 @@ export class AbilitySystem {
     this.carBody.hasRam = true;
     // Slight speed boost
     this.carBody.speedMultiplier = 1.2;
-    // VFX: red glow
-    this._setCarColor(0xff2200, 0.8);
+
+    const scale = this.abilityDef.scale || 1;
+
+    if (scale !== 1) {
+      // Fling nearby cars away BEFORE inflating the hitbox, otherwise cars
+      // that were bumper-to-bumper end up trapped inside the mushroom box
+      // and the RAM car can't move.
+      this._ramFlingNearbyCars(scale);
+
+      // Snap the physics hitbox up to full size instantly — the collision
+      // profile is active immediately so the mushroom plows through things
+      // the moment you press the button.
+      const shape = this.carBody.body.shapes[0];
+      this._ramShapeBackup = shape.halfExtents.clone();
+      shape.halfExtents.x *= scale;
+      shape.halfExtents.z *= scale;
+      shape.updateConvexPolyhedronRepresentation?.();
+      shape.updateBoundingSphereRadius?.();
+      this.carBody.body.updateBoundingRadius();
+
+      // Mario-mushroom grow animation: mesh springs from 1× → target with
+      // easeOutBack overshoot + squash/stretch. The hitbox is already big
+      // so visuals catching up over ~0.35 s feels punchy, not laggy.
+      this._ramAnimMode = 'grow';
+      this._ramAnimTime = 0;
+      this._ramAnimDuration = 0.35;
+      this._ramAnimFrom = 1;
+      this._ramAnimTo = scale;
+      this.carBody.mesh.scale.setScalar(1);
+
+      // Synced SFX — spatial so remote RHINOs trigger the same sound.
+      const pos = this.carBody.body.position;
+      playRamGrowSFX(pos.x, pos.z);
+    }
   }
 
   _deactivateRam() {
@@ -259,7 +298,92 @@ export class AbilitySystem {
     this.carBody.body.updateMassProperties();
     this.carBody.hasRam = false;
     this.carBody.speedMultiplier = 1;
-    this._restoreCarColor();
+
+    // Restore the physics hitbox immediately (no reason to keep the
+    // oversized collider around while the mesh shrinks).
+    if (this._ramShapeBackup) {
+      const shape = this.carBody.body.shapes[0];
+      shape.halfExtents.copy(this._ramShapeBackup);
+      shape.updateConvexPolyhedronRepresentation?.();
+      shape.updateBoundingSphereRadius?.();
+      this.carBody.body.updateBoundingRadius();
+      this._ramShapeBackup = null;
+    }
+
+    // Shrink animation — quick pop back to normal size.
+    this._ramAnimMode = 'shrink';
+    this._ramAnimTime = 0;
+    this._ramAnimDuration = 0.2;
+    this._ramAnimFrom = this.carBody.mesh.scale.x || 1;
+    this._ramAnimTo = 1;
+
+    const pos = this.carBody.body.position;
+    playRamShrinkSFX(pos.x, pos.z);
+  }
+
+  /** Push any cars inside the about-to-grow mushroom radius outward. */
+  _ramFlingNearbyCars(scale) {
+    const pos = this.carBody.body.position;
+    // Generous radius: full scaled half-extent plus a small gap so there's
+    // no residual overlap after the hitbox snaps up.
+    const radius = scale * 2.5;
+    const force = 28;
+    const upward = 4;
+    const others = this.getOtherBodies();
+    for (const other of others) {
+      if (!other?.body || other.isEliminated) continue;
+      const dx = other.body.position.x - pos.x;
+      const dz = other.body.position.z - pos.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist >= radius) continue;
+      const falloff = dist < 0.01 ? 1 : 1 - dist / radius;
+      const nx = dist < 0.01 ? (Math.random() * 2 - 1) : dx / dist;
+      const nz = dist < 0.01 ? (Math.random() * 2 - 1) : dz / dist;
+      other.body.velocity.x += nx * force * falloff;
+      other.body.velocity.z += nz * force * falloff;
+      other.body.velocity.y += upward * falloff;
+      if (other._internalVelX !== undefined) {
+        other._internalVelX = other.body.velocity.x;
+        other._internalVelZ = other.body.velocity.z;
+        other._lastSetVelX = other.body.velocity.x;
+        other._lastSetVelZ = other.body.velocity.z;
+      }
+      other.body._justBounced = true;
+    }
+  }
+
+  /** Tick Mario-mushroom grow/shrink animation (runs across active→cooldown). */
+  _tickRamAnim(dt) {
+    if (!this._ramAnimMode) return;
+    this._ramAnimTime += dt;
+    const t = Math.min(this._ramAnimTime / this._ramAnimDuration, 1);
+    const mesh = this.carBody.mesh;
+    if (!mesh) { this._ramAnimMode = null; return; }
+
+    if (this._ramAnimMode === 'grow') {
+      // easeOutBack — overshoot then settle for a classic power-up pop.
+      const c1 = 1.70158;
+      const c3 = c1 + 1;
+      const eased = 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+      const s = this._ramAnimFrom + (this._ramAnimTo - this._ramAnimFrom) * eased;
+      // Squash/stretch: extra Y stretch peaking mid-anim so the car looks
+      // alive while it inflates (standard mushroom squish + rebound).
+      const bulge = Math.sin(t * Math.PI) * 0.18;
+      mesh.scale.set(s * (1 - bulge * 0.35), s * (1 + bulge), s * (1 - bulge * 0.35));
+      if (t >= 1) {
+        mesh.scale.setScalar(this._ramAnimTo);
+        this._ramAnimMode = null;
+      }
+    } else { // 'shrink'
+      // Simple ease-in quad — quick snap back, no overshoot needed.
+      const eased = t * t;
+      const s = this._ramAnimFrom + (this._ramAnimTo - this._ramAnimFrom) * eased;
+      mesh.scale.setScalar(s);
+      if (t >= 1) {
+        mesh.scale.setScalar(this._ramAnimTo);
+        this._ramAnimMode = null;
+      }
+    }
   }
 
   // ── 4. TRAIL (VIPER) ─────────────────────────────────────────────────

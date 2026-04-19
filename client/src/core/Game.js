@@ -22,6 +22,7 @@ import { getAllEngineSampleURLs } from '../audio/AudioConfig.js';
 import { playCollisionSFX, playVictimImpactSFX } from '../audio/CollisionSFX.js';
 import { ImpactText } from '../rendering/ImpactText.js';
 import { announcerSFX } from '../audio/AnnouncerSFX.js';
+import { sfxPlayer } from '../audio/SFXPlayer.js';
 import { DebugMode } from '../debug/DebugMode.js';
 import { ScoreManager } from './ScoreManager.js';
 import { PortalSystem } from './PortalSystem.js';
@@ -161,6 +162,8 @@ export class Game {
     this._currentFOV = CAR_FEEL.camera.baseFOV;
     this._currentSteerOffset = 0;            // smoothed lateral shift
     this._currentCamTilt = 0;                // smoothed roll tilt
+    this._gearShiftTimer = 0;                // remaining seconds of gear-shift envelope
+    this._lastGear = 1;                      // last seen gear of local player (for upshift detection)
 
     // ── Camera shake (from geyser/eruption) ──
     this._cameraShakeIntensity = 0;
@@ -232,6 +235,7 @@ export class Game {
       }
     });
     this.collisionHandler.on('obstacle-hit', (e) => this._onObstacleHit(e));
+    this.collisionHandler.on('ram-obstacle', (e) => this._onRamObstacle(e));
     this.collisionHandler.on('car-impact', (e) => this._onCarImpact(e));
 
     // ── Debug mode ──
@@ -301,6 +305,8 @@ export class Game {
     this._currentFOV = cc.baseFOV;
     this._currentSteerOffset = 0;
     this._currentCamTilt = 0;
+    this._gearShiftTimer = 0;
+    this._lastGear = 1;
 
     // Ability
     const ability = new AbilitySystem(carType, carBody, {
@@ -319,6 +325,17 @@ export class Game {
     audioManager.init();
     await audioManager.preloadAll(getAllEngineSampleURLs());
     announcerSFX.preload(); // fire-and-forget: clips load in background
+    // Announcer voice lines (all processed through the 'announcer' FX chain)
+    sfxPlayer.register('littlejeff', 'assets/sounds/littlejeff.ogg');
+    sfxPlayer.register('crush-the-enemies', 'assets/sounds/crush-the-enemies.ogg');
+    sfxPlayer.register('obliterated', 'assets/sounds/obliterated.ogg');
+    sfxPlayer.register('are-you-dumb', 'assets/sounds/are-you-dumb.ogg');
+    sfxPlayer.register('nuke', 'assets/sounds/nuke.ogg');
+    sfxPlayer.register('explode-mf', 'assets/sounds/explode-mf.ogg');
+    sfxPlayer.register('multi-kill', 'assets/sounds/multi-kill.ogg');
+    // Car crash SFX (no announcer chain — raw crash impacts)
+    sfxPlayer.register('crash-1', 'assets/sounds/crash-1.ogg');
+    sfxPlayer.register('crash-2', 'assets/sounds/crash-2.ogg');
 
     // Fill remaining slots with bots — ONLY in offline play.
     // BUG 0 fix: in multiplayer, bots are simulated by the server. The client
@@ -592,6 +609,11 @@ export class Game {
         this.impactText.show({ word, tier, x, y: y || 1.0, z });
         announcerSFX.play(word);
       }
+      if (word !== 'OBLITERATE') {
+        const clip = Math.random() < 0.5 ? 'crash-1' : 'crash-2';
+        const vol = tier === 'devastating' ? 1.5 : tier === 'heavy' ? 1.28 : 0.83;
+        sfxPlayer.play(clip, { priority: 7, volume: vol, x, z });
+      }
     });
 
     // Server-authoritative elimination
@@ -624,6 +646,9 @@ export class Game {
           remote.hp = 0;
           remote.isEliminated = true;
           remote.mesh.visible = false;
+          if (remote.nickname === 'littlestjeff1') {
+            sfxPlayer.play('littlejeff', { priority: 10, volume: 1.0, effect: 'announcer' });
+          }
         }
       }
     });
@@ -988,6 +1013,11 @@ export class Game {
     const localCarsForOverlap = this.carBodies.filter(cb => !cb._isRemote);
     const overlapHits = this.physicsWorld.enforceObstacleOverlaps(localCarsForOverlap);
     for (const hit of overlapHits) {
+      // RAM mushroom mode: destroy anything we overlap, skip the stun.
+      if (hit.carBody.hasRam) {
+        this._onRamObstacle({ carBody: hit.carBody, obstacleBody: hit.obstacleBody });
+        continue;
+      }
       // Barriers have special behavior: high-speed ram destroys them,
       // softer hits accumulate visual cracks. Everything else falls
       // through to the standard stun pipeline.
@@ -1026,10 +1056,6 @@ export class Game {
         animateWheels(cb.mesh, cb._currentSpeed, frameDt, cb._steerAngle, cb.driftMode);
       }
 
-      // Tire smoke particles (after mesh sync so wheel positions are current)
-      // Filter remote entries — they don't have the tire smoke wheel data
-      this.tireSmokeFX.update(frameDt, this.carBodies.filter(cb => !cb._isRemote));
-
       // Stun visual FX (debris, stars, wobble, flash)
       this.stunFX.update(frameDt);
 
@@ -1045,6 +1071,15 @@ export class Game {
     // already alive the moment we connect — we need to render it immediately.
     if (this.remotePlayerManager) {
       this.remotePlayerManager.interpolateAll(frameDt, alpha, this._lastUnscaledFrameDt || frameDt);
+    }
+
+    if (this.gameState.isPlaying) {
+      // Tire smoke runs AFTER both local syncMesh and remote interpolateAll so
+      // every car's mesh + derived _steerAngle is current. Remote players (and
+      // server-side bots in multiplayer) get a virtual steer angle from yaw
+      // rate inside RemotePlayerManager so they emit smoke on hard turns just
+      // like the local player.
+      this.tireSmokeFX.update(frameDt, this.carBodies);
     }
 
     // Update audio systems (listener position = camera, engine crossfade, voice priorities)
@@ -1144,12 +1179,34 @@ export class Game {
     this._lookAtSmoothed.lerp(this._lookAt, followLerp);
     cam.lookAt(this._lookAtSmoothed);
 
-    // ── FOV: widens at speed for drama ──
+    // ── Gear-shift FOV kick: detect upshift and arm the envelope timer ──
+    const voice = sampleEngineAudio.getEngine(car);
+    if (voice && voice.gearSim) {
+      const g = voice.gearSim.gear;
+      if (g > this._lastGear) {
+        this._gearShiftTimer = cc.gearShiftDuration;
+      }
+      this._lastGear = g;
+    }
+
+    // ── FOV: widens at speed for drama (smoothed) ──
     const targetFOV = cc.baseFOV + cc.maxFOVBoost * speedRatio;
     this._currentFOV += (targetFOV - this._currentFOV)
       * Math.min(1, cc.fovSmoothing * dt);
-    if (Math.abs(cam.fov - this._currentFOV) > 0.05) {
-      cam.fov = this._currentFOV;
+
+    // ── Apply gear-shift envelope on top: symmetric sine pulse ──
+    // sin(π·phase) → zero at endpoints, zero derivative too, so no visible snap.
+    let gearOffset = 0;
+    if (this._gearShiftTimer > 0) {
+      this._gearShiftTimer = Math.max(0, this._gearShiftTimer - dt);
+      const phase = 1 - this._gearShiftTimer / cc.gearShiftDuration; // 0→1
+      const env = Math.sin(phase * Math.PI);                         // 0 → 1 → 0
+      gearOffset = -cc.gearShiftFOVDrop * env;
+    }
+
+    const finalFOV = this._currentFOV + gearOffset;
+    if (Math.abs(cam.fov - finalFOV) > 0.05) {
+      cam.fov = finalFOV;
       cam.updateProjectionMatrix();
     }
 
@@ -1279,6 +1336,13 @@ export class Game {
     });
   }
 
+  // ── RAM mushroom: pulverize any obstacle we touch ──────────────────
+  _onRamObstacle({ obstacleBody }) {
+    if (!obstacleBody) return;
+    const idx = this.physicsWorld.obstacleBodies.indexOf(obstacleBody);
+    if (idx >= 0) this.powerUpManager._destroyObstacle(idx);
+  }
+
   // ── Barrier ram hit (destroys at high speed, cracks at medium) ──────
   //
   // Returns true if the barrier was destroyed (caller should skip the
@@ -1361,6 +1425,8 @@ export class Game {
   // ── Obstacle hit (stun) ────────────────────────────────────────────
 
   _onObstacleHit(e) {
+    // RAM mushroom mode suppresses obstacle stun/FX/SFX — the car plows through.
+    if (e.carBody?.hasRam) return;
     // Visual FX (debris, stars, wobble, flash)
     this.stunFX.onObstacleHit(e);
 
@@ -1380,6 +1446,9 @@ export class Game {
         this.impactText.show({ word, tier: obsTier, x: e.hitX, y: e.hitY || 1.0, z: e.hitZ });
         announcerSFX.play(word);
       }
+    }
+    if (e.carBody === this.localPlayer) {
+      sfxPlayer.play('are-you-dumb', { priority: 9, volume: 1.0, effect: 'announcer' });
     }
   }
 
@@ -1434,12 +1503,25 @@ export class Game {
     }
 
     // ── 6. Comic impact text + announcer ──
+    let _pickedWord = null;
     {
       const word = this._pickImpactWord('car', tier);
       if (word) {
+        _pickedWord = word;
         this.impactText.show({ word, tier, x, y: y || 1.0, z });
         announcerSFX.play(word);
+        if (localInvolved && word === 'OBLITERATE') {
+          sfxPlayer.play('obliterated', { priority: 10, volume: 1.0, effect: 'announcer' });
+        }
       }
+    }
+
+    // Crash SFX: any car-to-car impact, randomly crash-1 or crash-2.
+    // Skip when OBLITERATE appears — that slot is taken by the voice line.
+    if (_pickedWord !== 'OBLITERATE') {
+      const clip = Math.random() < 0.5 ? 'crash-1' : 'crash-2';
+      const vol = tier === 'devastating' ? 1.5 : tier === 'heavy' ? 1.28 : 0.83;
+      sfxPlayer.play(clip, { priority: 7, volume: vol, x, z });
     }
 
     // ── 7. Slowmo (devastating only, after freeze ends) ──
@@ -1544,6 +1626,12 @@ export class Game {
         announcerSFX.play(word);
       }
     }
+
+    if (type === 'HOMING_MISSILE' && isAttacker) {
+      sfxPlayer.play('nuke', { priority: 10, volume: 1.0, effect: 'announcer' });
+    } else if (type === 'MISSILE' && isAttacker) {
+      sfxPlayer.play('explode-mf', { priority: 10, volume: 1.0, effect: 'announcer' });
+    }
   }
 
   // ── Geyser eruption camera shake ───────────────────────────────────
@@ -1587,6 +1675,10 @@ export class Game {
     this._lastEliminationTime = Date.now();
 
     victim._eliminationHandled = true;
+
+    if (victim.nickname === 'littlestjeff1') {
+      sfxPlayer.play('littlejeff', { priority: 10, volume: 1.0, effect: 'announcer' });
+    }
 
     const isLocal = victim === this.localPlayer;
     const isBot = this.botManager.isBot(victim);
@@ -1710,6 +1802,8 @@ export class Game {
     this._currentFOV = cc.baseFOV;
     this._currentSteerOffset = 0;
     this._currentCamTilt = 0;
+    this._gearShiftTimer = 0;
+    this._lastGear = 1;
 
     // Respawn flash
     this._showRespawnFlash();
@@ -1890,6 +1984,7 @@ export class Game {
     // Hide legacy overlays
     if (this._countdownEl) this._countdownEl.style.display = 'none';
     if (this._timerEl) this._timerEl.style.display = 'none';
+    sfxPlayer.play('crush-the-enemies', { priority: 10, volume: 1.0, effect: 'announcer' });
   }
 
   // ── Overlay HUD elements ──────────────────────────────────────────────

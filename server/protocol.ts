@@ -69,14 +69,18 @@ export const GAME = {
   MAX_BOTS: 7,
 
   // Damage formula constants
-  BASE_DAMAGE: 8,
+  BASE_DAMAGE: 16,
   REF_SPEED: 15,
   MIN_SPEED: 3,
   MIN_DAMAGE: 2,
-  MAX_DAMAGE: 45,
+  MAX_DAMAGE: 80,
   ANGLE_MIN: 0.3,
   ANGLE_MAX: 1.0,
   ARMOR_FACTOR: 0.08,
+
+  // Hit tier thresholds — must match client/src/core/Config.js
+  TIER_HEAVY: 10,
+  TIER_DEVASTATING: 25,
 
   // Scoring
   SCORE_KO: 100,

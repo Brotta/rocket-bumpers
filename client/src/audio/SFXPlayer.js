@@ -21,6 +21,26 @@ import { AUDIO_BUS, SPATIAL, PRIORITY } from './AudioConfig.js';
 
 const MAX_ACTIVE_SFX = 16; // max simultaneous one-shot sounds
 
+// ── Announcer FX chain (Quake-style: compressed, present, reverberant) ──
+// All params tuneable from here. Chain: preGain → comp → hiPass → hiShelf
+// → [dry + convolver wet] → SFX bus.
+const ANNOUNCER_FX = {
+  preGain: 1.4,             // boost entering the chain
+  compThreshold: -22,       // dB — push voice forward in the mix
+  compRatio: 8,
+  compAttack: 0.003,
+  compRelease: 0.25,
+  compKnee: 6,
+  hiPassHz: 120,            // cut sub rumble under vocal range
+  hiShelfHz: 3000,          // presence band
+  hiShelfGain: 4,           // dB — brightness, cuts through engines
+  reverbDurationSec: 1.8,   // total IR length
+  reverbDecay: 3.0,         // higher = faster tail decay
+  dryMix: 0.7,
+  wetMix: 0.45,
+  cooldownSec: 1.0,         // min spacing between any two announcer plays
+};
+
 class SFXPlayerSingleton {
   constructor() {
     /** @type {Map<string, AudioBuffer>} name → decoded buffer */
@@ -28,6 +48,10 @@ class SFXPlayerSingleton {
 
     /** @type {Array<ActiveSFX>} currently playing sounds */
     this._active = [];
+
+    // Announcer FX chain (lazy-init on first use)
+    this._anncInput = null;
+    this._anncLastPlayTime = 0;
   }
 
   /**
@@ -77,6 +101,25 @@ class SFXPlayerSingleton {
     const ctx = audioManager.ctx;
     const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
     if (!ctx || !sfxBus) return;
+
+    // Enforce global cooldown on announcer voice lines (Quake-style — no overlap).
+    // `announcerOverride: true` bypasses the cooldown AND stops any in-flight
+    // announcer, so important lines (e.g. multi-kill) always win.
+    if (opts.effect === 'announcer') {
+      const now = ctx.currentTime;
+      if (opts.announcerOverride) {
+        for (let i = this._active.length - 1; i >= 0; i--) {
+          const a = this._active[i];
+          if (!a.isAnnouncer) continue;
+          try { a.source.stop(); } catch (_) {}
+          try { a.gainNode.disconnect(); } catch (_) {}
+          this._active.splice(i, 1);
+        }
+      } else if (now - this._anncLastPlayTime < ANNOUNCER_FX.cooldownSec) {
+        return;
+      }
+      this._anncLastPlayTime = now;
+    }
 
     const {
       priority = 5,
@@ -132,10 +175,15 @@ class SFXPlayerSingleton {
 
     const gainNode = ctx.createGain();
     gainNode.gain.value = volume * spatialGain;
+    source.connect(gainNode);
 
     let lastNode = gainNode;
 
-    if (isSpatial && Math.abs(pan) > 0.01) {
+    if (opts.effect === 'announcer') {
+      // Route through the shared announcer FX chain (lazy-built).
+      gainNode.connect(this._getAnnouncerInput(ctx, sfxBus));
+      lastNode = gainNode;
+    } else if (isSpatial && Math.abs(pan) > 0.01) {
       const panner = ctx.createStereoPanner();
       panner.pan.value = pan;
       gainNode.connect(panner);
@@ -155,10 +203,75 @@ class SFXPlayerSingleton {
       startTime: ctx.currentTime,
       duration: buffer.duration / playbackRate,
       ended: false,
+      isAnnouncer: opts.effect === 'announcer',
     };
 
     source.onended = () => { entry.ended = true; };
     this._active.push(entry);
+  }
+
+  /**
+   * Lazy-build the announcer FX chain and return its input node.
+   * The chain is shared across all clips played with effect: 'announcer'.
+   */
+  _getAnnouncerInput(ctx, sfxBus) {
+    if (this._anncInput) return this._anncInput;
+
+    const cfg = ANNOUNCER_FX;
+    const input = ctx.createGain();
+    input.gain.value = cfg.preGain;
+
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = cfg.compThreshold;
+    comp.ratio.value = cfg.compRatio;
+    comp.attack.value = cfg.compAttack;
+    comp.release.value = cfg.compRelease;
+    comp.knee.value = cfg.compKnee;
+
+    const hiPass = ctx.createBiquadFilter();
+    hiPass.type = 'highpass';
+    hiPass.frequency.value = cfg.hiPassHz;
+
+    const hiShelf = ctx.createBiquadFilter();
+    hiShelf.type = 'highshelf';
+    hiShelf.frequency.value = cfg.hiShelfHz;
+    hiShelf.gain.value = cfg.hiShelfGain;
+
+    const reverb = ctx.createConvolver();
+    reverb.buffer = this._makeReverbIR(ctx, cfg.reverbDurationSec, cfg.reverbDecay);
+
+    const dry = ctx.createGain();
+    dry.gain.value = cfg.dryMix;
+    const wet = ctx.createGain();
+    wet.gain.value = cfg.wetMix;
+
+    // Wiring
+    input.connect(comp);
+    comp.connect(hiPass);
+    hiPass.connect(hiShelf);
+    hiShelf.connect(dry);
+    hiShelf.connect(reverb);
+    reverb.connect(wet);
+    dry.connect(sfxBus);
+    wet.connect(sfxBus);
+
+    this._anncInput = input;
+    return input;
+  }
+
+  /** Synthesize a simple decaying-noise impulse response for convolution reverb. */
+  _makeReverbIR(ctx, durationSec, decay) {
+    const sr = ctx.sampleRate;
+    const length = Math.max(1, Math.floor(sr * durationSec));
+    const ir = ctx.createBuffer(2, length, sr);
+    for (let c = 0; c < 2; c++) {
+      const data = ir.getChannelData(c);
+      for (let i = 0; i < length; i++) {
+        const t = 1 - i / length;
+        data[i] = (Math.random() * 2 - 1) * Math.pow(t, decay);
+      }
+    }
+    return ir;
   }
 
   /**

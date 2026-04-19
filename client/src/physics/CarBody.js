@@ -30,6 +30,7 @@ export class CarBody {
 
     // Physics body — box approximation (2 × 1.2 × 1.2)
     const halfExtents = new CANNON.Vec3(1.0, 0.6, 0.6);
+    this._origHalfExtents = halfExtents.clone();
     this.body = new CANNON.Body({
       mass: this.mass,
       shape: new CANNON.Box(halfExtents),
@@ -168,6 +169,15 @@ export class CarBody {
     this._isFalling = false;
     this.body.mass = this._originalMass;
     this.body.updateMassProperties();
+    // Restore physics hitbox + visual scale (RAM mushroom mode may have resized them)
+    const shape = this.body.shapes[0];
+    if (shape && this._origHalfExtents) {
+      shape.halfExtents.copy(this._origHalfExtents);
+      shape.updateConvexPolyhedronRepresentation?.();
+      shape.updateBoundingSphereRadius?.();
+      this.body.updateBoundingRadius();
+    }
+    this.mesh.scale.set(1, 1, 1);
     this.speedMultiplier = 1;
     this.driftMode = false;
     this.hasShield = false;
@@ -589,8 +599,10 @@ export class CarBody {
     // Keep contact shadow pinned to ground plane
     const cs = this.mesh.userData.contactShadow;
     if (cs) {
-      // Pin shadow to ground: undo car's Y offset (including the -0.55 sink)
-      cs.position.y = 0.02 - this.body.position.y + 0.55;
+      // Pin shadow to ground. Account for the mesh's Y scale so RAM's
+      // mushroom-sized car doesn't push the shadow under the floor.
+      const scaleY = this.mesh.scale.y || 1;
+      cs.position.y = (0.02 - this.body.position.y + 0.55) / scaleY;
 
       // Counter-rotate the shadow plane so it stays world-aligned (flat on ground)
       // The car group has _visualQuat applied — undo pitch/roll but keep yaw irrelevant
