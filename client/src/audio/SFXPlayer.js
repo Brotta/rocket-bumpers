@@ -102,6 +102,17 @@ class SFXPlayerSingleton {
     const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
     if (!ctx || !sfxBus) return;
 
+    // Defensive resume — browsers sometimes auto-suspend the AudioContext
+    // after multi-second gaps of no audio activity (e.g. the WebSocket
+    // handshake between the user's click and gameplay start in MP). Any
+    // scheduled source.start() inside a suspended context is silent, so
+    // we kick it back awake here; the persistent gesture listeners in
+    // AudioManager cover the case where resume() is rejected without a
+    // fresh gesture.
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+
     // Enforce global cooldown on announcer voice lines (Quake-style — no overlap).
     // `announcerOverride: true` bypasses the cooldown AND stops any in-flight
     // announcer, so important lines (e.g. multi-kill) always win.

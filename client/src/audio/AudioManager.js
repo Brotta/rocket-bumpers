@@ -90,29 +90,34 @@ class AudioManagerSingleton {
 
   /**
    * Resume context if suspended. Attaches user-gesture listeners if needed.
+   *
+   * NOTE: listeners are intentionally persistent. In multiplayer the async
+   * WebSocket handshake between the user's click and the first audio
+   * activity can span several seconds; some browsers auto-suspend the
+   * AudioContext during that gap. If we remove the listeners on first
+   * fire (as the previous one-shot version did), the context has no way
+   * to come back until a visibility change — which presents as "no SFX
+   * online, everything fine offline" because the offline path starts
+   * audio immediately after the click with nothing to suspend it.
    */
   _ensureContextRunning() {
     if (!this.ctx) return;
-    if (this.ctx.state === 'running') return;
 
-    // Try immediate resume
-    this.ctx.resume().catch(() => {});
-
-    // Attach one-time gesture listener as fallback
-    if (!this._gestureListenerAttached) {
-      this._gestureListenerAttached = true;
-      const resumeOnGesture = () => {
-        if (this.ctx && this.ctx.state === 'suspended') {
-          this.ctx.resume();
-        }
-        window.removeEventListener('click', resumeOnGesture);
-        window.removeEventListener('keydown', resumeOnGesture);
-        window.removeEventListener('touchstart', resumeOnGesture);
-      };
-      window.addEventListener('click', resumeOnGesture);
-      window.addEventListener('keydown', resumeOnGesture);
-      window.addEventListener('touchstart', resumeOnGesture);
+    // Try immediate resume if suspended
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
     }
+
+    if (this._gestureListenerAttached) return;
+    this._gestureListenerAttached = true;
+    const resumeOnGesture = () => {
+      if (this.ctx && this.ctx.state === 'suspended') {
+        this.ctx.resume().catch(() => {});
+      }
+    };
+    window.addEventListener('click', resumeOnGesture, { passive: true });
+    window.addEventListener('keydown', resumeOnGesture, { passive: true });
+    window.addEventListener('touchstart', resumeOnGesture, { passive: true });
   }
 
   /**
@@ -398,7 +403,19 @@ class AudioManagerSingleton {
    */
   resume() {
     if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume();
+      this.ctx.resume().catch(() => {});
+    }
+  }
+
+  /**
+   * Best-effort ensure the context is running. Safe to call from any
+   * audio-emitting code path — it cheaply no-ops when already running.
+   * Useful as a defensive kick before scheduling one-shot SFX so we
+   * don't emit into a suspended context.
+   */
+  ensureRunning() {
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
     }
   }
 

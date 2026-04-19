@@ -23,6 +23,7 @@ import { COLLISION_IMPACT, MISSILE_IMPACT } from '../core/Config.js';
  */
 export function playCollisionSFX(tier, x, z) {
   if (!audioManager.isInitialized) return;
+  audioManager.ensureRunning();
 
   const ctx = audioManager.ctx;
   const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
@@ -174,6 +175,7 @@ export function playCollisionSFX(tier, x, z) {
  */
 export function playVictimImpactSFX(weaponType) {
   if (!audioManager.isInitialized) return;
+  audioManager.ensureRunning();
 
   const ctx = audioManager.ctx;
   const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);

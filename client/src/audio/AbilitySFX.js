@@ -15,6 +15,8 @@ import { AUDIO_BUS, SPATIAL } from './AudioConfig.js';
 /** Build a spatial master-gain → panner → SFX bus chain. Returns { node, now } or null. */
 function _openSpatialSink(x, z) {
   if (!audioManager.isInitialized) return null;
+  // Kick the context awake if it auto-suspended (MP handshake gap, etc).
+  audioManager.ensureRunning();
   const ctx = audioManager.ctx;
   const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
   if (!ctx || !sfxBus) return null;
