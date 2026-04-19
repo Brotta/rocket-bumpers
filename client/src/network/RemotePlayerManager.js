@@ -4,6 +4,7 @@ import { buildCar, animateWheels } from '../rendering/CarFactory.js';
 import { InterpolationBuffer } from './InterpolationBuffer.js';
 import { unpackFlags } from './protocol.js';
 import { NETWORK, COLLISION_GROUPS, STAT_MAP, CARS, DAMAGE, CAR_FEEL } from '../core/Config.js';
+import { playRamGrowSFX, playRamShrinkSFX } from '../audio/AbilitySFX.js';
 const _snapThresholdSq = NETWORK.snapThreshold * NETWORK.snapThreshold;
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
@@ -437,10 +438,47 @@ export class RemotePlayerManager {
       entry.flags = flags;
       entry.isInvincible = flags.isInvincible;
       entry.hasShield = flags.hasShield;
+      const prevHasRam = entry.hasRam;
       entry.hasRam = flags.hasRam;
       entry._isStunned = flags.isStunned;
       entry.driftMode = flags.driftMode;
       entry.holoEvadeActive = flags.holoEvadeActive;
+
+      // RAM mushroom transitions — remote AbilitySystem doesn't run here,
+      // so we drive the visual scale + SFX off the hasRam flag edges.
+      if (!prevHasRam && entry.hasRam) {
+        entry._ramAnim = { mode: 'grow', t: 0, duration: 0.35, from: 1, to: 5 };
+        playRamGrowSFX(state.posX, state.posZ);
+      } else if (prevHasRam && !entry.hasRam) {
+        const fromScale = entry.mesh.scale.x || 1;
+        entry._ramAnim = { mode: 'shrink', t: 0, duration: 0.2, from: fromScale, to: 1 };
+        playRamShrinkSFX(state.posX, state.posZ);
+      }
+
+      // Tick the mushroom scale animation if active.
+      if (entry._ramAnim) {
+        const a = entry._ramAnim;
+        a.t += visualDt;
+        const t = Math.min(a.t / a.duration, 1);
+        if (a.mode === 'grow') {
+          // easeOutBack (overshoot) + sin-peak squash/stretch — matches
+          // local AbilitySystem._tickRamAnim so both players see the same pop.
+          const c1 = 1.70158;
+          const c3 = c1 + 1;
+          const eased = 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+          const s = a.from + (a.to - a.from) * eased;
+          const bulge = Math.sin(t * Math.PI) * 0.18;
+          entry.mesh.scale.set(s * (1 - bulge * 0.35), s * (1 + bulge), s * (1 - bulge * 0.35));
+        } else {
+          const eased = t * t;
+          const s = a.from + (a.to - a.from) * eased;
+          entry.mesh.scale.setScalar(s);
+        }
+        if (t >= 1) {
+          entry.mesh.scale.setScalar(a.to);
+          entry._ramAnim = null;
+        }
+      }
 
       // Animate wheels
       animateWheels(mesh, state.speed, frameDt, entry._steerAngle, flags.driftMode);
