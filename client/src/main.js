@@ -180,9 +180,25 @@ const PU_DISPLAY = {
   REPAIR_KIT:     { icon: '/assets/icons/RepairKit.png',     label: 'REPAIR' },
   HOLO_EVADE:     { icon: '/assets/icons/HoloEvade.png',     label: 'HOLO' },
   AUTO_TURRET:    { icon: '/assets/icons/Turret.png',        label: 'TURRET' },
+  GLITCH_BOMB:    { icon: '/assets/icons/RetroBomb.png',     label: 'GLITCH' },
 };
 
+// Preload icons so the first pickup of each type doesn't show a blank box
+// while the browser fetches the PNG.
+for (const { icon } of Object.values(PU_DISPLAY)) {
+  if (icon) { const img = new Image(); img.src = icon; }
+}
+
+// flashPowerUpUsed schedules a delayed setPowerUpHud(null). If a new pickup
+// arrives inside that window, the stale timeout would wipe the fresh icon —
+// track and cancel it whenever setPowerUpHud is called again.
+let _puFlashClearTimeout = null;
+let _puBoxScaleTimeout = null;
+
 function setPowerUpHud(type) {
+  if (_puFlashClearTimeout) { clearTimeout(_puFlashClearTimeout); _puFlashClearTimeout = null; }
+  if (_puBoxScaleTimeout) { clearTimeout(_puBoxScaleTimeout); _puBoxScaleTimeout = null; }
+
   if (!type) {
     puBox.style.borderColor = '#553322';
     puBox.style.boxShadow = 'inset 0 2px 8px rgba(0,0,0,0.5), 0 0 8px rgba(0,0,0,0.4)';
@@ -205,13 +221,18 @@ function setPowerUpHud(type) {
   puLabel.style.color = colorHex;
 
   puBox.style.transform = 'scale(1.2)';
-  setTimeout(() => { puBox.style.transform = 'scale(1)'; }, 200);
+  _puBoxScaleTimeout = setTimeout(() => {
+    puBox.style.transform = 'scale(1)';
+    _puBoxScaleTimeout = null;
+  }, 200);
 }
 
 function flashPowerUpUsed() {
+  if (_puFlashClearTimeout) clearTimeout(_puFlashClearTimeout);
   puFlash.style.opacity = '1';
   puBox.style.transform = 'scale(1.15)';
-  setTimeout(() => {
+  _puFlashClearTimeout = setTimeout(() => {
+    _puFlashClearTimeout = null;
     puFlash.style.opacity = '0';
     puBox.style.transform = 'scale(1)';
     setPowerUpHud(null);

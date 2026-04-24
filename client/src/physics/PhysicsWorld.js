@@ -59,13 +59,16 @@ export class PhysicsWorld {
       verts.push(new CANNON.Vec3(Math.cos(a) * radius, -halfThick, Math.sin(a) * radius));
     }
 
+    // Vertices [0..sides) lie on the XZ ring at y=+halfThick with angle
+    // increasing, which traces CW when viewed from +Y in right-handed Y-up.
+    // Cannon-es wants CCW-from-outside, so the top cap is reversed and the
+    // bottom cap (indices [sides..2·sides)) is kept ascending (CCW from -Y).
     const faces = [];
-    faces.push([0, 1, 2, 3, 4, 5, 6, 7]);
-    faces.push([15, 14, 13, 12, 11, 10, 9, 8]);
-    // Side faces — outward-pointing normals (CCW winding viewed from outside)
+    faces.push([7, 6, 5, 4, 3, 2, 1, 0]);
+    faces.push([8, 9, 10, 11, 12, 13, 14, 15]);
     for (let i = 0; i < sides; i++) {
       const next = (i + 1) % sides;
-      faces.push([i, i + sides, next + sides, next]);
+      faces.push([i, next, next + sides, i + sides]);
     }
 
     const shape = new CANNON.ConvexPolyhedron({ vertices: verts, faces });
@@ -97,13 +100,14 @@ export class PhysicsWorld {
       verts.push(new CANNON.Vec3(Math.cos(a) * radius, -halfThick, Math.sin(a) * radius));
     }
 
+    // Top cap reversed (CCW viewed from +Y), bottom cap ascending (CCW viewed
+    // from -Y). Side quads wound [top_i, top_next, bot_next, bot_i].
     const faces = [];
-    faces.push(Array.from({ length: sides }, (_, i) => i));
-    faces.push(Array.from({ length: sides }, (_, i) => sides * 2 - 1 - i));
-    // Side faces — outward-pointing normals (CCW winding viewed from outside)
+    faces.push(Array.from({ length: sides }, (_, i) => sides - 1 - i));
+    faces.push(Array.from({ length: sides }, (_, i) => sides + i));
     for (let i = 0; i < sides; i++) {
       const next = (i + 1) % sides;
-      faces.push([i, i + sides, next + sides, next]);
+      faces.push([i, next, next + sides, i + sides]);
     }
 
     const shape = new CANNON.ConvexPolyhedron({ vertices: verts, faces });
@@ -145,12 +149,11 @@ export class PhysicsWorld {
       }
 
       const faces = [];
-      faces.push(Array.from({ length: sides }, (_, i) => i));
-      faces.push(Array.from({ length: sides }, (_, i) => sides * 2 - 1 - i));
-      // Side faces — outward-pointing normals
+      faces.push(Array.from({ length: sides }, (_, i) => sides - 1 - i));
+      faces.push(Array.from({ length: sides }, (_, i) => sides + i));
       for (let i = 0; i < sides; i++) {
         const next = (i + 1) % sides;
-        faces.push([i, i + sides, next + sides, next]);
+        faces.push([i, next, next + sides, i + sides]);
       }
 
       const shape = new CANNON.ConvexPolyhedron({ vertices: verts, faces });
@@ -192,17 +195,19 @@ export class PhysicsWorld {
       // Bottom cap
       bVerts.push(new CANNON.Vec3(0, -b.radius * 0.4, 0));
 
+      // Equator ring is wound CW viewed from +Y (cos/sin with ascending
+      // angle in right-handed Y-up), so top fan reverses (next, i) to put
+      // the normal outward/upward; bottom fan keeps (i, next) so its
+      // normal faces outward/downward.
       const bFaces = [];
-      // Top fan
       for (let i = 0; i < bSides; i++) {
         const next = (i + 1) % bSides;
-        bFaces.push([0, 1 + i, 1 + next]);
+        bFaces.push([0, 1 + next, 1 + i]);
       }
-      // Bottom fan
       const bottomIdx = 1 + bSides;
       for (let i = 0; i < bSides; i++) {
         const next = (i + 1) % bSides;
-        bFaces.push([bottomIdx, 1 + next, 1 + i]);
+        bFaces.push([bottomIdx, 1 + i, 1 + next]);
       }
 
       const bShape = new CANNON.ConvexPolyhedron({ vertices: bVerts, faces: bFaces });
@@ -231,6 +236,10 @@ export class PhysicsWorld {
 
     const R = ARENA.diameter / 2;
     const sides = 8;
+    // Width is derived from the octagon edge length so N segments tile
+    // the edge with no gaps. cfg.width is ignored for sizing/placement.
+    const edgeLen = 2 * R * Math.sin(Math.PI / sides);
+    const segmentWidth = edgeLen / cfg.segmentsPerEdge;
     for (let edgeIdx = 0; edgeIdx < sides; edgeIdx++) {
       const a0 = (edgeIdx / sides) * Math.PI * 2 - Math.PI / 8;
       const a1 = ((edgeIdx + 1) / sides) * Math.PI * 2 - Math.PI / 8;
@@ -261,7 +270,7 @@ export class PhysicsWorld {
         const config = {
           edgeIdx, segIdx,
           x: cx, z: cz, yaw,
-          width: cfg.width, height: cfg.height, thickness: cfg.thickness,
+          width: segmentWidth, height: cfg.height, thickness: cfg.thickness,
         };
         this._barrierRegistry.set(`${edgeIdx}:${segIdx}`, config);
         this._spawnBarrierBody(config);

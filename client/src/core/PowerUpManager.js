@@ -1677,14 +1677,15 @@ export class PowerUpManager {
       rings.push({ mesh: ring, mat: ringMat });
     }
 
-    // Shield light
-    const shieldLight = new THREE.PointLight(0x00ff88, 1.5, 8);
+    // NOTE: No PointLight here. Adding a new light to the scene forces
+    // Three.js to recompile every lit material (cars, arena, obstacles)
+    // which causes a visible hitch on shield activation. Bloom + emissive
+    // already carry the glow, so the light is redundant.
 
     const shieldGroup = new THREE.Group();
     shieldGroup.add(innerMesh);
     shieldGroup.add(wireMesh);
     for (const r of rings) shieldGroup.add(r.mesh);
-    shieldGroup.add(shieldLight);
     shieldGroup.position.copy(car.body.position);
     this.scene.add(shieldGroup);
 
@@ -1693,7 +1694,7 @@ export class PowerUpManager {
     this._activeShields.push({
       car, group: shieldGroup,
       innerMesh, innerMat, wireMesh, wireMat,
-      rings, light: shieldLight,
+      rings,
       timer: config.duration, gen,
     });
   }
@@ -1732,16 +1733,12 @@ export class PowerUpManager {
       // Pulse wireframe
       s.wireMat.opacity = 0.25 + Math.sin(now * 4) * 0.15;
 
-      // Flicker light
-      s.light.intensity = 1.0 + Math.sin(now * 6) * 0.5;
-
       // Fade out last 1s
       if (s.timer < 1.0) {
         const fade = s.timer;
         s.innerMat.opacity = 0.12 * fade;
         s.wireMat.opacity = (0.25 + Math.sin(now * 4) * 0.15) * fade;
         for (const r of s.rings) r.mat.opacity = 0.6 * fade;
-        s.light.intensity *= fade;
       }
 
       // Slow hex rotation
@@ -1753,7 +1750,6 @@ export class PowerUpManager {
   _removeShield(index) {
     const s = this._activeShields[index];
     this.scene.remove(s.group);
-    s.light.dispose();
     s.innerMat.dispose();
     s.wireMat.dispose();
     for (const r of s.rings) r.mat.dispose();
@@ -1791,28 +1787,27 @@ export class PowerUpManager {
       const vx = -Math.sin(decoyYaw) * decoySpeed;
       const vz = -Math.cos(decoyYaw) * decoySpeed;
 
-      // Clone car mesh (simplified — shallow traverse for performance)
+      // One shared MeshBasicMaterial per decoy, applied to every sub-mesh.
+      // The previous code cloned each of the car's ~10-20 PBR materials
+      // and set needsUpdate = true on every clone, which forced a shader
+      // compile per sub-mesh and caused a visible hitch on activation.
+      // MeshBasicMaterial is unlit (no PBR compile) and clones share a
+      // single shader program, so activation is now effectively free.
+      const decoyMat = new THREE.MeshBasicMaterial({
+        color: 0x00ccff,
+        transparent: true,
+        opacity: config.carOpacity,
+        depthWrite: false,
+      });
+
       const decoyGroup = car.mesh.clone(true);
       decoyGroup.position.set(px, py - 0.55, pz);
       decoyGroup.quaternion.copy(car.mesh.quaternion);
-
-      // Make decoy semi-transparent with cyan tint
       decoyGroup.traverse((child) => {
-        if (child.isMesh && child.material) {
-          const mats = Array.isArray(child.material) ? child.material : [child.material];
-          child.material = mats.map((m) => {
-            const clone = m.clone();
-            clone.transparent = true;
-            clone.opacity = config.carOpacity;
-            if (clone.emissive) clone.emissive.setHex(0x00ccff);
-            if ('emissiveIntensity' in clone) clone.emissiveIntensity = 0.3;
-            clone.depthWrite = false;
-            clone.needsUpdate = true;
-            return clone;
-          });
-          if (!Array.isArray(child.material) || child.material.length === 1) {
-            child.material = child.material[0] || child.material;
-          }
+        if (child.isMesh) {
+          child.material = decoyMat;
+          child.castShadow = false;
+          child.receiveShadow = false;
         }
       });
 
@@ -1830,7 +1825,7 @@ export class PowerUpManager {
       this.scene.add(glow);
 
       decoys.push({
-        group: decoyGroup, glow, glowMat,
+        group: decoyGroup, mat: decoyMat, glow, glowMat,
         x: px, z: pz,
         vx, vz,
         yaw: decoyYaw,
@@ -1917,22 +1912,11 @@ export class PowerUpManager {
 
         if (h.phase === 'fadeout') {
           const fadeT = (h.age - cfg.duration) / cfg.fadeOutTime;
-          const fadeOpacity = cfg.carOpacity * (1 - fadeT) * flicker;
-          d.group.traverse((child) => {
-            if (child.isMesh && child.material) {
-              const mats = Array.isArray(child.material) ? child.material : [child.material];
-              for (const m of mats) { m.opacity = fadeOpacity; }
-            }
-          });
+          d.mat.opacity = cfg.carOpacity * (1 - fadeT) * flicker;
           d.glowMat.opacity = 0.4 * (1 - fadeT);
         } else {
           // Active phase — glitch flicker
-          d.group.traverse((child) => {
-            if (child.isMesh && child.material) {
-              const mats = Array.isArray(child.material) ? child.material : [child.material];
-              for (const m of mats) { m.opacity = cfg.carOpacity * flicker; }
-            }
-          });
+          d.mat.opacity = cfg.carOpacity * flicker;
           d.glowMat.opacity = 0.4 * flicker;
         }
       }
@@ -1956,15 +1940,9 @@ export class PowerUpManager {
 
   _cleanupHoloDecoy(h) {
     for (const d of h.decoys) {
-      // Dispose cloned materials
-      d.group.traverse((child) => {
-        if (child.isMesh && child.material) {
-          const mats = Array.isArray(child.material) ? child.material : [child.material];
-          for (const m of mats) m.dispose();
-        }
-      });
       this.scene.remove(d.group);
       this.scene.remove(d.glow);
+      d.mat.dispose();
       d.glowMat.dispose();
     }
     if (h.flash && h.flash.parent) {

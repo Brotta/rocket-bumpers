@@ -556,6 +556,10 @@ export class ArenaBuilder {
 
     const R = ARENA.diameter / 2;
     const sides = 8;
+    // Width is derived from the octagon edge length so N segments tile
+    // the edge with no gaps. cfg.width is ignored for sizing/placement.
+    const edgeLen = 2 * R * Math.sin(Math.PI / sides);
+    const segmentWidth = edgeLen / cfg.segmentsPerEdge;
 
     // Reuse cached textures from _buildRockObstacles (or load lazily
     // if _buildEdgeBarriers happens to run first).
@@ -580,12 +584,15 @@ export class ArenaBuilder {
     this._barrierCrackEmissive = 0xff4400;
 
     // Shared geometries: main box + crack overlay (slight outward
-    // scale to avoid Z-fighting) + crown rim geometry.
-    const boxGeo = new THREE.BoxGeometry(cfg.width, cfg.height, cfg.thickness);
+    // scale to avoid Z-fighting) + crown rim geometry. Crack/rim
+    // keep the original 1.005/1.02 outward scale but do NOT scale
+    // the width — neighbours share a seam, so overscaling there
+    // would produce visible Z-fighting between adjacent segments.
+    const boxGeo = new THREE.BoxGeometry(segmentWidth, cfg.height, cfg.thickness);
     const crackGeo = new THREE.BoxGeometry(
-      cfg.width * 1.005, cfg.height * 1.005, cfg.thickness * 1.02,
+      segmentWidth, cfg.height * 1.005, cfg.thickness * 1.02,
     );
-    const rimGeo = new THREE.BoxGeometry(cfg.width * 1.02, 0.12, cfg.thickness * 1.25);
+    const rimGeo = new THREE.BoxGeometry(segmentWidth, 0.12, cfg.thickness * 1.25);
 
     const rimMat = new THREE.MeshStandardMaterial({
       color: 0x1a0500,
