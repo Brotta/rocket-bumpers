@@ -44,6 +44,7 @@ export class CollisionImpactFX {
     this._sparkMesh.instanceMatrix.needsUpdate = true;
     this._sparkMatrix = new THREE.Matrix4();
     this._sparkColor = new THREE.Color();
+    this._sparkFadeTargetColor = new THREE.Color(0x331100);
 
     // ── Emissive flash tracking ──
     this._flashingCars = []; // { car, timer, duration, origEmissives[] }
@@ -260,7 +261,7 @@ export class CollisionImpactFX {
 
       // Color: fade from bright to dark orange
       if (s.color) {
-        this._sparkColor.copy(s.color).lerp(new THREE.Color(0x331100), t);
+        this._sparkColor.copy(s.color).lerp(this._sparkFadeTargetColor, t);
         this._sparkMesh.setColorAt(i, this._sparkColor);
       }
 

@@ -222,6 +222,20 @@ class SFXPlayerSingleton {
   }
 
   /**
+   * Eagerly build the announcer FX chain so the first announcer play() does
+   * not pay for synthesizing the ~159K-sample convolver IR inline. Safe to
+   * call once AudioManager.init() has created the context.
+   */
+  warmupAnnouncerChain() {
+    if (this._anncInput) return;
+    if (!audioManager.isInitialized) return;
+    const ctx = audioManager.ctx;
+    const sfxBus = audioManager.getBus(AUDIO_BUS.SFX);
+    if (!ctx || !sfxBus) return;
+    this._getAnnouncerInput(ctx, sfxBus);
+  }
+
+  /**
    * Lazy-build the announcer FX chain and return its input node.
    * The chain is shared across all clips played with effect: 'announcer'.
    */

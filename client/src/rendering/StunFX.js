@@ -51,6 +51,10 @@ export class StunFX {
     // Each active stun gets a set of orbiting star sprites
     this._activeStuns = []; // { carBody, timer, duration, stars: THREE.Group }
 
+    // Reused per-frame scratch array for _getStunnedCars() — avoids a fresh
+    // allocation every frame inside the render loop.
+    this._stunnedScratch = [];
+
     // Star geometry + material (shared)
     this._starGeo = new THREE.PlaneGeometry(
       OBSTACLE_STUN.fx.starSize,
@@ -285,9 +289,11 @@ export class StunFX {
     }
   }
 
-  /** Helper: returns all currently stunned CarBody references from active stuns */
+  /** Helper: returns all currently stunned CarBody references from active stuns.
+   *  Returns a reused scratch array — do not retain the reference. */
   _getStunnedCars() {
-    const cars = [];
+    const cars = this._stunnedScratch;
+    cars.length = 0;
     for (const stun of this._activeStuns) {
       if (stun.carBody._isStunned) cars.push(stun.carBody);
     }

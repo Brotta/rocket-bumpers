@@ -285,6 +285,17 @@ export class Game {
       this._removeCarBody(this.localPlayer);
     }
 
+    // Preload engine samples BEFORE spawning so sampleEngineAudio.addCar()
+    // (called inside _spawnCar) finds the buffers in cache. Otherwise the
+    // local car spawns silent with "sample not loaded" warnings for every
+    // layer of its engine profile.
+    audioManager.init();
+    await audioManager.preloadAll(getAllEngineSampleURLs());
+    // Pre-build the announcer FX chain (compressor + biquads + 159K-sample
+    // convolver IR) now so the first announcer play() during gameplay does
+    // not block the main thread for 20-40 ms on IR synthesis.
+    sfxPlayer.warmupAnnouncerChain();
+
     // Spawn
     const carBody = await this._spawnCar(carType, nickname, 'local');
     this.localPlayer = carBody;
@@ -319,12 +330,6 @@ export class Game {
 
     this._emit('playerSpawned', { carBody, carType });
 
-    // Pre-load engine audio samples while bots are spawning.
-    // Done here (not in start()) because setPlayer is already async and awaited
-    // by the caller — keeping start() synchronous avoids clock/timing issues.
-    audioManager.init();
-    await audioManager.preloadAll(getAllEngineSampleURLs());
-    announcerSFX.preload(); // fire-and-forget: clips load in background
     // Announcer voice lines (all processed through the 'announcer' FX chain)
     sfxPlayer.register('littlejeff', 'assets/sounds/littlejeff.ogg');
     sfxPlayer.register('crush-the-enemies', 'assets/sounds/crush-the-enemies.ogg');
@@ -763,6 +768,90 @@ export class Game {
     if (this._running) return;
     this._running = true;
     this._clock.start();
+
+    // Pre-compile every shader program we can reach before the first frame.
+    // Without this the initial frames stall for 100-400 ms while Three.js
+    // lazily compiles the StandardMaterial / tone-mapping / shadow permutations
+    // used by arena + cars. We also seed the cache with dummy meshes matching
+    // the material classes the AbilitySystem creates at runtime
+    // (BoxGeometry+MeshStandardMaterial and RingGeometry+MeshBasicMaterial):
+    // those spawn the first time the player presses Space, so without the
+    // warmup the keydown handler blocks ~400-500 ms on shader compile.
+    {
+      const { scene, camera, renderer } = this.sceneManager;
+      const warmupMeshes = [];
+
+      const trailWarmup = new THREE.Mesh(
+        new THREE.BoxGeometry(0.5, 0.5, 0.5),
+        new THREE.MeshStandardMaterial({
+          color: 0xff4422,
+          emissive: 0xff2200,
+          emissiveIntensity: 1,
+          transparent: true,
+          opacity: 0.5,
+        }),
+      );
+      trailWarmup.position.set(0, -10000, 0);
+      scene.add(trailWarmup);
+      warmupMeshes.push(trailWarmup);
+
+      const ringWarmup = new THREE.Mesh(
+        new THREE.RingGeometry(0.5, 1.0, 32),
+        new THREE.MeshBasicMaterial({
+          color: 0xffff00,
+          transparent: true,
+          opacity: 0.5,
+          side: THREE.DoubleSide,
+        }),
+      );
+      ringWarmup.position.set(0, -10000, 0);
+      scene.add(ringWarmup);
+      warmupMeshes.push(ringWarmup);
+
+      // Metallic StandardMaterial — missile body/tip, turret base/body/barrel.
+      const metalWarmup = new THREE.Mesh(
+        new THREE.BoxGeometry(0.1, 0.1, 0.1),
+        new THREE.MeshStandardMaterial({
+          color: 0x888888, metalness: 0.8, roughness: 0.2,
+        }),
+      );
+      metalWarmup.position.set(0, -10000, 0);
+      scene.add(metalWarmup);
+      warmupMeshes.push(metalWarmup);
+
+      // Solid (non-transparent) MeshBasicMaterial — debris / shatter chunks.
+      const basicSolidWarmup = new THREE.Mesh(
+        new THREE.BoxGeometry(0.1, 0.1, 0.1),
+        new THREE.MeshBasicMaterial({ color: 0xff6600 }),
+      );
+      basicSolidWarmup.position.set(0, -10000, 0);
+      scene.add(basicSolidWarmup);
+      warmupMeshes.push(basicSolidWarmup);
+
+      // Sprite w/ texture map — glow sprites (pickups, explosions, turret glow).
+      const spriteTex = new THREE.CanvasTexture(document.createElement('canvas'));
+      const spriteWarmup = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: spriteTex, transparent: true, opacity: 0.5,
+      }));
+      spriteWarmup.position.set(0, -10000, 0);
+      scene.add(spriteWarmup);
+      warmupMeshes.push(spriteWarmup);
+
+      // Run the EffectComposer once so UnrealBloom + OutputPass shaders are
+      // compiled before the first real frame (bloom alone compiles 6+ programs
+      // the first time it renders, which is the main source of the initial
+      // 300+ ms rAF spike).
+      this.sceneManager.composer.render();
+
+      renderer.compile(scene, camera);
+
+      for (const m of warmupMeshes) {
+        scene.remove(m);
+        m.geometry.dispose();
+        m.material.dispose();
+      }
+    }
+
     this._animate();
 
     // Resume audio context (may be suspended on mobile until user gesture)
