@@ -1856,14 +1856,29 @@ export class DebugMode {
       this._physicsOverlayMeshes.push(mesh);
     }
 
-    // Obstacle bodies
+    // Obstacle bodies. Barriers are oriented boxes (the real collision is
+    // a rotated-box test against _barrierHalfW/_barrierHalfT) — drawing
+    // them as cylinders of _obstacleRadius would massively over-represent
+    // the hitbox, since that radius is the conservative half-diagonal +
+    // padding used only for the broadphase reject.
+    const barrierH = ARENA.edgeBarriers?.height ?? 1.8;
     for (const ob of pw.obstacleBodies) {
-      const r = ob._obstacleRadius || 2;
-      const geo = new THREE.CylinderGeometry(r, r, 6, 8);
+      let geo;
+      let color = 0xffaa00;
+      if (ob._obstacleType === 'barrier') {
+        geo = new THREE.BoxGeometry(ob._barrierHalfW * 2, barrierH, ob._barrierHalfT * 2);
+        color = 0xff00ff;
+      } else {
+        const r = ob._obstacleRadius || 2;
+        geo = new THREE.CylinderGeometry(r, r, 6, 8);
+      }
       const obMat = mat.clone();
-      obMat.color.set(0xffaa00);
+      obMat.color.set(color);
       const mesh = new THREE.Mesh(geo, obMat);
       mesh.position.copy(ob.position);
+      if (ob._obstacleType === 'barrier') {
+        mesh.rotation.y = ob._barrierYaw;
+      }
       this.scene.add(mesh);
       this._physicsOverlayMeshes.push(mesh);
     }
