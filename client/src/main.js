@@ -241,18 +241,58 @@ function flashPowerUpUsed() {
 
 // ── Leaderboard (left side) ─────────────────────────────────────────
 const leaderboardDiv = document.createElement('div');
-leaderboardDiv.style.cssText = `
-  position:fixed;top:130px;left:16px;
-  color:#fff5e6;font:13px 'Russo One',sans-serif;
-  background:linear-gradient(180deg, rgba(26,14,8,0.88) 0%, rgba(10,6,3,0.92) 100%);
-  border:2px solid rgba(255,102,0,0.25);
-  padding:10px 14px;
-  border-radius:10px;pointer-events:none;z-index:10;
-  display:none;min-width:190px;
-  box-shadow:0 4px 16px rgba(0,0,0,0.4);
-  letter-spacing:0.03em;
-`;
+leaderboardDiv.id = 'leaderboard-hud';
 document.body.appendChild(leaderboardDiv);
+
+const leaderboardStyle = document.createElement('style');
+leaderboardStyle.textContent = `
+  #leaderboard-hud {
+    position: fixed; top: 130px; left: 16px;
+    color: #fff5e6; font: 13px 'Russo One', sans-serif;
+    background: linear-gradient(180deg, rgba(26,14,8,0.88) 0%, rgba(10,6,3,0.92) 100%);
+    border: 2px solid rgba(255,102,0,0.25);
+    padding: 10px 14px;
+    border-radius: 10px; pointer-events: none; z-index: 10;
+    display: none; min-width: 190px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    letter-spacing: 0.03em;
+  }
+  #leaderboard-hud .lb-title {
+    color: #ff8c00; margin-bottom: 6px; letter-spacing: 0.12em;
+    font-family: 'Luckiest Guy', cursive; font-size: 14px;
+  }
+  #leaderboard-hud .lb-row {
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(255,102,0,0.1);
+  }
+  @media (max-width: 768px), (pointer: coarse) {
+    #leaderboard-hud {
+      top: 96px;
+      left: max(8px, env(safe-area-inset-left, 0px));
+      font-size: 10px;
+      padding: 4px 8px;
+      min-width: 0;
+      max-width: 40vw;
+      border-width: 1px;
+      border-radius: 6px;
+    }
+    #leaderboard-hud .lb-title {
+      font-size: 10px;
+      margin-bottom: 2px;
+      letter-spacing: 0.08em;
+    }
+    #leaderboard-hud .lb-row {
+      padding: 1px 0;
+      border-bottom: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* Hide entries beyond top 3 (1st child = title, 2-4 = top 3) */
+    #leaderboard-hud .lb-row:nth-child(n+5) { display: none; }
+  }
+`;
+document.head.appendChild(leaderboardStyle);
 
 // ── RPM Tachometer (bottom-left, Mario Kart style) ─────────────────
 const rpmContainer = document.createElement('div');
@@ -541,14 +581,14 @@ function updateLeaderboard(entries) {
   const top5 = entries.slice(0, 5);
   const localId = game.networkManager?.localPlayerId || 'local';
   const hostId = game.networkManager?.hostId || null;
-  leaderboardDiv.innerHTML = '<div style="color:#ff8c00;margin-bottom:6px;letter-spacing:0.12em;font-family:Luckiest Guy,cursive;font-size:14px;">LEADERBOARD</div>' +
+  leaderboardDiv.innerHTML = '<div class="lb-title">LEADERBOARD</div>' +
     top5.map((e, i) => {
       const isLocal = e.playerId === localId;
       const isHost = hostId && e.playerId === hostId;
       const color = isHost ? '#ff8800' : (isLocal ? '#ffcc00' : (i === 0 ? '#ff8c00' : '#c9a87c'));
       const hostTag = isHost ? ' [H]' : '';
       const streakText = e.streak >= 3 ? ` ${e.streak}x` : '';
-      return `<div style="color:${color};padding:3px 0;border-bottom:1px solid rgba(255,102,0,0.1);">${i + 1}. ${e.nickname}${hostTag} — ${e.score}${streakText}</div>`;
+      return `<div class="lb-row" style="color:${color};">${i + 1}. ${e.nickname}${hostTag} — ${e.score}${streakText}</div>`;
     }).join('');
 }
 
