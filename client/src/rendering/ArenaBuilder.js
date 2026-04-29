@@ -323,7 +323,7 @@ export class ArenaBuilder {
     // Load all animation frames
     for (let i = 0; i < frameCount; i++) {
       const idx = String(i).padStart(4, '0');
-      const tex = texLoader.load(`/assets/textures/fluid_simple/fire_${idx}.png`);
+      const tex = texLoader.load(`/assets/textures/fluid_simple/fire_${idx}.webp`);
       tex.colorSpace = THREE.SRGBColorSpace;
       this._lavaFireFrames.push(tex);
     }

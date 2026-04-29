@@ -54,7 +54,7 @@ export class SplashScreen {
 
       #splash-screen .splash-bg {
         position: absolute; inset: 0;
-        background: url('assets/splash/Background.png') center top / cover no-repeat;
+        background: url('assets/splash/Background.webp') center top / cover no-repeat;
         background-color: #0d0604;
       }
 

@@ -1024,13 +1024,13 @@ export const POWERUPS = {
   REPAIR_KIT: {
     name: 'Repair Kit',
     color: 0x44ff44,        // Bright green
-    icon: '/assets/icons/RepairKit.png',
+    icon: '/assets/icons/RepairKit.webp',
     heal: 30,               // instant HP restored (capped at maxHp)
   },
   HOLO_EVADE: {
     name: 'Holo Evade',
     color: 0x00ccff,        // Cyan
-    icon: '/assets/icons/HoloEvade.png',
+    icon: '/assets/icons/HoloEvade.webp',
     duration: 1.0,          // seconds decoys are active
     fadeOutTime: 0.3,        // seconds for decoys to fade after duration
     decoyCount: 2,           // number of holographic copies
@@ -1042,7 +1042,7 @@ export const POWERUPS = {
   AUTO_TURRET: {
     name: 'Auto Turret',
     color: 0xffaa00,        // Warm orange
-    icon: '/assets/icons/Turret.png',
+    icon: '/assets/icons/Turret.webp',
     duration: 6,            // seconds turret is active
     fireRate: 0.8,          // seconds between shots
     damage: 8,              // per bullet (low but sustained)
@@ -1056,7 +1056,7 @@ export const POWERUPS = {
   GLITCH_BOMB: {
     name: 'Glitch Bomb',
     color: 0x00ff41,        // Matrix green
-    icon: '/assets/icons/RetroBomb.png',
+    icon: '/assets/icons/RetroBomb.webp',
     duration: 5,            // seconds glitch effect lasts on victims
     blastRadius: 18,        // area of effect around detonation (u)
     damage: 10,             // light damage on detonation
